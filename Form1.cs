@@ -128,8 +128,6 @@ namespace SerialMonitorEssential
             {
                 //http://hachisue.blog65.fc2.com/blog-entry-413.html
                 rcvTextBoxScroll.AppendText(data);
-                //rcvTextBox.AppendText(data);
-                //rcvTextBox.AppendText(data);
                 if (rcvTextBox.Focused)
                 {
                     data_queue.Append(data);
@@ -220,7 +218,15 @@ namespace SerialMonitorEssential
                         last_is_newline = false;
                     }
 
-                    Invoke(new Delegate_RcvDataToTextBox(RcvDataToTextBox), new object[] { new_text.ToString() });
+                    if (resizing)
+                    {
+                        resizing_buf.Append(new_text);
+                    }
+                    else
+                    {
+                        Invoke(new Delegate_RcvDataToTextBox(RcvDataToTextBox), new object[] { new_text.ToString() });
+                    }
+
                 }
             }
             catch (Exception ex)
@@ -308,7 +314,6 @@ namespace SerialMonitorEssential
 
         private void connectSerial(bool message=false)
         {
-            //! オープンするシリアルポートをコンボボックスから取り出す.
             serialPort1.PortName = cmbPortName.SelectedItem.ToString();
 
             serialPort1.BaudRate = Convert.ToInt32(cmbBaudRate.SelectedItem);
@@ -321,19 +326,13 @@ namespace SerialMonitorEssential
             serialPort1.StopBits = (StopBits)Enum.Parse(typeof(StopBits), cmbStopBits.SelectedItem.ToString(), true);
             serialPort1.Handshake = (Handshake)Enum.Parse(typeof(Handshake), cmbHandshake.SelectedItem.ToString(), true);
 
-            //! 文字コードをセットする.
-            //serialPort1.Encoding = Encoding.Unicode;
-            //serialPort1.Encoding = System.Text.Encoding.GetEncoding(932);
-
             serialPort1.DtrEnable = checkDtrEnable.Checked;
             serialPort1.RtsEnable = checkRtsEnable.Checked;
 
             try
             {
-                //! シリアルポートをオープンする.
                 serialPort1.Open();
 
-                //! ボタンの表示を[接続]から[切断]に変える.
                 connectButton.Text = "Disconnect";
                 setEnabled(false);
             }
@@ -454,6 +453,7 @@ namespace SerialMonitorEssential
         }
 
         //https://koga2020.hatenablog.com/entry/54275972
+        //https://stackoverflow.com/questions/14522540/close-a-messagebox-after-several-seconds
         public class AutoClosingMessageBox
         {
             int text_max_length = 200; //最大の文字列長の指定
@@ -492,11 +492,32 @@ namespace SerialMonitorEssential
 
         private void checkWrap_CheckedChanged(object sender, EventArgs e)
         {
-            bool needWrap = checkWrap.Checked;
-            rcvTextBox.Clear();
-            rcvTextBoxScroll.Clear();
-            rcvTextBox.WordWrap = needWrap;
-            rcvTextBoxScroll.WordWrap = needWrap;
+            if (rcvTextBoxScroll.TextLength > 4096)
+            {
+                rcvTextBox.Clear();
+                rcvTextBoxScroll.Clear();
+            }
+            rcvTextBox.WordWrap = checkWrap.Checked;
+            rcvTextBoxScroll.WordWrap = checkWrap.Checked;
+        }
+
+        bool resizing=false;
+        StringBuilder resizing_buf = new System.Text.StringBuilder();
+        private void Form1_ResizeBegin(object sender, EventArgs e)
+        {
+            resizing_buf.Clear();
+            resizing =true;
+            if (rcvTextBoxScroll.TextLength > 4096)
+            {
+                rcvTextBox.Clear();
+                rcvTextBoxScroll.Clear();
+            }
+        }
+        private void Form1_ResizeEnd(object sender, EventArgs e)
+        {
+            resizing = false;
+            rcvTextBox.AppendText(resizing_buf.ToString());
+            rcvTextBoxScroll.AppendText(resizing_buf.ToString());
         }
     }
 
