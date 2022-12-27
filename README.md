@@ -4,8 +4,8 @@ Windows用のシリアルモニタです．他のソフトもそれぞれ使い�
 ![](/README/image/window.gif)
 
 ## :sparkles: Features
-|| 再接続  | 送信機能  |  データレート |
-| ---- | ---- | ---- | ---- |
+|| &nbsp;&nbsp;&nbsp;&nbsp;再接続&nbsp;&nbsp;&nbsp;&nbsp;  | &nbsp;&nbsp;送信機能&nbsp;&nbsp;  |  データレート |
+| :--- | :---: | :---: | :---: |
 | Arduino IDE  | :x: | :white_check_mark: | :white_check_mark: |
 | Tera Term  | :white_check_mark: | :x: | :white_check_mark: |
 | Serial Monitor (VS Code Extension)  | :white_check_mark: | :white_check_mark: | :x: |
