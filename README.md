@@ -3,15 +3,16 @@ Windows用のシリアルモニタです．他のソフトもそれぞれ使い�
 
 ![](/README/image/window.gif)
 
+## Features
 || 再接続  | 送信機能  |  データレート |
 | ---- | ---- | ---- | ---- |
 | Arduino IDE  | × | ○ | ○ |
-| TeraTerm  | ○ | × | ○ |
+| Tera Term  | ○ | × | ○ |
 | Serial Monitor (VS Code Extension)  | ○ | ○ | × |
 | **Serial Monitor Essential**  | **○** | **○** | **○** |
 
 * Arduino IDEは再接続に手間がかかる
-* TeraTermは送信用のテキストボックスがない
+* Tera Termは送信用のテキストボックスがない
 * VS CodeのSerial Monitorは多くのデータを受信すると詰まる(≠baudrate)
 
 Serial Monitor Essentialでは他にも様々な機能を実装しています．
@@ -24,16 +25,16 @@ Serial Monitor Essentialでは他にも様々な機能を実装しています�
 * タイムスタンプの切替え
 * 受信データのクリップボードへのコピー，ファイルへの保存
 
-# How to Install
-1. [Release](https://github.com/771-8bit/SerialMonitorEssential/releases)から```SetupSerialMonitorEssential.zip```をダウンロードし，任意のディレクトリに展開．
+## How to Install
+1. [Release](https://github.com/771-8bit/SerialMonitorEssential/releases)から```SetupSerialMonitorEssential.zip```をダウンロードし，任意のディレクトリに展開します．
 ![](/README/image/download.png)
 
-2. ```setup.exe```を実行．
+2. ```setup.exe```を実行します．
 ![](/README/image/setup.png)
 
-3. セットアップウィザードの通りに進める．
+3. セットアップウィザードの通りに進めます．
 ![](/README/image/SetupWizard.png) 
 
-4. インストール完了．プログラムメニューに登録される．
+4. インストールが完了し，プログラムメニューに登録されます．
 ![](/README/image/ProgramMenu.png)
 
