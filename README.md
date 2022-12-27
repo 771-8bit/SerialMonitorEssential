@@ -3,7 +3,7 @@ Windows用のシリアルモニタです．他のソフトもそれぞれ使い�
 
 ![](/README/image/window.gif)
 
-## :cool: Features
+## :sparkles: Features
 || 再接続  | 送信機能  |  データレート |
 | ---- | ---- | ---- | ---- |
 | Arduino IDE  | :x: | :white_check_mark: | :white_check_mark: |
