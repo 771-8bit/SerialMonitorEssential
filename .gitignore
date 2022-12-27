@@ -364,5 +364,6 @@ FodyWeavers.xsd
 
 *.drawio
 secret.txt
+SocialPreview.png
 
 SetupSerialMonitorEssential/
