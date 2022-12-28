@@ -565,7 +565,6 @@ namespace SerialMonitorEssential
             rcvTextBox.AppendText(resizing_buf.ToString());
             rcvTextBoxScroll.AppendText(resizing_buf.ToString());
         }
-
     }
 
     //https://ehbtj.com/info/think-about-improving-performance-of-serial-monitor/

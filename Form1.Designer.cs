@@ -275,7 +275,7 @@
             this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
-            this.rcvTextBox.Size = new System.Drawing.Size(1067, 461);
+            this.rcvTextBox.Size = new System.Drawing.Size(1067, 430);
             this.rcvTextBox.TabIndex = 11;
             this.rcvTextBox.Text = "";
             this.rcvTextBox.WordWrap = false;
@@ -381,7 +381,7 @@
             this.grpRecv.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.grpRecv.Name = "grpRecv";
             this.grpRecv.Padding = new System.Windows.Forms.Padding(6, 8, 6, 8);
-            this.grpRecv.Size = new System.Drawing.Size(1085, 604);
+            this.grpRecv.Size = new System.Drawing.Size(1085, 573);
             this.grpRecv.TabIndex = 2;
             this.grpRecv.TabStop = false;
             this.grpRecv.Text = "Recieve";
@@ -395,7 +395,7 @@
             this.panel1.Controls.Add(this.rcvTextBoxScroll);
             this.panel1.Location = new System.Drawing.Point(9, 42);
             this.panel1.Name = "panel1";
-            this.panel1.Size = new System.Drawing.Size(1067, 461);
+            this.panel1.Size = new System.Drawing.Size(1067, 430);
             this.panel1.TabIndex = 15;
             // 
             // rcvTextBoxScroll
@@ -406,7 +406,7 @@
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";
             this.rcvTextBoxScroll.ReadOnly = true;
             this.rcvTextBoxScroll.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 461);
+            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 430);
             this.rcvTextBoxScroll.TabIndex = 12;
             this.rcvTextBoxScroll.WordWrap = false;
             // 
@@ -414,7 +414,7 @@
             // 
             this.checkWrap.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkWrap.AutoSize = true;
-            this.checkWrap.Location = new System.Drawing.Point(12, 509);
+            this.checkWrap.Location = new System.Drawing.Point(12, 478);
             this.checkWrap.Name = "checkWrap";
             this.checkWrap.Size = new System.Drawing.Size(163, 34);
             this.checkWrap.TabIndex = 14;
@@ -425,7 +425,7 @@
             // btnCopy
             // 
             this.btnCopy.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnCopy.Location = new System.Drawing.Point(765, 544);
+            this.btnCopy.Location = new System.Drawing.Point(765, 513);
             this.btnCopy.Margin = new System.Windows.Forms.Padding(6);
             this.btnCopy.Name = "btnCopy";
             this.btnCopy.Size = new System.Drawing.Size(150, 46);
@@ -438,7 +438,7 @@
             // 
             this.checkCRLF.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkCRLF.AutoSize = true;
-            this.checkCRLF.Location = new System.Drawing.Point(229, 509);
+            this.checkCRLF.Location = new System.Drawing.Point(229, 478);
             this.checkCRLF.Name = "checkCRLF";
             this.checkCRLF.Size = new System.Drawing.Size(214, 34);
             this.checkCRLF.TabIndex = 10;
@@ -449,7 +449,7 @@
             // 
             this.checkNULL.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkNULL.AutoSize = true;
-            this.checkNULL.Location = new System.Drawing.Point(449, 510);
+            this.checkNULL.Location = new System.Drawing.Point(449, 479);
             this.checkNULL.Name = "checkNULL";
             this.checkNULL.Size = new System.Drawing.Size(203, 34);
             this.checkNULL.TabIndex = 9;
@@ -464,7 +464,7 @@
             this.cmbTimestamp.Items.AddRange(new object[] {
             " > ",
             ","});
-            this.cmbTimestamp.Location = new System.Drawing.Point(486, 550);
+            this.cmbTimestamp.Location = new System.Drawing.Point(486, 519);
             this.cmbTimestamp.Name = "cmbTimestamp";
             this.cmbTimestamp.Size = new System.Drawing.Size(71, 38);
             this.cmbTimestamp.TabIndex = 5;
@@ -472,7 +472,7 @@
             // btnSaveRcv
             // 
             this.btnSaveRcv.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnSaveRcv.Location = new System.Drawing.Point(603, 545);
+            this.btnSaveRcv.Location = new System.Drawing.Point(603, 514);
             this.btnSaveRcv.Margin = new System.Windows.Forms.Padding(6);
             this.btnSaveRcv.Name = "btnSaveRcv";
             this.btnSaveRcv.Size = new System.Drawing.Size(150, 46);
@@ -484,7 +484,7 @@
             // btnClearRcv
             // 
             this.btnClearRcv.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnClearRcv.Location = new System.Drawing.Point(923, 544);
+            this.btnClearRcv.Location = new System.Drawing.Point(923, 513);
             this.btnClearRcv.Margin = new System.Windows.Forms.Padding(6);
             this.btnClearRcv.Name = "btnClearRcv";
             this.btnClearRcv.Size = new System.Drawing.Size(150, 46);
@@ -499,7 +499,7 @@
             this.check_timestamp.AutoSize = true;
             this.check_timestamp.Checked = true;
             this.check_timestamp.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.check_timestamp.Location = new System.Drawing.Point(229, 552);
+            this.check_timestamp.Location = new System.Drawing.Point(229, 521);
             this.check_timestamp.Margin = new System.Windows.Forms.Padding(6);
             this.check_timestamp.Name = "check_timestamp";
             this.check_timestamp.Size = new System.Drawing.Size(248, 34);
@@ -514,7 +514,7 @@
             this.autoScroll.AutoSize = true;
             this.autoScroll.Checked = true;
             this.autoScroll.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.autoScroll.Location = new System.Drawing.Point(12, 552);
+            this.autoScroll.Location = new System.Drawing.Point(12, 521);
             this.autoScroll.Margin = new System.Windows.Forms.Padding(6);
             this.autoScroll.Name = "autoScroll";
             this.autoScroll.Size = new System.Drawing.Size(170, 34);
