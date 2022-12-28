@@ -37,7 +37,30 @@ namespace SerialMonitorEssential
 
             setEnabled(true);
         }
-      
+
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            //https://dobon.net/vb/dotnet/programing/mysettings.html
+            Properties.Settings.Default.setting_BaudRate= cmbBaudRate.SelectedIndex;
+            Properties.Settings.Default.setting_Handshake = cmbHandshake.SelectedIndex;
+            Properties.Settings.Default.setting_Enter = checkEnter.Checked;
+            Properties.Settings.Default.setting_reconnect = reconnect.Checked;
+            Properties.Settings.Default.setting_timestamp = check_timestamp.Checked;
+            Properties.Settings.Default.setting_autoScroll = autoScroll.Checked;
+            Properties.Settings.Default.setting_timestamp_string = cmbTimestamp.SelectedIndex;
+            Properties.Settings.Default.setting_NULL=checkNULL.Checked;
+            Properties.Settings.Default.setting_CRLF = checkCRLF.Checked;
+            Properties.Settings.Default.setting_StopBits=cmbStopBits.SelectedIndex;
+            Properties.Settings.Default.setting_DataBits=cmbDataBits.SelectedIndex;
+            Properties.Settings.Default.setting_Parity=cmbParity.SelectedIndex;
+            Properties.Settings.Default.setting_RtsEnable=checkRtsEnable.Checked;
+            Properties.Settings.Default.setting_DtrEnable=checkDtrEnable.Checked;
+            Properties.Settings.Default.setting_Wrap=checkWrap.Checked;
+            Properties.Settings.Default.setting_sendCRLF = cmbCRLF.SelectedIndex;
+
+            Properties.Settings.Default.Save();
+
+        }
         private void Form1_FormClosed(object sender, FormClosedEventArgs e)
         {
             if (serialPort1.IsOpen)
@@ -45,7 +68,7 @@ namespace SerialMonitorEssential
                 serialPort1.Close();
             }
         }
- 
+
         private void connectButton_Click(object sender, EventArgs e)
         {
             if (serialPort1.IsOpen)
@@ -357,21 +380,44 @@ namespace SerialMonitorEssential
             }
 
         }
-        private void initSettings() {            
-            checkDtrEnable.Checked = true;
-            checkRtsEnable.Checked = false;
-
+        private void initSettings() {
             //https://learn.microsoft.com/ja-jp/dotnet/api/system.io.ports.serialport?view=dotnet-plat-ext-7.0
-            cmbDataBits.SelectedIndex= 1;//8bit
-            cmbParity.SelectedIndex = 0;//None
-            cmbStopBits.SelectedIndex = 0;//one
-            cmbHandshake.SelectedIndex = 0;//none
+            cmbBaudRate.SelectedIndex = Properties.Settings.Default.setting_BaudRate;
+            cmbDataBits.SelectedIndex = Properties.Settings.Default.setting_DataBits;
+            cmbParity.SelectedIndex = Properties.Settings.Default.setting_Parity;
+            checkRtsEnable.Checked = Properties.Settings.Default.setting_RtsEnable;
+            checkDtrEnable.Checked = Properties.Settings.Default.setting_DtrEnable;
+            cmbStopBits.SelectedIndex = Properties.Settings.Default.setting_StopBits;
+            cmbHandshake.SelectedIndex = Properties.Settings.Default.setting_Handshake;
 
-            cmbTimestamp.SelectedIndex = 0;
-            cmbBaudRate.SelectedIndex = 5;//115200
-            cmbCRLF.SelectedIndex = 0;//no CRLF
+            reconnect.Checked = Properties.Settings.Default.setting_reconnect;
+
+            cmbCRLF.SelectedIndex = Properties.Settings.Default.setting_sendCRLF;
+            checkEnter.Checked= Properties.Settings.Default.setting_Enter;
+
+            checkWrap.Checked = Properties.Settings.Default.setting_Wrap;
+            checkCRLF.Checked = Properties.Settings.Default.setting_CRLF;
+            checkNULL.Checked = Properties.Settings.Default.setting_NULL;
+            autoScroll.Checked = Properties.Settings.Default.setting_autoScroll;
+            check_timestamp.Checked = Properties.Settings.Default.setting_timestamp;
+            cmbTimestamp.SelectedIndex = Properties.Settings.Default.setting_timestamp_string;
+
+            serialPort1.RtsEnable = checkRtsEnable.Checked;
+            serialPort1.DtrEnable= checkDtrEnable.Checked;
 
             sndTextBox.AcceptsReturn = !checkEnter.Checked;
+
+
+            rcvTextBox.WordWrap = checkWrap.Checked;
+            rcvTextBoxScroll.WordWrap = checkWrap.Checked;
+            if (autoScroll.Checked)
+            {
+                rcvTextBoxScroll.BringToFront();
+            }
+            else
+            {
+                rcvTextBox.BringToFront();
+            }
         }
 
         private void checkDtrEnable_CheckedChanged(object sender, EventArgs e)
@@ -519,6 +565,7 @@ namespace SerialMonitorEssential
             rcvTextBox.AppendText(resizing_buf.ToString());
             rcvTextBoxScroll.AppendText(resizing_buf.ToString());
         }
+
     }
 
     //https://ehbtj.com/info/think-about-improving-performance-of-serial-monitor/

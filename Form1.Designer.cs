@@ -46,11 +46,13 @@
             this.connectButton = new System.Windows.Forms.Button();
             this.rcvTextBox = new System.Windows.Forms.RichTextBox();
             this.grpSend = new System.Windows.Forms.GroupBox();
+            this.panel2 = new System.Windows.Forms.Panel();
+            this.sndTextBox = new System.Windows.Forms.TextBox();
             this.cmbCRLF = new System.Windows.Forms.ComboBox();
             this.checkEnter = new System.Windows.Forms.CheckBox();
             this.btnSend = new System.Windows.Forms.Button();
-            this.sndTextBox = new System.Windows.Forms.TextBox();
             this.grpRecv = new System.Windows.Forms.GroupBox();
+            this.panel1 = new System.Windows.Forms.Panel();
             this.rcvTextBoxScroll = new System.Windows.Forms.TextBox();
             this.checkWrap = new System.Windows.Forms.CheckBox();
             this.btnCopy = new System.Windows.Forms.Button();
@@ -68,7 +70,9 @@
             this.grpSetting.SuspendLayout();
             this.groupBox1.SuspendLayout();
             this.grpSend.SuspendLayout();
+            this.panel2.SuspendLayout();
             this.grpRecv.SuspendLayout();
+            this.panel1.SuspendLayout();
             this.SuspendLayout();
             // 
             // serialPort1
@@ -267,13 +271,11 @@
             // 
             // rcvTextBox
             // 
-            this.rcvTextBox.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
-            | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-            this.rcvTextBox.Location = new System.Drawing.Point(9, 42);
+            this.rcvTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
-            this.rcvTextBox.Size = new System.Drawing.Size(1064, 461);
+            this.rcvTextBox.Size = new System.Drawing.Size(1067, 461);
             this.rcvTextBox.TabIndex = 11;
             this.rcvTextBox.Text = "";
             this.rcvTextBox.WordWrap = false;
@@ -282,10 +284,10 @@
             // 
             this.grpSend.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.grpSend.Controls.Add(this.panel2);
             this.grpSend.Controls.Add(this.cmbCRLF);
             this.grpSend.Controls.Add(this.checkEnter);
             this.grpSend.Controls.Add(this.btnSend);
-            this.grpSend.Controls.Add(this.sndTextBox);
             this.grpSend.Location = new System.Drawing.Point(28, 249);
             this.grpSend.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.grpSend.Name = "grpSend";
@@ -294,6 +296,28 @@
             this.grpSend.TabIndex = 1;
             this.grpSend.TabStop = false;
             this.grpSend.Text = "Send";
+            // 
+            // panel2
+            // 
+            this.panel2.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.panel2.Controls.Add(this.sndTextBox);
+            this.panel2.Location = new System.Drawing.Point(9, 42);
+            this.panel2.Name = "panel2";
+            this.panel2.Size = new System.Drawing.Size(814, 157);
+            this.panel2.TabIndex = 8;
+            // 
+            // sndTextBox
+            // 
+            this.sndTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.sndTextBox.Location = new System.Drawing.Point(0, 0);
+            this.sndTextBox.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
+            this.sndTextBox.Multiline = true;
+            this.sndTextBox.Name = "sndTextBox";
+            this.sndTextBox.Size = new System.Drawing.Size(814, 157);
+            this.sndTextBox.TabIndex = 0;
+            this.sndTextBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.sndTextBox_KeyDown);
             // 
             // cmbCRLF
             // 
@@ -338,25 +362,12 @@
             this.btnSend.UseVisualStyleBackColor = true;
             this.btnSend.Click += new System.EventHandler(this.btnSend_Click);
             // 
-            // sndTextBox
-            // 
-            this.sndTextBox.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-            this.sndTextBox.Location = new System.Drawing.Point(12, 47);
-            this.sndTextBox.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
-            this.sndTextBox.Multiline = true;
-            this.sndTextBox.Name = "sndTextBox";
-            this.sndTextBox.Size = new System.Drawing.Size(808, 150);
-            this.sndTextBox.TabIndex = 0;
-            this.sndTextBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.sndTextBox_KeyDown);
-            // 
             // grpRecv
             // 
             this.grpRecv.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.grpRecv.Controls.Add(this.rcvTextBoxScroll);
-            this.grpRecv.Controls.Add(this.rcvTextBox);
+            this.grpRecv.Controls.Add(this.panel1);
             this.grpRecv.Controls.Add(this.checkWrap);
             this.grpRecv.Controls.Add(this.btnCopy);
             this.grpRecv.Controls.Add(this.checkCRLF);
@@ -375,17 +386,27 @@
             this.grpRecv.TabStop = false;
             this.grpRecv.Text = "Recieve";
             // 
-            // rcvTextBoxScroll
+            // panel1
             // 
-            this.rcvTextBoxScroll.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            this.panel1.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.rcvTextBoxScroll.Location = new System.Drawing.Point(9, 42);
+            this.panel1.Controls.Add(this.rcvTextBox);
+            this.panel1.Controls.Add(this.rcvTextBoxScroll);
+            this.panel1.Location = new System.Drawing.Point(9, 42);
+            this.panel1.Name = "panel1";
+            this.panel1.Size = new System.Drawing.Size(1067, 461);
+            this.panel1.TabIndex = 15;
+            // 
+            // rcvTextBoxScroll
+            // 
+            this.rcvTextBoxScroll.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.rcvTextBoxScroll.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBoxScroll.Multiline = true;
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";
             this.rcvTextBoxScroll.ReadOnly = true;
             this.rcvTextBoxScroll.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1064, 461);
+            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 461);
             this.rcvTextBoxScroll.TabIndex = 12;
             this.rcvTextBoxScroll.WordWrap = false;
             // 
@@ -542,6 +563,7 @@
             this.Name = "Form1";
             this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
             this.Text = "Serial Monitor Essential";
+            this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.Form1_FormClosing);
             this.FormClosed += new System.Windows.Forms.FormClosedEventHandler(this.Form1_FormClosed);
             this.Load += new System.EventHandler(this.Form1_Load);
             this.ResizeBegin += new System.EventHandler(this.Form1_ResizeBegin);
@@ -552,8 +574,12 @@
             this.groupBox1.PerformLayout();
             this.grpSend.ResumeLayout(false);
             this.grpSend.PerformLayout();
+            this.panel2.ResumeLayout(false);
+            this.panel2.PerformLayout();
             this.grpRecv.ResumeLayout(false);
             this.grpRecv.PerformLayout();
+            this.panel1.ResumeLayout(false);
+            this.panel1.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -595,6 +621,8 @@
         private System.Windows.Forms.TextBox rcvTextBoxScroll;
         private System.Windows.Forms.Button btnCopy;
         private System.Windows.Forms.CheckBox checkWrap;
+        private System.Windows.Forms.Panel panel2;
+        private System.Windows.Forms.Panel panel1;
     }
 }
 
