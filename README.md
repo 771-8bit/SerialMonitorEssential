@@ -24,6 +24,7 @@ Serial Monitor Essentialでは他にも様々な機能を実装しています�
 * 自動スクロールの切替え
 * タイムスタンプの切替え
 * 受信データのクリップボードへのコピー，ファイルへの保存
+* 各種設定の保存
 
 ## :arrow_down: How to Install
 1. [Release](https://github.com/771-8bit/SerialMonitorEssential/releases)から```SetupSerialMonitorEssential.zip```をダウンロードし，任意のディレクトリに展開します．
