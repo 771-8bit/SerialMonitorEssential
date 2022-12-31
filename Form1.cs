@@ -57,6 +57,7 @@ namespace SerialMonitorEssential
             Properties.Settings.Default.setting_DtrEnable=checkDtrEnable.Checked;
             Properties.Settings.Default.setting_Wrap=checkWrap.Checked;
             Properties.Settings.Default.setting_sendCRLF = cmbCRLF.SelectedIndex;
+            Properties.Settings.Default.setting_note = textNote.Text;
 
             Properties.Settings.Default.Save();
 
@@ -166,6 +167,7 @@ namespace SerialMonitorEssential
         }
 
         bool last_is_newline=false;
+        bool first_timestamp = false;
         private void timer1_Tick(object sender, EventArgs e)
         {
             //https://atmarkit.itmedia.co.jp/ait/articles/0511/11/news117.html
@@ -190,9 +192,10 @@ namespace SerialMonitorEssential
                     StringBuilder new_text = new System.Text.StringBuilder();
                     String timestamp = String.Format("{0:HH:mm:ss.f}{1}", FastDateTime.Now, cmbTimestamp.SelectedItem.ToString());
 
-                    if (last_is_newline && check_timestamp.Checked)
+                    if ((first_timestamp||last_is_newline) && check_timestamp.Checked)
                     {
                         new_text.Append(timestamp);
+                        first_timestamp = false;
                     }
 
                     new_text.Append(rawdata);
@@ -332,6 +335,7 @@ namespace SerialMonitorEssential
         {
             //https://learn.microsoft.com/ja-jp/dotnet/api/system.windows.forms.control.enabled?view=windowsdesktop-7.0
             cmbTimestamp.Enabled=check_timestamp.Checked;
+            first_timestamp = check_timestamp.Checked;
         }
 
 
@@ -401,13 +405,19 @@ namespace SerialMonitorEssential
             autoScroll.Checked = Properties.Settings.Default.setting_autoScroll;
             check_timestamp.Checked = Properties.Settings.Default.setting_timestamp;
             cmbTimestamp.SelectedIndex = Properties.Settings.Default.setting_timestamp_string;
+            cmbTimestamp.Enabled = check_timestamp.Checked;
+
+            first_timestamp = check_timestamp.Checked;
+
+            textNote.Text = Properties.Settings.Default.setting_note;
 
             serialPort1.RtsEnable = checkRtsEnable.Checked;
             serialPort1.DtrEnable= checkDtrEnable.Checked;
 
             sndTextBox.AcceptsReturn = !checkEnter.Checked;
 
-
+            //http://my-notepad.jugem.jp/?eid=8
+            rcvTextBox.LanguageOption = RichTextBoxLanguageOptions.UIFonts;
             rcvTextBox.WordWrap = checkWrap.Checked;
             rcvTextBoxScroll.WordWrap = checkWrap.Checked;
             if (autoScroll.Checked)

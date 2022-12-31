@@ -214,5 +214,17 @@ namespace SerialMonitorEssential.Properties {
                 this["setting_sendCRLF"] = value;
             }
         }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("User\'s Note")]
+        public string setting_note {
+            get {
+                return ((string)(this["setting_note"]));
+            }
+            set {
+                this["setting_note"] = value;
+            }
+        }
     }
 }

@@ -52,6 +52,7 @@
             this.checkEnter = new System.Windows.Forms.CheckBox();
             this.btnSend = new System.Windows.Forms.Button();
             this.grpRecv = new System.Windows.Forms.GroupBox();
+            this.textNote = new System.Windows.Forms.TextBox();
             this.panel1 = new System.Windows.Forms.Panel();
             this.rcvTextBoxScroll = new System.Windows.Forms.TextBox();
             this.checkWrap = new System.Windows.Forms.CheckBox();
@@ -272,10 +273,11 @@
             // rcvTextBox
             // 
             this.rcvTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.rcvTextBox.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
             this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
-            this.rcvTextBox.Size = new System.Drawing.Size(1067, 430);
+            this.rcvTextBox.Size = new System.Drawing.Size(1067, 382);
             this.rcvTextBox.TabIndex = 11;
             this.rcvTextBox.Text = "";
             this.rcvTextBox.WordWrap = false;
@@ -311,6 +313,7 @@
             // sndTextBox
             // 
             this.sndTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.sndTextBox.Font = new System.Drawing.Font("Ricty Diminished", 16F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
             this.sndTextBox.Location = new System.Drawing.Point(0, 0);
             this.sndTextBox.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.sndTextBox.Multiline = true;
@@ -367,6 +370,7 @@
             this.grpRecv.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.grpRecv.Controls.Add(this.textNote);
             this.grpRecv.Controls.Add(this.panel1);
             this.grpRecv.Controls.Add(this.checkWrap);
             this.grpRecv.Controls.Add(this.btnCopy);
@@ -386,6 +390,18 @@
             this.grpRecv.TabStop = false;
             this.grpRecv.Text = "Recieve";
             // 
+            // textNote
+            // 
+            this.textNote.AcceptsTab = true;
+            this.textNote.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.textNote.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
+            this.textNote.Location = new System.Drawing.Point(10, 43);
+            this.textNote.Multiline = true;
+            this.textNote.Name = "textNote";
+            this.textNote.Size = new System.Drawing.Size(1066, 41);
+            this.textNote.TabIndex = 16;
+            // 
             // panel1
             // 
             this.panel1.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
@@ -393,20 +409,21 @@
             | System.Windows.Forms.AnchorStyles.Right)));
             this.panel1.Controls.Add(this.rcvTextBox);
             this.panel1.Controls.Add(this.rcvTextBoxScroll);
-            this.panel1.Location = new System.Drawing.Point(9, 42);
+            this.panel1.Location = new System.Drawing.Point(9, 90);
             this.panel1.Name = "panel1";
-            this.panel1.Size = new System.Drawing.Size(1067, 430);
+            this.panel1.Size = new System.Drawing.Size(1067, 382);
             this.panel1.TabIndex = 15;
             // 
             // rcvTextBoxScroll
             // 
             this.rcvTextBoxScroll.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.rcvTextBoxScroll.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.rcvTextBoxScroll.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBoxScroll.Multiline = true;
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";
             this.rcvTextBoxScroll.ReadOnly = true;
             this.rcvTextBoxScroll.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 430);
+            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 382);
             this.rcvTextBoxScroll.TabIndex = 12;
             this.rcvTextBoxScroll.WordWrap = false;
             // 
@@ -623,6 +640,7 @@
         private System.Windows.Forms.CheckBox checkWrap;
         private System.Windows.Forms.Panel panel2;
         private System.Windows.Forms.Panel panel1;
+        private System.Windows.Forms.TextBox textNote;
     }
 }
 

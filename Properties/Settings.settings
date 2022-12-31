@@ -50,5 +50,8 @@
     <Setting Name="setting_sendCRLF" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">0</Value>
     </Setting>
+    <Setting Name="setting_note" Type="System.String" Scope="User">
+      <Value Profile="(Default)">User's Note</Value>
+    </Setting>
   </Settings>
 </SettingsFile>
