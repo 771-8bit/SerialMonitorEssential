@@ -408,6 +408,13 @@ namespace SerialMonitorEssential
 
         }
         private void initSettings() {
+            //https://se-naruhodo.com/paramsettings/
+            if (Properties.Settings.Default.setting_first)
+            {
+                Properties.Settings.Default.Upgrade();
+                Properties.Settings.Default.setting_first = false;
+            }
+
             //https://learn.microsoft.com/ja-jp/dotnet/api/system.io.ports.serialport?view=dotnet-plat-ext-7.0
             cmbBaudRate.SelectedIndex = Properties.Settings.Default.setting_BaudRate;
             cmbDataBits.SelectedIndex = Properties.Settings.Default.setting_DataBits;

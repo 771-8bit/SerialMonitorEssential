@@ -226,5 +226,17 @@ namespace SerialMonitorEssential.Properties {
                 this["setting_note"] = value;
             }
         }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("True")]
+        public bool setting_first {
+            get {
+                return ((bool)(this["setting_first"]));
+            }
+            set {
+                this["setting_first"] = value;
+            }
+        }
     }
 }

@@ -53,5 +53,8 @@
     <Setting Name="setting_note" Type="System.String" Scope="User">
       <Value Profile="(Default)">User's Note</Value>
     </Setting>
+    <Setting Name="setting_first" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">True</Value>
+    </Setting>
   </Settings>
 </SettingsFile>
