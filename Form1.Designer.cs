@@ -68,12 +68,14 @@
             this.contextMenuStrip2 = new System.Windows.Forms.ContextMenuStrip(this.components);
             this.timer1 = new System.Windows.Forms.Timer(this.components);
             this.timerReconnect = new System.Windows.Forms.Timer(this.components);
+            this.panel3 = new System.Windows.Forms.Panel();
             this.grpSetting.SuspendLayout();
             this.groupBox1.SuspendLayout();
             this.grpSend.SuspendLayout();
             this.panel2.SuspendLayout();
             this.grpRecv.SuspendLayout();
             this.panel1.SuspendLayout();
+            this.panel3.SuspendLayout();
             this.SuspendLayout();
             // 
             // serialPort1
@@ -276,7 +278,7 @@
             this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
-            this.rcvTextBox.Size = new System.Drawing.Size(1067, 382);
+            this.rcvTextBox.Size = new System.Drawing.Size(1067, 383);
             this.rcvTextBox.TabIndex = 11;
             this.rcvTextBox.Text = "";
             this.rcvTextBox.WordWrap = false;
@@ -368,7 +370,7 @@
             this.grpRecv.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.grpRecv.Controls.Add(this.textNote);
+            this.grpRecv.Controls.Add(this.panel3);
             this.grpRecv.Controls.Add(this.panel1);
             this.grpRecv.Controls.Add(this.checkWrap);
             this.grpRecv.Controls.Add(this.btnCopy);
@@ -391,12 +393,11 @@
             // textNote
             // 
             this.textNote.AcceptsTab = true;
-            this.textNote.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-            this.textNote.Location = new System.Drawing.Point(10, 43);
+            this.textNote.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.textNote.Location = new System.Drawing.Point(0, 0);
             this.textNote.Multiline = true;
             this.textNote.Name = "textNote";
-            this.textNote.Size = new System.Drawing.Size(1066, 41);
+            this.textNote.Size = new System.Drawing.Size(1067, 41);
             this.textNote.TabIndex = 16;
             // 
             // panel1
@@ -406,9 +407,9 @@
             | System.Windows.Forms.AnchorStyles.Right)));
             this.panel1.Controls.Add(this.rcvTextBox);
             this.panel1.Controls.Add(this.rcvTextBoxScroll);
-            this.panel1.Location = new System.Drawing.Point(9, 90);
+            this.panel1.Location = new System.Drawing.Point(9, 89);
             this.panel1.Name = "panel1";
-            this.panel1.Size = new System.Drawing.Size(1067, 382);
+            this.panel1.Size = new System.Drawing.Size(1067, 383);
             this.panel1.TabIndex = 15;
             // 
             // rcvTextBoxScroll
@@ -419,7 +420,7 @@
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";
             this.rcvTextBoxScroll.ReadOnly = true;
             this.rcvTextBoxScroll.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 382);
+            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 383);
             this.rcvTextBoxScroll.TabIndex = 12;
             this.rcvTextBoxScroll.WordWrap = false;
             // 
@@ -560,6 +561,16 @@
             this.timerReconnect.Interval = 200;
             this.timerReconnect.Tick += new System.EventHandler(this.timerReconnect_Tick);
             // 
+            // panel3
+            // 
+            this.panel3.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.panel3.Controls.Add(this.textNote);
+            this.panel3.Location = new System.Drawing.Point(9, 42);
+            this.panel3.Name = "panel3";
+            this.panel3.Size = new System.Drawing.Size(1067, 41);
+            this.panel3.TabIndex = 17;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(192F, 192F);
@@ -593,6 +604,8 @@
             this.grpRecv.PerformLayout();
             this.panel1.ResumeLayout(false);
             this.panel1.PerformLayout();
+            this.panel3.ResumeLayout(false);
+            this.panel3.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -637,6 +650,7 @@
         private System.Windows.Forms.Panel panel2;
         private System.Windows.Forms.Panel panel1;
         private System.Windows.Forms.TextBox textNote;
+        private System.Windows.Forms.Panel panel3;
     }
 }
 
