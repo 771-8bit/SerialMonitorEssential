@@ -69,5 +69,15 @@ namespace SerialMonitorEssential.Properties {
                 return ((System.Drawing.Icon)(obj));
             }
         }
+        
+        /// <summary>
+        ///   型 System.Byte[] のローカライズされたリソースを検索します。
+        /// </summary>
+        internal static byte[] RictyDiminished_Regular {
+            get {
+                object obj = ResourceManager.GetObject("RictyDiminished_Regular", resourceCulture);
+                return ((byte[])(obj));
+            }
+        }
     }
 }

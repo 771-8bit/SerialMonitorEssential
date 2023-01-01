@@ -273,7 +273,6 @@
             // rcvTextBox
             // 
             this.rcvTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.rcvTextBox.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
             this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
@@ -313,7 +312,6 @@
             // sndTextBox
             // 
             this.sndTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.sndTextBox.Font = new System.Drawing.Font("Ricty Diminished", 16F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
             this.sndTextBox.Location = new System.Drawing.Point(0, 0);
             this.sndTextBox.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.sndTextBox.Multiline = true;
@@ -395,7 +393,6 @@
             this.textNote.AcceptsTab = true;
             this.textNote.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
-            this.textNote.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(128)));
             this.textNote.Location = new System.Drawing.Point(10, 43);
             this.textNote.Multiline = true;
             this.textNote.Name = "textNote";
@@ -417,7 +414,6 @@
             // rcvTextBoxScroll
             // 
             this.rcvTextBoxScroll.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.rcvTextBoxScroll.Font = new System.Drawing.Font("Ricty Diminished", 12F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.rcvTextBoxScroll.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBoxScroll.Multiline = true;
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";

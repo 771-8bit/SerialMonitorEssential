@@ -43,3 +43,10 @@ Serial Monitor Essentialでは他にも様々な機能を実装しています�
 
 ![](/README/image/ProgramMenu.png)
 
+## License
+ソフトウェアはMITライセンスで公開しています．
+
+テキストボックスのフォントに[Ricty Diminished](https://rictyfonts.github.io/diminished)を使用しています．
+ライセンスは[SIL Open Font License (OFL) Version 1.1](http://scripts.sil.org/ofl)です．
+© 2017 [Yusa Yasunori](http://www.yusa.lab.uec.ac.jp/~yusa/)
+

@@ -8,6 +8,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using System.Reflection.Emit;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -27,8 +28,30 @@ namespace SerialMonitorEssential
         {
             InitializeComponent();
         }
+
+        [System.Runtime.InteropServices.DllImport("gdi32.dll", ExactSpelling = true)]
+        private static extern IntPtr AddFontMemResourceEx(byte[] pbFont, int cbFont, IntPtr pdv, out uint pcFonts);
         private void Form1_Load(object sender, EventArgs e)
         {
+            //https://dobon.net/vb/dotnet/graphics/privatefontcollection.html
+            System.Drawing.Text.PrivateFontCollection pfc = new System.Drawing.Text.PrivateFontCollection();
+            byte[] fontBuf = Properties.Resources.RictyDiminished_Regular;
+            IntPtr fontBufPtr = System.Runtime.InteropServices.Marshal.AllocCoTaskMem(fontBuf.Length);
+            System.Runtime.InteropServices.Marshal.Copy(fontBuf, 0, fontBufPtr, fontBuf.Length);
+            uint cFonts;
+            AddFontMemResourceEx(fontBuf, fontBuf.Length, IntPtr.Zero, out cFonts);
+            pfc.AddMemoryFont(fontBufPtr, fontBuf.Length);
+            System.Runtime.InteropServices.Marshal.FreeCoTaskMem(fontBufPtr);
+            System.Drawing.Font f12 = new System.Drawing.Font(pfc.Families[0], 12);
+            System.Drawing.Font f16 = new System.Drawing.Font(pfc.Families[0], 16);
+            pfc.Dispose();
+
+            sndTextBox.Font = f16;
+            textNote.Font = f12;
+            rcvTextBox.Font = f12;
+            rcvTextBoxScroll.Font = f12;
+
+
             reload_COM_Click(sender, e);
 
             initSettings();
@@ -418,6 +441,7 @@ namespace SerialMonitorEssential
 
             //http://my-notepad.jugem.jp/?eid=8
             rcvTextBox.LanguageOption = RichTextBoxLanguageOptions.UIFonts;
+
             rcvTextBox.WordWrap = checkWrap.Checked;
             rcvTextBoxScroll.WordWrap = checkWrap.Checked;
             if (autoScroll.Checked)
