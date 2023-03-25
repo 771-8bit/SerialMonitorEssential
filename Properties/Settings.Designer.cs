@@ -238,5 +238,17 @@ namespace SerialMonitorEssential.Properties {
                 this["setting_first"] = value;
             }
         }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("False")]
+        public bool setting_binary {
+            get {
+                return ((bool)(this["setting_binary"]));
+            }
+            set {
+                this["setting_binary"] = value;
+            }
+        }
     }
 }

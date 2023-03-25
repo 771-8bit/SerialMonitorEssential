@@ -73,6 +73,7 @@ namespace SerialMonitorEssential
             Properties.Settings.Default.setting_timestamp_string = cmbTimestamp.SelectedIndex;
             Properties.Settings.Default.setting_NULL=checkNULL.Checked;
             Properties.Settings.Default.setting_CRLF = checkCRLF.Checked;
+            Properties.Settings.Default.setting_binary = checkBIN.Checked;
             Properties.Settings.Default.setting_StopBits=cmbStopBits.SelectedIndex;
             Properties.Settings.Default.setting_DataBits=cmbDataBits.SelectedIndex;
             Properties.Settings.Default.setting_Parity=cmbParity.SelectedIndex;
@@ -202,13 +203,7 @@ namespace SerialMonitorEssential
             try
             {
                 string rawdata = serialPort1.ReadExisting();
-                /*
-                for(int i = 0;i< rawdata.Length;i++)
-                {
-                    int code = rawdata[i];
-                    Console.Write("{0:X}",code);
-                    Console.Write(",");
-                }*/
+
                 if (string.IsNullOrEmpty(rawdata)==false)
                 {
                     //Console.Write("\r\n");
@@ -221,39 +216,54 @@ namespace SerialMonitorEssential
                         first_timestamp = false;
                     }
 
-                    new_text.Append(rawdata);
-
-                    if (checkNULL.Checked)
-                    {
-                        new_text.Replace("\0", "[NULL]");
-                    }
-                    else
-                    {
-                        new_text.Replace("\0", "");
-                    }
-
                     string newline = "\r\n";
                     bool timestampChecked = check_timestamp.Checked;
                     if (timestampChecked)
                     {
                         newline = "\r\n" + timestamp;
                     }
-                    //https://dobon.net/vb/dotnet/string/replace.html
                     bool CRLFchecked = checkCRLF.Checked;
-                    if (CRLFchecked)
+                    if (checkBIN.Checked)
                     {
-                        new_text.Replace("\r\n", "[CRLF]\0");
-                        new_text.Replace("\r", "[CR]\0");
-                        new_text.Replace("\n", "[LF]\0");
-                        new_text.Replace("\0", newline);
-                    }
-                    else
-                    {
-                        new_text.Replace("\r\n", "\n");
-                        new_text.Replace("\r", "\n");
-                        new_text.Replace("\n", newline);
-                    }
+                        //https://learn.microsoft.com/ja-jp/dotnet/csharp/programming-guide/types/how-to-convert-between-hexadecimal-strings-and-numeric-types
+                        //https://www.ipentec.com/document/csharp-string-to-bytearray
+                        new_text.Append(BitConverter.ToString(System.Text.Encoding.ASCII.GetBytes(rawdata)));
+                        new_text.Append("-");
 
+                        new_text.Replace("0D-0A-", "0_D-O_A-new");
+                        new_text.Replace("0D-", "0D-new");
+                        new_text.Replace("0A-", "0A-new");
+                        new_text.Replace("new", newline);
+                        new_text.Replace("0_D", "0D");
+                        new_text.Replace("O_A", "0A");
+                    } else
+                    {
+                        new_text.Append(rawdata);
+
+                        if (checkNULL.Checked)
+                        {
+                            new_text.Replace("\0", "[NULL]");
+                        }
+                        else
+                        {
+                            new_text.Replace("\0", "");
+                        }
+
+                        //https://dobon.net/vb/dotnet/string/replace.html
+                        if (CRLFchecked)
+                        {
+                            new_text.Replace("\r\n", "[CRLF]\0");
+                            new_text.Replace("\r", "[CR]\0");
+                            new_text.Replace("\n", "[LF]\0");
+                            new_text.Replace("\0", newline);
+                        }
+                        else
+                        {
+                            new_text.Replace("\r\n", "\n");
+                            new_text.Replace("\r", "\n");
+                            new_text.Replace("\n", newline);
+                        }
+                    }
 
                     if (rawdata.EndsWith("\r") || rawdata.EndsWith("\n"))
                     {
@@ -432,6 +442,7 @@ namespace SerialMonitorEssential
             checkWrap.Checked = Properties.Settings.Default.setting_Wrap;
             checkCRLF.Checked = Properties.Settings.Default.setting_CRLF;
             checkNULL.Checked = Properties.Settings.Default.setting_NULL;
+            checkBIN.Checked =  Properties.Settings.Default.setting_binary;
             autoScroll.Checked = Properties.Settings.Default.setting_autoScroll;
             check_timestamp.Checked = Properties.Settings.Default.setting_timestamp;
             cmbTimestamp.SelectedIndex = Properties.Settings.Default.setting_timestamp_string;
@@ -459,6 +470,9 @@ namespace SerialMonitorEssential
             {
                 rcvTextBox.BringToFront();
             }
+
+            checkCRLF.Enabled = !checkBIN.Checked;
+            checkNULL.Enabled = !checkBIN.Checked;
         }
 
         private void checkDtrEnable_CheckedChanged(object sender, EventArgs e)
@@ -592,7 +606,6 @@ namespace SerialMonitorEssential
         StringBuilder resizing_buf = new System.Text.StringBuilder();
         private void Form1_ResizeBegin(object sender, EventArgs e)
         {
-            resizing_buf.Clear();
             resizing =true;
             if (rcvTextBoxScroll.TextLength > 4096)
             {
@@ -605,6 +618,13 @@ namespace SerialMonitorEssential
             resizing = false;
             rcvTextBox.AppendText(resizing_buf.ToString());
             rcvTextBoxScroll.AppendText(resizing_buf.ToString());
+            resizing_buf.Clear();
+        }
+
+        private void checkBIN_CheckedChanged(object sender, EventArgs e)
+        {
+            checkCRLF.Enabled = !checkBIN.Checked;
+            checkNULL.Enabled = !checkBIN.Checked;
         }
     }
 

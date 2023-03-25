@@ -52,6 +52,8 @@
             this.checkEnter = new System.Windows.Forms.CheckBox();
             this.btnSend = new System.Windows.Forms.Button();
             this.grpRecv = new System.Windows.Forms.GroupBox();
+            this.checkBIN = new System.Windows.Forms.CheckBox();
+            this.panel3 = new System.Windows.Forms.Panel();
             this.textNote = new System.Windows.Forms.TextBox();
             this.panel1 = new System.Windows.Forms.Panel();
             this.rcvTextBoxScroll = new System.Windows.Forms.TextBox();
@@ -68,14 +70,13 @@
             this.contextMenuStrip2 = new System.Windows.Forms.ContextMenuStrip(this.components);
             this.timer1 = new System.Windows.Forms.Timer(this.components);
             this.timerReconnect = new System.Windows.Forms.Timer(this.components);
-            this.panel3 = new System.Windows.Forms.Panel();
             this.grpSetting.SuspendLayout();
             this.groupBox1.SuspendLayout();
             this.grpSend.SuspendLayout();
             this.panel2.SuspendLayout();
             this.grpRecv.SuspendLayout();
-            this.panel1.SuspendLayout();
             this.panel3.SuspendLayout();
+            this.panel1.SuspendLayout();
             this.SuspendLayout();
             // 
             // serialPort1
@@ -370,6 +371,7 @@
             this.grpRecv.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
             | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.grpRecv.Controls.Add(this.checkBIN);
             this.grpRecv.Controls.Add(this.panel3);
             this.grpRecv.Controls.Add(this.panel1);
             this.grpRecv.Controls.Add(this.checkWrap);
@@ -389,6 +391,28 @@
             this.grpRecv.TabIndex = 2;
             this.grpRecv.TabStop = false;
             this.grpRecv.Text = "Recieve";
+            // 
+            // checkBIN
+            // 
+            this.checkBIN.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
+            this.checkBIN.AutoSize = true;
+            this.checkBIN.Location = new System.Drawing.Point(642, 478);
+            this.checkBIN.Name = "checkBIN";
+            this.checkBIN.Size = new System.Drawing.Size(120, 34);
+            this.checkBIN.TabIndex = 18;
+            this.checkBIN.Text = "Binary";
+            this.checkBIN.UseVisualStyleBackColor = true;
+            this.checkBIN.CheckedChanged += new System.EventHandler(this.checkBIN_CheckedChanged);
+            // 
+            // panel3
+            // 
+            this.panel3.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.panel3.Controls.Add(this.textNote);
+            this.panel3.Location = new System.Drawing.Point(9, 42);
+            this.panel3.Name = "panel3";
+            this.panel3.Size = new System.Drawing.Size(1067, 41);
+            this.panel3.TabIndex = 17;
             // 
             // textNote
             // 
@@ -561,16 +585,6 @@
             this.timerReconnect.Interval = 200;
             this.timerReconnect.Tick += new System.EventHandler(this.timerReconnect_Tick);
             // 
-            // panel3
-            // 
-            this.panel3.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
-            | System.Windows.Forms.AnchorStyles.Right)));
-            this.panel3.Controls.Add(this.textNote);
-            this.panel3.Location = new System.Drawing.Point(9, 42);
-            this.panel3.Name = "panel3";
-            this.panel3.Size = new System.Drawing.Size(1067, 41);
-            this.panel3.TabIndex = 17;
-            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(192F, 192F);
@@ -602,10 +616,10 @@
             this.panel2.PerformLayout();
             this.grpRecv.ResumeLayout(false);
             this.grpRecv.PerformLayout();
-            this.panel1.ResumeLayout(false);
-            this.panel1.PerformLayout();
             this.panel3.ResumeLayout(false);
             this.panel3.PerformLayout();
+            this.panel1.ResumeLayout(false);
+            this.panel1.PerformLayout();
             this.ResumeLayout(false);
 
         }
@@ -651,6 +665,7 @@
         private System.Windows.Forms.Panel panel1;
         private System.Windows.Forms.TextBox textNote;
         private System.Windows.Forms.Panel panel3;
+        private System.Windows.Forms.CheckBox checkBIN;
     }
 }
 
