@@ -51,7 +51,6 @@ namespace SerialMonitorEssential
             rcvTextBox.Font = f12;
             rcvTextBoxScroll.Font = f12;
 
-
             reload_COM_Click(sender, e);
 
             initSettings();
@@ -74,6 +73,7 @@ namespace SerialMonitorEssential
             Properties.Settings.Default.setting_NULL=checkNULL.Checked;
             Properties.Settings.Default.setting_CRLF = checkCRLF.Checked;
             Properties.Settings.Default.setting_binary = checkBIN.Checked;
+            Properties.Settings.Default.setting_sendBinary = checkSendBIN.Checked;
             Properties.Settings.Default.setting_StopBits=cmbStopBits.SelectedIndex;
             Properties.Settings.Default.setting_DataBits=cmbDataBits.SelectedIndex;
             Properties.Settings.Default.setting_Parity=cmbParity.SelectedIndex;
@@ -119,53 +119,120 @@ namespace SerialMonitorEssential
             }
 
             String data = sndTextBox.Text;
-            if (string.IsNullOrEmpty(data))
+
+            //https://learn.microsoft.com/ja-jp/dotnet/api/system.io.ports.serialport.write?view=dotnet-plat-ext-7.0
+            if (checkSendBIN.Checked)
             {
-                return;
-            }
-            try
-            {
-                switch (cmbCRLF.SelectedIndex)
+                //https://learn.microsoft.com/ja-jp/dotnet/csharp/programming-guide/types/how-to-convert-between-hexadecimal-strings-and-numeric-types
+                string[] dataSplit = data.Split('-',' ', ',', '.', '/');
+                int data_length = dataSplit.Length;
+                if (dataSplit[dataSplit.Length - 1] == "")
                 {
-                    case 0:
-                        serialPort1.Write(data);
-                        break;
-                    case 1:
-                        serialPort1.Write(data+"\n");
-                        break;
-                    case 2:
-                        serialPort1.Write(data + "\r");
-                        break;
-                    case 3:
-                        serialPort1.Write(data + "\r\n");
-                        break;
-                    default:
-                        break;
+                    data_length--;
                 }
-                sndTextBox.Clear();
-                //https://atmarkit.itmedia.co.jp/ait/articles/1004/08/news094.html
-                if (string.IsNullOrEmpty(data.Replace("\r", "").Replace("\n", ""))==false)
+                var hexdata = new byte[data_length];
+                for (int i = 0; i < data_length; i++)
                 {
-                    bool update = false;
-                    if (previous_send_data.Count == 0) {
-                        update = true;
-                    }
-                    else
+                    try
                     {
-                        if (previous_send_data[previous_send_data.Count - 1] != data)  {
-                            update = true;
-                        }
+                        byte value = Convert.ToByte(dataSplit[i], 16);
+                        hexdata[i] = value;
                     }
-                    if (update)
+                    catch (Exception ex)
                     {
-                        previous_send_data.Add(data);
+                        MessageBox.Show(ex.Message);
+                        return;
                     }
                 }
-                previous_send_data_index = previous_send_data.Count;
+                try
+                {
+                    serialPort1.Write(hexdata, 0, data_length);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+                }
             }
-            catch (Exception ex)
+            else
             {
-                MessageBox.Show(ex.Message);
+                if (string.IsNullOrEmpty(data))
+                {
+                    return;
+                }
+                try
+                {
+                    switch (cmbCRLF.SelectedIndex)  {
+                        case 0:
+                            serialPort1.Write(data);
+                            break;
+                        case 1:
+                            serialPort1.Write(data + "\n");
+                            break;
+                        case 2:
+                            serialPort1.Write(data + "\r");
+                            break;
+                        case 3:
+                            serialPort1.Write(data + "\r\n");
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message);
+        
+                }
+            }
+
+            sndTextBox.Clear();
+
+            //送信履歴保存
+            //https://atmarkit.itmedia.co.jp/ait/articles/1004/08/news094.html
+            if (string.IsNullOrEmpty(data.Replace("\r", "").Replace("\n", ""))==false)
+            {
+                bool first_data = previous_send_data.Count == 0;
+                bool different_data = false;
+                if (!first_data)
+                {
+                    different_data = previous_send_data[previous_send_data.Count - 1] != data;
+                }
+                bool update = first_data || different_data;
+ 
+                if (update)
+                {
+                    previous_send_data.Add(data);
+                }
+            }
+            previous_send_data_index = previous_send_data.Count;
+            
+        }
+
+        //https://hironimo.com/prog/c-sharp/c-keypress/
+        private void sndTextBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Up)
+            {
+                if (previous_send_data_index >= 1 && previous_send_data.Count > previous_send_data_index - 1 && previous_send_data.Count != 0)
+                {
+                    previous_send_data_index--;
+                    sndTextBox.Clear();
+                    sndTextBox.AppendText(previous_send_data[previous_send_data_index]);
+                }
+            }
+            if (e.KeyCode == Keys.Down)
+            {
+                if (previous_send_data_index >= -1 && previous_send_data.Count > previous_send_data_index + 1)
+                {
+                    previous_send_data_index++;
+                    sndTextBox.Clear();
+                    sndTextBox.AppendText(previous_send_data[previous_send_data_index]);
+                }
+                else if (previous_send_data.Count == previous_send_data_index + 1)
+                {
+                    previous_send_data_index++;
+                    sndTextBox.Clear();
+                }
             }
         }
 
@@ -210,33 +277,26 @@ namespace SerialMonitorEssential
                     StringBuilder new_text = new System.Text.StringBuilder();
                     String timestamp = String.Format("{0:HH:mm:ss.f}{1}", FastDateTime.Now, cmbTimestamp.SelectedItem.ToString());
 
-                    if ((first_timestamp||last_is_newline) && check_timestamp.Checked)
+                    if (((first_timestamp||last_is_newline) || checkBIN.Checked) && check_timestamp.Checked)
                     {
                         new_text.Append(timestamp);
                         first_timestamp = false;
                     }
 
                     string newline = "\r\n";
-                    bool timestampChecked = check_timestamp.Checked;
-                    if (timestampChecked)
+                    if (check_timestamp.Checked)
                     {
-                        newline = "\r\n" + timestamp;
+                        newline += timestamp;
                     }
-                    bool CRLFchecked = checkCRLF.Checked;
                     if (checkBIN.Checked)
                     {
                         //https://learn.microsoft.com/ja-jp/dotnet/csharp/programming-guide/types/how-to-convert-between-hexadecimal-strings-and-numeric-types
                         //https://www.ipentec.com/document/csharp-string-to-bytearray
                         new_text.Append(BitConverter.ToString(System.Text.Encoding.ASCII.GetBytes(rawdata)));
-                        new_text.Append("-");
 
-                        new_text.Replace("0D-0A-", "0_D-O_A-new");
-                        new_text.Replace("0D-", "0D-new");
-                        new_text.Replace("0A-", "0A-new");
-                        new_text.Replace("new", newline);
-                        new_text.Replace("0_D", "0D");
-                        new_text.Replace("O_A", "0A");
-                    } else
+                        new_text.Append(newline);
+                    }
+                    else
                     {
                         new_text.Append(rawdata);
 
@@ -250,7 +310,7 @@ namespace SerialMonitorEssential
                         }
 
                         //https://dobon.net/vb/dotnet/string/replace.html
-                        if (CRLFchecked)
+                        if (checkCRLF.Checked)
                         {
                             new_text.Replace("\r\n", "[CRLF]\0");
                             new_text.Replace("\r", "[CR]\0");
@@ -268,7 +328,7 @@ namespace SerialMonitorEssential
                     if (rawdata.EndsWith("\r") || rawdata.EndsWith("\n"))
                     {
                         last_is_newline = true;
-                        if(timestampChecked) { 
+                        if(check_timestamp.Checked) { 
                             new_text.Remove(new_text.Length- (timestamp.Length), (timestamp.Length));
                         }
                     }
@@ -311,32 +371,6 @@ namespace SerialMonitorEssential
             }
         }
 
-        //https://hironimo.com/prog/c-sharp/c-keypress/
-        private void sndTextBox_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Up)
-            {
-                if (previous_send_data_index >= 1 && previous_send_data.Count > previous_send_data_index-1 && previous_send_data.Count != 0)
-                {
-                    previous_send_data_index--;
-                    sndTextBox.Clear();
-                    sndTextBox.AppendText(previous_send_data[previous_send_data_index]);
-                }
-            }
-            if (e.KeyCode == Keys.Down)
-            {
-                if (previous_send_data_index >= -1 && previous_send_data.Count > previous_send_data_index+1)
-                {
-                    previous_send_data_index++;
-                    sndTextBox.Clear();
-                    sndTextBox.AppendText(previous_send_data[previous_send_data_index]);
-                }else if (previous_send_data.Count == previous_send_data_index + 1) { 
-                    previous_send_data_index++;
-                    sndTextBox.Clear();
-                }
-            }
-        }
-
         private void btnClearRcv_Click(object sender, EventArgs e)
         {
             rcvTextBox.Clear();
@@ -370,7 +404,6 @@ namespace SerialMonitorEssential
             cmbTimestamp.Enabled=check_timestamp.Checked;
             first_timestamp = check_timestamp.Checked;
         }
-
 
         private void connectSerial(bool message=false)
         {
@@ -443,6 +476,7 @@ namespace SerialMonitorEssential
             checkCRLF.Checked = Properties.Settings.Default.setting_CRLF;
             checkNULL.Checked = Properties.Settings.Default.setting_NULL;
             checkBIN.Checked =  Properties.Settings.Default.setting_binary;
+            checkSendBIN.Checked = Properties.Settings.Default.setting_sendBinary;
             autoScroll.Checked = Properties.Settings.Default.setting_autoScroll;
             check_timestamp.Checked = Properties.Settings.Default.setting_timestamp;
             cmbTimestamp.SelectedIndex = Properties.Settings.Default.setting_timestamp_string;
@@ -473,6 +507,8 @@ namespace SerialMonitorEssential
 
             checkCRLF.Enabled = !checkBIN.Checked;
             checkNULL.Enabled = !checkBIN.Checked;
+
+            cmbCRLF.Enabled = !checkSendBIN.Checked;
         }
 
         private void checkDtrEnable_CheckedChanged(object sender, EventArgs e)
@@ -625,6 +661,11 @@ namespace SerialMonitorEssential
         {
             checkCRLF.Enabled = !checkBIN.Checked;
             checkNULL.Enabled = !checkBIN.Checked;
+        }
+
+        private void checkSendBIN_CheckedChanged(object sender, EventArgs e)
+        {
+            cmbCRLF.Enabled = !checkSendBIN.Checked;
         }
     }
 

@@ -250,5 +250,17 @@ namespace SerialMonitorEssential.Properties {
                 this["setting_binary"] = value;
             }
         }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("False")]
+        public bool setting_sendBinary {
+            get {
+                return ((bool)(this["setting_sendBinary"]));
+            }
+            set {
+                this["setting_sendBinary"] = value;
+            }
+        }
     }
 }

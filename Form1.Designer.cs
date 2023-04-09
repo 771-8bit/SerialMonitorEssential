@@ -46,6 +46,7 @@
             this.connectButton = new System.Windows.Forms.Button();
             this.rcvTextBox = new System.Windows.Forms.RichTextBox();
             this.grpSend = new System.Windows.Forms.GroupBox();
+            this.checkSendBIN = new System.Windows.Forms.CheckBox();
             this.panel2 = new System.Windows.Forms.Panel();
             this.sndTextBox = new System.Windows.Forms.TextBox();
             this.cmbCRLF = new System.Windows.Forms.ComboBox();
@@ -251,10 +252,9 @@
             "78800",
             "115200",
             "230400",
-            "250000",
-            "500000",
-            "1000000",
-            "2000000"});
+            "460800",
+            "921600",
+            "1843200"});
             this.cmbBaudRate.Location = new System.Drawing.Point(287, 52);
             this.cmbBaudRate.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.cmbBaudRate.Name = "cmbBaudRate";
@@ -279,7 +279,7 @@
             this.rcvTextBox.Location = new System.Drawing.Point(0, 0);
             this.rcvTextBox.Name = "rcvTextBox";
             this.rcvTextBox.ReadOnly = true;
-            this.rcvTextBox.Size = new System.Drawing.Size(1067, 383);
+            this.rcvTextBox.Size = new System.Drawing.Size(1067, 337);
             this.rcvTextBox.TabIndex = 11;
             this.rcvTextBox.Text = "";
             this.rcvTextBox.WordWrap = false;
@@ -288,6 +288,7 @@
             // 
             this.grpSend.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left) 
             | System.Windows.Forms.AnchorStyles.Right)));
+            this.grpSend.Controls.Add(this.checkSendBIN);
             this.grpSend.Controls.Add(this.panel2);
             this.grpSend.Controls.Add(this.cmbCRLF);
             this.grpSend.Controls.Add(this.checkEnter);
@@ -296,10 +297,25 @@
             this.grpSend.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.grpSend.Name = "grpSend";
             this.grpSend.Padding = new System.Windows.Forms.Padding(6, 8, 6, 8);
-            this.grpSend.Size = new System.Drawing.Size(1085, 210);
+            this.grpSend.Size = new System.Drawing.Size(1085, 256);
             this.grpSend.TabIndex = 1;
             this.grpSend.TabStop = false;
             this.grpSend.Text = "Send";
+            // 
+            // checkSendBIN
+            // 
+            this.checkSendBIN.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Right)));
+            this.checkSendBIN.AutoSize = true;
+            this.checkSendBIN.Checked = true;
+            this.checkSendBIN.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.checkSendBIN.Location = new System.Drawing.Point(835, 157);
+            this.checkSendBIN.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
+            this.checkSendBIN.Name = "checkSendBIN";
+            this.checkSendBIN.Size = new System.Drawing.Size(187, 34);
+            this.checkSendBIN.TabIndex = 9;
+            this.checkSendBIN.Text = "Send Binary";
+            this.checkSendBIN.UseVisualStyleBackColor = true;
+            this.checkSendBIN.CheckedChanged += new System.EventHandler(this.checkSendBIN_CheckedChanged);
             // 
             // panel2
             // 
@@ -309,7 +325,7 @@
             this.panel2.Controls.Add(this.sndTextBox);
             this.panel2.Location = new System.Drawing.Point(9, 42);
             this.panel2.Name = "panel2";
-            this.panel2.Size = new System.Drawing.Size(814, 157);
+            this.panel2.Size = new System.Drawing.Size(814, 203);
             this.panel2.TabIndex = 8;
             // 
             // sndTextBox
@@ -319,7 +335,7 @@
             this.sndTextBox.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.sndTextBox.Multiline = true;
             this.sndTextBox.Name = "sndTextBox";
-            this.sndTextBox.Size = new System.Drawing.Size(814, 157);
+            this.sndTextBox.Size = new System.Drawing.Size(814, 203);
             this.sndTextBox.TabIndex = 0;
             this.sndTextBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.sndTextBox_KeyDown);
             // 
@@ -333,7 +349,7 @@
             "LF(\\n)",
             "CR(\\r)",
             "CRLF"});
-            this.cmbCRLF.Location = new System.Drawing.Point(832, 109);
+            this.cmbCRLF.Location = new System.Drawing.Point(832, 207);
             this.cmbCRLF.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.cmbCRLF.Name = "cmbCRLF";
             this.cmbCRLF.Size = new System.Drawing.Size(231, 38);
@@ -345,7 +361,7 @@
             this.checkEnter.AutoSize = true;
             this.checkEnter.Checked = true;
             this.checkEnter.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.checkEnter.Location = new System.Drawing.Point(832, 163);
+            this.checkEnter.Location = new System.Drawing.Point(835, 109);
             this.checkEnter.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.checkEnter.Name = "checkEnter";
             this.checkEnter.Size = new System.Drawing.Size(233, 34);
@@ -383,11 +399,11 @@
             this.grpRecv.Controls.Add(this.btnClearRcv);
             this.grpRecv.Controls.Add(this.check_timestamp);
             this.grpRecv.Controls.Add(this.autoScroll);
-            this.grpRecv.Location = new System.Drawing.Point(28, 475);
+            this.grpRecv.Location = new System.Drawing.Point(28, 521);
             this.grpRecv.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.grpRecv.Name = "grpRecv";
             this.grpRecv.Padding = new System.Windows.Forms.Padding(6, 8, 6, 8);
-            this.grpRecv.Size = new System.Drawing.Size(1085, 573);
+            this.grpRecv.Size = new System.Drawing.Size(1085, 527);
             this.grpRecv.TabIndex = 2;
             this.grpRecv.TabStop = false;
             this.grpRecv.Text = "Recieve";
@@ -396,11 +412,11 @@
             // 
             this.checkBIN.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkBIN.AutoSize = true;
-            this.checkBIN.Location = new System.Drawing.Point(642, 478);
+            this.checkBIN.Location = new System.Drawing.Point(229, 433);
             this.checkBIN.Name = "checkBIN";
-            this.checkBIN.Size = new System.Drawing.Size(120, 34);
+            this.checkBIN.Size = new System.Drawing.Size(192, 34);
             this.checkBIN.TabIndex = 18;
-            this.checkBIN.Text = "Binary";
+            this.checkBIN.Text = "Binary (hex)";
             this.checkBIN.UseVisualStyleBackColor = true;
             this.checkBIN.CheckedChanged += new System.EventHandler(this.checkBIN_CheckedChanged);
             // 
@@ -433,7 +449,7 @@
             this.panel1.Controls.Add(this.rcvTextBoxScroll);
             this.panel1.Location = new System.Drawing.Point(9, 89);
             this.panel1.Name = "panel1";
-            this.panel1.Size = new System.Drawing.Size(1067, 383);
+            this.panel1.Size = new System.Drawing.Size(1067, 337);
             this.panel1.TabIndex = 15;
             // 
             // rcvTextBoxScroll
@@ -444,7 +460,7 @@
             this.rcvTextBoxScroll.Name = "rcvTextBoxScroll";
             this.rcvTextBoxScroll.ReadOnly = true;
             this.rcvTextBoxScroll.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 383);
+            this.rcvTextBoxScroll.Size = new System.Drawing.Size(1067, 337);
             this.rcvTextBoxScroll.TabIndex = 12;
             this.rcvTextBoxScroll.WordWrap = false;
             // 
@@ -452,7 +468,7 @@
             // 
             this.checkWrap.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkWrap.AutoSize = true;
-            this.checkWrap.Location = new System.Drawing.Point(12, 478);
+            this.checkWrap.Location = new System.Drawing.Point(12, 432);
             this.checkWrap.Name = "checkWrap";
             this.checkWrap.Size = new System.Drawing.Size(163, 34);
             this.checkWrap.TabIndex = 14;
@@ -463,7 +479,7 @@
             // btnCopy
             // 
             this.btnCopy.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnCopy.Location = new System.Drawing.Point(765, 513);
+            this.btnCopy.Location = new System.Drawing.Point(765, 467);
             this.btnCopy.Margin = new System.Windows.Forms.Padding(6);
             this.btnCopy.Name = "btnCopy";
             this.btnCopy.Size = new System.Drawing.Size(150, 46);
@@ -476,7 +492,7 @@
             // 
             this.checkCRLF.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkCRLF.AutoSize = true;
-            this.checkCRLF.Location = new System.Drawing.Point(229, 478);
+            this.checkCRLF.Location = new System.Drawing.Point(486, 432);
             this.checkCRLF.Name = "checkCRLF";
             this.checkCRLF.Size = new System.Drawing.Size(214, 34);
             this.checkCRLF.TabIndex = 10;
@@ -487,7 +503,7 @@
             // 
             this.checkNULL.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this.checkNULL.AutoSize = true;
-            this.checkNULL.Location = new System.Drawing.Point(449, 479);
+            this.checkNULL.Location = new System.Drawing.Point(706, 432);
             this.checkNULL.Name = "checkNULL";
             this.checkNULL.Size = new System.Drawing.Size(203, 34);
             this.checkNULL.TabIndex = 9;
@@ -502,7 +518,7 @@
             this.cmbTimestamp.Items.AddRange(new object[] {
             " > ",
             ","});
-            this.cmbTimestamp.Location = new System.Drawing.Point(486, 519);
+            this.cmbTimestamp.Location = new System.Drawing.Point(486, 473);
             this.cmbTimestamp.Name = "cmbTimestamp";
             this.cmbTimestamp.Size = new System.Drawing.Size(71, 38);
             this.cmbTimestamp.TabIndex = 5;
@@ -510,7 +526,7 @@
             // btnSaveRcv
             // 
             this.btnSaveRcv.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnSaveRcv.Location = new System.Drawing.Point(603, 514);
+            this.btnSaveRcv.Location = new System.Drawing.Point(603, 468);
             this.btnSaveRcv.Margin = new System.Windows.Forms.Padding(6);
             this.btnSaveRcv.Name = "btnSaveRcv";
             this.btnSaveRcv.Size = new System.Drawing.Size(150, 46);
@@ -522,7 +538,7 @@
             // btnClearRcv
             // 
             this.btnClearRcv.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-            this.btnClearRcv.Location = new System.Drawing.Point(923, 513);
+            this.btnClearRcv.Location = new System.Drawing.Point(923, 467);
             this.btnClearRcv.Margin = new System.Windows.Forms.Padding(6);
             this.btnClearRcv.Name = "btnClearRcv";
             this.btnClearRcv.Size = new System.Drawing.Size(150, 46);
@@ -537,7 +553,7 @@
             this.check_timestamp.AutoSize = true;
             this.check_timestamp.Checked = true;
             this.check_timestamp.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.check_timestamp.Location = new System.Drawing.Point(229, 521);
+            this.check_timestamp.Location = new System.Drawing.Point(229, 475);
             this.check_timestamp.Margin = new System.Windows.Forms.Padding(6);
             this.check_timestamp.Name = "check_timestamp";
             this.check_timestamp.Size = new System.Drawing.Size(248, 34);
@@ -552,7 +568,7 @@
             this.autoScroll.AutoSize = true;
             this.autoScroll.Checked = true;
             this.autoScroll.CheckState = System.Windows.Forms.CheckState.Checked;
-            this.autoScroll.Location = new System.Drawing.Point(12, 521);
+            this.autoScroll.Location = new System.Drawing.Point(12, 475);
             this.autoScroll.Margin = new System.Windows.Forms.Padding(6);
             this.autoScroll.Name = "autoScroll";
             this.autoScroll.Size = new System.Drawing.Size(170, 34);
@@ -666,6 +682,7 @@
         private System.Windows.Forms.TextBox textNote;
         private System.Windows.Forms.Panel panel3;
         private System.Windows.Forms.CheckBox checkBIN;
+        private System.Windows.Forms.CheckBox checkSendBIN;
     }
 }
 
