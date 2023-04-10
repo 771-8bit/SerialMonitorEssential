@@ -269,15 +269,32 @@ namespace SerialMonitorEssential
 
             try
             {
-                string rawdata = serialPort1.ReadExisting();
+                StringBuilder new_text = new System.Text.StringBuilder();
+                bool newdata = false;
+                String timestamp = String.Format("{0:HH:mm:ss.f}{1}", FastDateTime.Now, cmbTimestamp.SelectedItem.ToString());
 
-                if (string.IsNullOrEmpty(rawdata)==false)
+                if (checkBIN.Checked)
                 {
-                    //Console.Write("\r\n");
-                    StringBuilder new_text = new System.Text.StringBuilder();
-                    String timestamp = String.Format("{0:HH:mm:ss.f}{1}", FastDateTime.Now, cmbTimestamp.SelectedItem.ToString());
+                    new_text.Append(timestamp);
 
-                    if (((first_timestamp||last_is_newline) || checkBIN.Checked) && check_timestamp.Checked)
+                    while (serialPort1.BytesToRead>0)
+                    {
+                        var hexdata = new byte[1024];
+                        int DATA_LEN_MAX = 1024;
+                        int data_len = serialPort1.Read(hexdata, 0, DATA_LEN_MAX);
+                        if (data_len > 0)
+                        {
+                            new_text.Append(BitConverter.ToString(hexdata, 0, data_len));
+                            new_text.Append("-");
+                            newdata = true;
+                        }
+                    }
+
+                    new_text.Append("\r\n");
+                }
+                else
+                {
+                    if ((( first_timestamp || last_is_newline )) && check_timestamp.Checked )
                     {
                         new_text.Append(timestamp);
                         first_timestamp = false;
@@ -288,16 +305,11 @@ namespace SerialMonitorEssential
                     {
                         newline += timestamp;
                     }
-                    if (checkBIN.Checked)
-                    {
-                        //https://learn.microsoft.com/ja-jp/dotnet/csharp/programming-guide/types/how-to-convert-between-hexadecimal-strings-and-numeric-types
-                        //https://www.ipentec.com/document/csharp-string-to-bytearray
-                        new_text.Append(BitConverter.ToString(System.Text.Encoding.ASCII.GetBytes(rawdata)));
 
-                        new_text.Append(newline);
-                    }
-                    else
+                    string rawdata = serialPort1.ReadExisting();
+                    if (string.IsNullOrEmpty(rawdata) == false)
                     {
+                        newdata = true;
                         new_text.Append(rawdata);
 
                         if (checkNULL.Checked)
@@ -323,20 +335,23 @@ namespace SerialMonitorEssential
                             new_text.Replace("\r", "\n");
                             new_text.Replace("\n", newline);
                         }
-                    }
 
-                    if (rawdata.EndsWith("\r") || rawdata.EndsWith("\n"))
-                    {
-                        last_is_newline = true;
-                        if(check_timestamp.Checked) { 
-                            new_text.Remove(new_text.Length- (timestamp.Length), (timestamp.Length));
+                        if (rawdata.EndsWith("\r") || rawdata.EndsWith("\n"))
+                        {
+                            last_is_newline = true;
+                            if (check_timestamp.Checked)
+                            {
+                                new_text.Remove(new_text.Length - (timestamp.Length), (timestamp.Length));
+                            }
+                        }
+                        else
+                        {
+                            last_is_newline = false;
                         }
                     }
-                    else
-                    {
-                        last_is_newline = false;
-                    }
+                }
 
+                if (newdata) { 
                     if (resizing)
                     {
                         resizing_buf.Append(new_text);
@@ -345,7 +360,6 @@ namespace SerialMonitorEssential
                     {
                         Invoke(new Delegate_RcvDataToTextBox(RcvDataToTextBox), new object[] { new_text.ToString() });
                     }
-
                 }
             }
             catch (Exception ex)
