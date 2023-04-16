@@ -258,8 +258,8 @@ namespace SerialMonitorEssential
         }
 
         bool last_is_newline=false;
-        bool first_timestamp = false;
-        private void timer1_Tick(object sender, EventArgs e)
+        bool first_timestamp = true;
+        private void timerReadSerial_Tick(object sender, EventArgs e)
         {
             //https://atmarkit.itmedia.co.jp/ait/articles/0511/11/news117.html
             if (serialPort1.IsOpen == false)
@@ -275,7 +275,10 @@ namespace SerialMonitorEssential
 
                 if (checkBIN.Checked)
                 {
-                    new_text.Append(timestamp);
+                    if (check_timestamp.Checked)
+                    {
+                        new_text.Append(timestamp);
+                    }
 
                     while (serialPort1.BytesToRead>0)
                     {

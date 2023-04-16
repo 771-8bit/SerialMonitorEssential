@@ -69,7 +69,7 @@
             this.autoScroll = new System.Windows.Forms.CheckBox();
             this.contextMenuStrip1 = new System.Windows.Forms.ContextMenuStrip(this.components);
             this.contextMenuStrip2 = new System.Windows.Forms.ContextMenuStrip(this.components);
-            this.timer1 = new System.Windows.Forms.Timer(this.components);
+            this.timerReadSerial = new System.Windows.Forms.Timer(this.components);
             this.timerReconnect = new System.Windows.Forms.Timer(this.components);
             this.grpSetting.SuspendLayout();
             this.groupBox1.SuspendLayout();
@@ -589,11 +589,11 @@
             this.contextMenuStrip2.Name = "contextMenuStrip2";
             this.contextMenuStrip2.Size = new System.Drawing.Size(61, 4);
             // 
-            // timer1
+            // timerReadSerial
             // 
-            this.timer1.Enabled = true;
-            this.timer1.Interval = 20;
-            this.timer1.Tick += new System.EventHandler(this.timer1_Tick);
+            this.timerReadSerial.Enabled = true;
+            this.timerReadSerial.Interval = 20;
+            this.timerReadSerial.Tick += new System.EventHandler(this.timerReadSerial_Tick);
             // 
             // timerReconnect
             // 
@@ -656,7 +656,7 @@
         private System.Windows.Forms.ContextMenuStrip contextMenuStrip2;
         private System.Windows.Forms.CheckBox checkEnter;
         private System.Windows.Forms.CheckBox reconnect;
-        private System.Windows.Forms.Timer timer1;
+        private System.Windows.Forms.Timer timerReadSerial;
         private System.Windows.Forms.Button reload_COM;
         private System.Windows.Forms.ComboBox cmbCRLF;
         private System.Windows.Forms.Button btnSaveRcv;
