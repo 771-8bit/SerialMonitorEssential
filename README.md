@@ -4,12 +4,12 @@ Windows用のシリアルモニタです．他のソフトもそれぞれ使い�
 ![](/README/image/window.gif)
 
 ## :sparkles: Features
-|| &nbsp;&nbsp;&nbsp;&nbsp;再接続&nbsp;&nbsp;&nbsp;&nbsp;  | &nbsp;&nbsp;送信機能&nbsp;&nbsp;  |  データレート |
-| :--- | :---: | :---: | :---: |
-| Arduino IDE  | :x: | :white_check_mark: | :white_check_mark: |
-| Tera Term  | :white_check_mark: | :x: | :white_check_mark: |
-| Serial Monitor (VS Code Extension)  | :white_check_mark: | :white_check_mark: | :x: |
-| **Serial Monitor Essential**  | :white_check_mark: | :white_check_mark: | :white_check_mark: |
+|| &nbsp;&nbsp;&nbsp;&nbsp;再接続&nbsp;&nbsp;&nbsp;&nbsp;  | &nbsp;&nbsp;送信機能&nbsp;&nbsp;  |  データレート | バイナリ送受信 |
+| :--- | :---: | :---: | :---: | :---: |
+| Arduino IDE  | :x: | :white_check_mark: | :white_check_mark: | :x: |
+| Tera Term  | :white_check_mark: | :x: | :white_check_mark: |　:white_check_mark: |
+| Serial Monitor (VS Code Extension)  | :white_check_mark: | :white_check_mark: | :x: | :x: |
+| **Serial Monitor Essential**  | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: |
 
 * Arduino IDEは再接続に手間がかかる
 * Tera Termは送信用のテキストボックスがない
