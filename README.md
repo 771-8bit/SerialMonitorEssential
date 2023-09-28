@@ -7,7 +7,7 @@ Windows用のシリアルモニタです．他のソフトもそれぞれ使い�
 || &nbsp;&nbsp;&nbsp;&nbsp;再接続&nbsp;&nbsp;&nbsp;&nbsp;  | &nbsp;&nbsp;送信機能&nbsp;&nbsp;  |  データレート | バイナリ送受信 |
 | :--- | :---: | :---: | :---: | :---: |
 | Arduino IDE  | :x: | :white_check_mark: | :white_check_mark: | :x: |
-| Tera Term  | :white_check_mark: | :x: | :white_check_mark: |　:white_check_mark: |
+| Tera Term  | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: |
 | Serial Monitor (VS Code Extension)  | :white_check_mark: | :white_check_mark: | :x: | :x: |
 | **Serial Monitor Essential**  | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: |
 
