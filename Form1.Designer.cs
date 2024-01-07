@@ -237,7 +237,7 @@
             this.cmbPortName.Location = new System.Drawing.Point(139, 52);
             this.cmbPortName.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.cmbPortName.Name = "cmbPortName";
-            this.cmbPortName.Size = new System.Drawing.Size(136, 38);
+            this.cmbPortName.Size = new System.Drawing.Size(351, 38);
             this.cmbPortName.TabIndex = 2;
             // 
             // cmbBaudRate
@@ -255,7 +255,7 @@
             "460800",
             "921600",
             "1843200"});
-            this.cmbBaudRate.Location = new System.Drawing.Point(287, 52);
+            this.cmbBaudRate.Location = new System.Drawing.Point(502, 52);
             this.cmbBaudRate.Margin = new System.Windows.Forms.Padding(6, 8, 6, 8);
             this.cmbBaudRate.Name = "cmbBaudRate";
             this.cmbBaudRate.Size = new System.Drawing.Size(150, 38);

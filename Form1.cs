@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Ports;
+using System.Management;
 using System.Linq;
 using System.Reflection.Emit;
 using System.Text;
@@ -16,6 +17,9 @@ using static System.Net.Mime.MediaTypeNames;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement.Button;
 using static System.Windows.Forms.VisualStyles.VisualStyleElement.Window;
+using System.Xml.Linq;
+using System.Text.RegularExpressions;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.Header;
 
 //https://kana-soft.com/tech/sample_0007.htm
 namespace SerialMonitorEssential
@@ -52,6 +56,8 @@ namespace SerialMonitorEssential
             rcvTextBoxScroll.Font = f12;
 
             reload_COM_Click(sender, e);
+
+            cmbPortName.DropDownStyle = ComboBoxStyle.DropDownList;
 
             initSettings();
 
@@ -370,18 +376,77 @@ namespace SerialMonitorEssential
                 MessageBox.Show(ex.Message);
             }
 
-        }       
+        }
+        public class ItemSet
+        {
+            // DisplayMemberとValueMemberにはプロパティで指定する仕組み
+            public String ItemDisp { get; set; }
+            public String ItemValue { get; set; }
 
+            // プロパティをコンストラクタでセット
+            public ItemSet(String v, String s)
+            {
+                ItemDisp = s;
+                ItemValue = v;
+            }
+        }
+
+        List<ItemSet> src = new List<ItemSet>();
         private void reload_COM_Click(object sender, EventArgs e)
         {
-            string[] PortList = SerialPort.GetPortNames();
+            var deviceNameList = new System.Collections.ArrayList();
 
-            cmbPortName.Items.Clear();
+            int int_Max = 0;
+            src.Clear();
 
-            foreach (string PortName in PortList)
+            var check = new System.Text.RegularExpressions.Regex("(COM[1-9][0-9]?[0-9]?)");
+
+            //https://truthfullscore.hatenablog.com/entry/2014/01/10/180608
+            ManagementClass mcPnPEntity = new ManagementClass("Win32_PnPEntity");
+            ManagementObjectCollection manageObjCol = mcPnPEntity.GetInstances();
+
+            //全てのPnPデバイスを探索しシリアル通信が行われるデバイスを随時追加する
+            foreach (ManagementObject manageObj in manageObjCol)
             {
-                cmbPortName.Items.Add(PortName);
+                //Nameプロパティを取得
+                var namePropertyValue = manageObj.GetPropertyValue("Name");
+                if (namePropertyValue == null)
+                {
+                    continue;
+                }
+
+                //Nameプロパティ文字列の一部が"(COM1)～(COM999)"と一致するときリストに追加"
+                string display = namePropertyValue.ToString();
+                if (check.IsMatch(display))
+                {        
+                    // https://guminote.hatenablog.jp/entry/2015/08/13/193216
+                    var ExtractPortNum = new System.Text.RegularExpressions.Regex(".*(COM[1-9][0-9]?[0-9]?).*");
+                    string name = ExtractPortNum.Replace(display, "$1");
+
+                    var ExtractName = new Regex(@"(.*?)\s*\(COM\d+\)");
+
+                    if(name.Length == 4)
+                    {
+                        display = name + "   " + ExtractName.Match(display).Groups[1].Value;
+                    }
+                    else
+                    {
+                        display = name + " " + ExtractName.Match(display).Groups[1].Value;
+                    }
+                    src.Add(new ItemSet(name, display));
+                    int_Max = Math.Max(int_Max, display.Length);
+                }
             }
+
+            //https://www.ampita.jp/2023/05/dropdownlist/
+            cmbPortName.DropDownWidth = (int_Max + 1) * 14;
+
+            // https://qiita.com/KnowledgeU/items/3388f4c461076b05f6e5
+            cmbPortName.DataSource = null;
+            cmbPortName.DataSource = src;
+            cmbPortName.DisplayMember = "ItemDisp";
+            cmbPortName.ValueMember = "ItemValue";
+
             if (cmbPortName.Items.Count > 0)
             {
                 cmbPortName.SelectedIndex = 0;
@@ -424,7 +489,7 @@ namespace SerialMonitorEssential
 
         private void connectSerial(bool message=false)
         {
-            serialPort1.PortName = cmbPortName.SelectedItem.ToString();
+            serialPort1.PortName = cmbPortName.SelectedValue.ToString();
 
             serialPort1.BaudRate = Convert.ToInt32(cmbBaudRate.SelectedItem);
 
