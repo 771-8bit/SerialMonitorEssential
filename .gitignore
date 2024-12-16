@@ -366,4 +366,5 @@ FodyWeavers.xsd
 SocialPreview.png
 version.txt
 
-SetupSerialMonitorEssential/
+SetupSerialMonitorEssential/Debug/
+SetupSerialMonitorEssential/Release/
