@@ -484,7 +484,6 @@ namespace SerialMonitorEssential
         {
             //https://learn.microsoft.com/ja-jp/dotnet/api/system.windows.forms.control.enabled?view=windowsdesktop-7.0
             cmbTimestamp.Enabled=check_timestamp.Checked;
-            first_timestamp = check_timestamp.Checked;
         }
 
         private void connectSerial(bool message=false)
@@ -563,8 +562,6 @@ namespace SerialMonitorEssential
             check_timestamp.Checked = Properties.Settings.Default.setting_timestamp;
             cmbTimestamp.SelectedIndex = Properties.Settings.Default.setting_timestamp_string;
             cmbTimestamp.Enabled = check_timestamp.Checked;
-
-            first_timestamp = check_timestamp.Checked;
 
             textNote.Text = Properties.Settings.Default.setting_note;
 
