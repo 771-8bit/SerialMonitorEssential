@@ -219,15 +219,15 @@
         {
         "Name" = "8:Microsoft Visual Studio"
         "ProductName" = "8:Serial Monitor Essential"
-        "ProductCode" = "8:{43E2479D-1D6E-44BC-8C6C-966923E18607}"
-        "PackageCode" = "8:{9772D3F4-3AF0-4CA0-BD1F-027DA38975D0}"
+        "ProductCode" = "8:{8B0752B6-F129-4B4F-AFA4-92F9001E9904}"
+        "PackageCode" = "8:{E31E5961-1B96-44B6-93BF-0960D6209F0D}"
         "UpgradeCode" = "8:{338C967C-EF5E-41C3-8318-3E58825E8DC2}"
         "AspNetVersion" = "8:2.0.50727.0"
         "RestartWWWService" = "11:FALSE"
         "RemovePreviousVersions" = "11:TRUE"
         "DetectNewerInstalledVersion" = "11:TRUE"
         "InstallAllUsers" = "11:FALSE"
-        "ProductVersion" = "8:0.0.9"
+        "ProductVersion" = "8:0.0.10"
         "Manufacturer" = "8:771-8bit"
         "ARPHELPTELEPHONE" = "8:"
         "ARPHELPLINK" = "8:"
@@ -769,7 +769,7 @@
         {
             "{5259A561-127C-4D43-A0A1-72F10C7B3BF8}:_8AC95A869D4F4F8990E7F96FC6BB6C99"
             {
-            "SourcePath" = "8:..\\obj\\Release\\SerialMonitorEssential.exe"
+            "SourcePath" = "8:"
             "TargetName" = "8:"
             "Tag" = "8:"
             "Folder" = "8:_D500F1F62B1D47B9ADF7D1117899DA7A"

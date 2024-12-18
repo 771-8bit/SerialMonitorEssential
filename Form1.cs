@@ -471,11 +471,18 @@ namespace SerialMonitorEssential
 
             if (saveFileDialog1.ShowDialog() == DialogResult.OK)
             {
-                if ((myStream = saveFileDialog1.OpenFile()) != null)
+                try
                 {
-                    myStream.Close();
-                    StreamWriter sw = new StreamWriter(saveFileDialog1.FileName, false, Encoding.ASCII);
-                    sw.Write(rcvTextBoxScroll.Text);
+                    using (StreamWriter sw = new StreamWriter(saveFileDialog1.FileName, false, Encoding.ASCII))
+                    {
+                        sw.Write(rcvTextBoxScroll.Text);
+                    }
+
+                    AutoClosingMessageBox.Show("File saved successfully.", "Save File", 1000);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to save file: {ex.Message}", "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
