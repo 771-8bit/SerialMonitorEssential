@@ -204,7 +204,7 @@ namespace SerialMonitorEssential
                     different_data = previous_send_data[previous_send_data.Count - 1] != data;
                 }
                 bool update = first_data || different_data;
- 
+
                 if (update)
                 {
                     previous_send_data.Add(data);
@@ -303,22 +303,23 @@ namespace SerialMonitorEssential
                 }
                 else
                 {
-                    if ((( first_timestamp || last_is_newline )) && check_timestamp.Checked )
-                    {
-                        new_text.Append(timestamp);
-                        first_timestamp = false;
-                    }
-
-                    string newline = "\r\n";
-                    if (check_timestamp.Checked)
-                    {
-                        newline += timestamp;
-                    }
-
                     string rawdata = serialPort1.ReadExisting();
                     if (string.IsNullOrEmpty(rawdata) == false)
                     {
                         newdata = true;
+
+                        if ((( first_timestamp || last_is_newline )) && check_timestamp.Checked )
+                        {
+                            new_text.Append(timestamp);
+                            first_timestamp = false;
+                        }
+
+                        string newline = "\r\n";
+                        if (check_timestamp.Checked)
+                        {
+                            newline += timestamp;
+                        }
+
                         new_text.Append(rawdata);
 
                         if (checkNULL.Checked)
