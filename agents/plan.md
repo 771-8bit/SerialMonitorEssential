@@ -244,14 +244,14 @@ struct PageMetadata {
 #### 1-1. Rustプロジェクトセットアップ
 *   **作業内容:** `windows` クレートの導入、Tauriプロジェクトの初期化。
 *   **中間確認:**
-    *   [ ] `cargo build` が成功する
-    *   [ ] `cargo tauri dev` でウィンドウが表示される
+    *   [x] `cargo build` が成功する
+    *   [x] `cargo tauri dev` でウィンドウが表示される
 
 #### 1-2. COMポート列挙
 *   **作業内容:** 利用可能なCOMポート一覧を取得する機能の実装。
 *   **中間確認:**
-    *   [ ] Rust側で `SetupDiGetClassDevs` 等を用いてポート一覧を取得できる
-    *   [ ] Tauri Command `list_ports` でフロントエンドからポート名一覧を取得できる
+    *   [x] Rust側で `SetupDiGetClassDevs` 等を用いてポート一覧を取得できる
+    *   [x] Tauri Command `list_ports` でフロントエンドからポート名一覧を取得できる
 
 #### 1-3. SerialPort構造体（Create/Close）
 *   **作業内容:** `CreateFileW` でポートを開き、`CloseHandle` で閉じるラッパー実装。
