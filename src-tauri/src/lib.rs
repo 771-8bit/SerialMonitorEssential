@@ -10,7 +10,16 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, serial::list_ports])
+        .manage(serial::SerialState {
+            port: std::sync::Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            serial::list_ports,
+            serial::open_port,
+            serial::close_port,
+            serial::write_data
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

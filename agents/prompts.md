@@ -8,9 +8,12 @@ cd viewer/
 npm run type-check
 このエラーを修正してください
 
-cd viewer/
-npm run test:e2e:chromium
+cd src-tauri
+cargo clippy
 このエラーを修正してください
+
+cd src-tauri
+cargo fmt
 
 cd viewer/
 npm run test:coverage
