@@ -12,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(serial::SerialState {
             port: std::sync::Mutex::new(None),
+            data_store: std::sync::Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             greet,

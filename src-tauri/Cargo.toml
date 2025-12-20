@@ -22,6 +22,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+crossbeam = "0.8"
 
 
 [dependencies.windows]
@@ -32,6 +33,7 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_Security",
     "Win32_Devices_DeviceAndDriverInstallation",
 ]

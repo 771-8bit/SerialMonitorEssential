@@ -1,4 +1,9 @@
+mod chunk;
+mod data_store;
+mod logger_thread;
+mod object_pool;
 pub mod port;
+mod worker_thread;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, DIGCF_PRESENT, SPDRP_FRIENDLYNAME, SP_DEVINFO_DATA,
@@ -11,29 +16,38 @@ use windows::core::{GUID, PCWSTR};
 // 4D36E978-E325-11CE-BFC1-08002BE10318
 const GUID_DEVINTERFACE_COMPORT: GUID = GUID::from_u128(0x4D36E978_E325_11CE_BFC1_08002BE10318);
 
+use data_store::DataStore;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 pub struct SerialState {
     pub port: Mutex<Option<Arc<Mutex<port::SerialPort>>>>,
+    pub data_store: Mutex<Option<Arc<DataStore>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
 struct DataUpdatePayload {
     data: Vec<u8>,
+    total_bytes: u64,
 }
 
 #[tauri::command]
 pub fn open_port(
     state: State<'_, SerialState>,
-    app: AppHandle,
+    _app: AppHandle,
     port_name: String,
     baud_rate: u32,
 ) -> Result<(), String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
-    // Close existing if open
+    // Close existing port and DataStore if open
+    // This will drop the old DataStore and delete its temp files
+    if let Some(existing_store) = store_guard.take() {
+        println!("[open_port] Stopping and dropping existing DataStore");
+        existing_store.stop_reception();
+        // existing_store is dropped here, temp files deleted
+    }
     if let Some(existing) = port_guard.take() {
         if let Ok(mut p) = existing.lock() {
             p.close();
@@ -51,41 +65,19 @@ pub fn open_port(
         &port_name
     };
 
+    // Create SerialPort
     let port = port::SerialPort::new(port_path, baud_rate)?;
     let port_arc = Arc::new(Mutex::new(port));
-
     *port_guard = Some(port_arc.clone());
 
-    let thread_port = port_arc.clone();
-    thread::spawn(move || {
-        let mut buffer = [0u8; 1024]; // 1KB chunks for Phase 1
-        loop {
-            // Check if port is still open by trying to lock
-            let read_result = {
-                if let Ok(port) = thread_port.lock() {
-                    port.read(&mut buffer)
-                } else {
-                    break; // Mutex poisoned
-                }
-            };
+    // Create NEW DataStore and start reception
+    println!("[open_port] Creating new DataStore");
+    let data_store = Arc::new(DataStore::new()?);
+    data_store.start_reception(port_arc.clone())?;
+    *store_guard = Some(data_store.clone());
 
-            match read_result {
-                Ok(bytes_read) => {
-                    if bytes_read > 0 {
-                        let data = buffer[..bytes_read].to_vec();
-                        let _ = app.emit("data-update", DataUpdatePayload { data });
-                    } else {
-                        // No data, sleep briefly to prevent CPU spinning
-                        thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                }
-                Err(_) => {
-                    // Read failed (likely closed), exit loop
-                    break;
-                }
-            }
-        }
-    });
+    // Note: Phase 2では、data-updateイベントはまだ実装していません
+    // Phase 3で finished_queue を監視してUIイベントを送る仕組みを追加します
 
     Ok(())
 }
@@ -93,7 +85,14 @@ pub fn open_port(
 #[tauri::command]
 pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
+    // Stop data reception (but keep DataStore alive to preserve temp files)
+    if let Some(ref data_store) = *store_guard {
+        data_store.stop_reception();
+    }
+
+    // Then close port
     if let Some(port) = port_guard.take() {
         if let Ok(mut p) = port.lock() {
             p.close();
