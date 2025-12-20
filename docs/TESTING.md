@@ -100,7 +100,7 @@ Phase 2の完了には、以下の3つのテストをすべてパスする必要
 #### 1. Picoのポートを自動識別
 
 ```bash
-cd tools
+cd test_tools
 uv run python identify_pico_ports.py
 ```
 
@@ -139,7 +139,7 @@ SerialMonitorEssentialでデータ受信ログが表示されます：
 #### 3. テスト開始と自動検証（別ターミナル）
 
 ```bash
-cd tools
+cd test_tools
 uv run python pico_stress_test_controller.py --port COM14 --duration 60
 ```
 
@@ -213,7 +213,7 @@ SerialMonitorEssentialのログで、データ受信が停止したことを確�
 #### 1. メモリ監視を開始
 
 ```bash
-cd tools
+cd test_tools
 uv run python monitor_memory.py --duration 60
 ```
 
@@ -236,7 +236,7 @@ SerialMonitorEssentialで:
 別のターミナルで:
 
 ```bash
-cd tools
+cd test_tools
 # 1時間継続テスト
 uv run python pico_stress_test_controller.py --port <制御ポート> --duration 3600
 ```
@@ -246,7 +246,7 @@ uv run python pico_stress_test_controller.py --port <制御ポート> --duration
 監視完了後、`test_results/memory_log_<timestamp>.csv` が生成されます。
 
 ```bash
-cd tools
+cd test_tools
 uv run python analyze_memory.py test_results/memory_log_<timestamp>.csv
 ```
 
@@ -358,7 +358,7 @@ cd <プロジェクトルート>
 uv sync
 
 # スクリプト実行
-cd tools
+cd test_tools
 uv run python identify_pico_ports.py
 ```
 
@@ -372,7 +372,7 @@ uv run python identify_pico_ports.py
 
 ```powershell
 # 実行ポリシーを一時的に変更
-powershell -ExecutionPolicy Bypass -File tools/monitor_memory.ps1
+powershell -ExecutionPolicy Bypass -File test_tools/monitor_memory.ps1
 ```
 
 ---

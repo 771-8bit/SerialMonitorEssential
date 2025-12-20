@@ -22,7 +22,7 @@ uv sync
 
 ```bash
 # uv環境で実行
-cd tools
+cd test_tools
 uv run python identify_pico_ports.py
 uv run python pico_stress_test_controller.py --port COM14 --duration 60
 uv run python verify_received_data.py

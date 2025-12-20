@@ -20,7 +20,7 @@ Picoを接続すると、**2つのCOMポート**が認識されます。
 #### 自動識別（推奨）
 
 ```bash
-python tools/identify_pico_ports.py
+python test_tools/identify_pico_ports.py
 ```
 
 このスクリプトが自動的に：
@@ -75,7 +75,7 @@ PURPOSE: Data transmission to SerialMonitorEssential
 
 3. **Pythonコントローラーでテスト開始**
    ```bash
-   python tools/pico_stress_test_controller.py --port COM14 --duration 60
+   python test_tools/pico_stress_test_controller.py --port COM14 --duration 60
    ```
    **注意:** `--port` には **制御ポート** を指定
 
@@ -125,7 +125,7 @@ PURPOSE: Data transmission to SerialMonitorEssential
 ### どちらがどのポートかわからない
 
 ```bash
-python tools/identify_pico_ports.py
+python test_tools/identify_pico_ports.py
 ```
 を実行してください。
 
