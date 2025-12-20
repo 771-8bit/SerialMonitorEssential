@@ -53,15 +53,15 @@ RustによるWin32 APIの直接制御で「データの完全性（取りこぼ�
 
 ```text
 [ 空きバケツ置き場 (Object Pool) ] 
-       ↑                  ↓ (空のチャンクを取得)
-       |          [受信スレッド (Producer)] 
-       |                  ↓ (データ注入: 16ms or 満杯で確定)
-       |          [ 完了チャンクリスト (Shared List) ] <=== [UIスレッド (Reader 1)]
-       |                  ↓ (取り出し)                      (最新データをここから参照)
-       |          [ロギングスレッド (Reader 2)]
-       |                  ↓ (ディスクへ書き込み)
-       └----------[ TEMPファイル / ログファイル ] <====== [UIスレッド (Reader 1)]
-                      (ページング完了)                    (過去ログはここから参照)
+                         ↓ (空のチャンクを取得 / 枯渇時は新規作成)
+                 [受信スレッド (Producer)] 
+                         ↓ (Arc::new(chunk): 16ms or 満杯で確定)
+                 [ 完了チャンクリスト (Shared List) ] <=== [UIスレッド (Reader)]
+                         ↓ (参照後に削除)                  (最新データをここから参照)
+                 [ロギングスレッド (Consumer)]
+                         ↓ (ディスクへ書き込み)
+                 [ TEMPファイル / ログファイル ] <====== [UIスレッド (Reader)]
+                      (ページング完了)                   (過去ログはここから参照)
 ```
 
 > [!IMPORTANT]
@@ -69,11 +69,11 @@ RustによるWin32 APIの直接制御で「データの完全性（取りこぼ�
 
 ### 3.2. スレッド設計 (Producer-Consumer Model)
 
-データ競合を回避し、高速なスワップを実現するために「オブジェクトプール」と「メッセージパッシング」を採用する。
+データ競合を回避し、高速なスワップを実現するために「オブジェクトプール」と「RwLock による共有リスト」を採用する。
 
 1.  **Serial Worker Thread (Producer):**
     *   **役割:** COMポートからの超高速受信。
-    *   **挙動:** `Object Pool` から空のチャンクを取得し、データを書き込む。
+    *   **挙動:** `Object Pool` から空のチャンクを取得し（枯渇時は新規作成）、データを書き込む。
     *   **スワップ条件:**
         *   **容量限界:** チャンクが満杯になった時。
         *   **タイムアウト:** 前回のスワップから **16ms (約60fps)** 経過し、かつデータが存在する時。
@@ -81,10 +81,15 @@ RustによるWin32 APIの直接制御で「データの完全性（取りこぼ�
     *   **重要:** 16ms経ってもデータが0バイトならスワップしない（空チャンクの大量生成を防止）。
 
 2.  **Logging/Paging Thread (Consumer):**
-    *   **役割:** データの永続化とメモリ再利用。
-    *   **挙動:** `finished_list` の **先頭** からチャンクを取り出し、ディスクへ書き込む。
-    *   **再利用:** 書き込み完了後、チャンクを `Object Pool` へ返却する。
-    *   **注意:** UIがまだ参照中のチャンクは取り出さない（参照カウントまたはフラグで管理）。
+    *   **役割:** データの永続化。
+    *   **挙動:** `finished_list` の **先頭** チャンクを参照し、ディスクへ書き込む。
+    *   **処理順序（データ完全性保証）:**
+        1. `front()` で先頭チャンクを参照（pop しない）
+        2. ディスクへ追記書き込み
+        3. `archived_index` を更新（ここでデータが検索可能になる）
+        4. `pop_front()` でチャンクを削除
+    *   **メモリ管理:** `Arc<Chunk>` の参照カウントが0になった時点でメモリ解放。プールへの返却は行わない（ゼロコピー設計）。
+    *   **UI参照保護:** `Arc` により、UIが参照中のチャンクは自動的に保護される。
 
 3.  **UI Thread (Reader):**
     *   **役割:** リアルタイム表示と過去データスクロール。
@@ -111,11 +116,13 @@ struct Chunk {
 
 struct DataStore {
     // 空きチャンクのプール (ロックフリーキュー)
-    // Producer (Worker) のみが pop、Consumer (Logger) のみが push
+    // Worker のみが pop（プール枯渇時は新規作成）
+    // ※ Arc<Chunk> 採用により Logger からの返却は行わない
     free_pool: Arc<SegQueue<Chunk>>,
     
     // 受信完了したチャンクのリスト (UI読み取り可能)
     // ★重要: VecDeque を使用し、UIからの読み取り（iter）とLoggerからのpop_frontを両立
+    // ★メモリ: Arc drop 時にメモリ解放。Logger追従中は数MB程度で安定
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     
     // ディスク書き出し完了したデータのインデックス
@@ -141,18 +148,19 @@ struct PageMetadata {
 
 1.  **初期化:**
     *   起動時に `Chunk` を一定数（例: 100個 = 約6.4MB）生成し、`free_pool` に投入。
-    *   以降、メモリ確保は行わない。
+    *   プール枯渇時は新規 `Chunk` を作成（Logger 追従中は稀）。
 
 2.  **Write (受信フェーズ) - Worker Thread:**
-    *   `free_pool` から空チャンクを1つ取り出す。
+    *   `free_pool` から空チャンクを1つ取り出す（なければ新規作成）。
     *   シリアルデータを書き込む。
-    *   **16ms経過** または **満杯** になったら `finished_list` の末尾へ追加（Publish）。
+    *   **16ms経過** または **満杯** になったら `Arc::new(chunk)` で `finished_list` の末尾へ追加（Publish）。
     *   **空データは追加しない**（16ms経ってもデータ0バイトならスワップしない）。
 
 3.  **Persist (保存フェーズ) - Logger Thread:**
-    *   `finished_list` の **先頭** からチャンクを取り出す。
+    *   `finished_list` の **先頭** を `front()` で参照（まだ削除しない）。
     *   ディスクへ追記書き込み。
-    *   書き込み完了後、`archived_index` を更新し、Chunkを `free_pool` へ返却（Recycle）。
+    *   書き込み完了後、`archived_index` を更新。
+    *   **最後に** `pop_front()` でチャンクを削除（Arc 参照カウント減少 → 0 でメモリ解放）。
 
 4.  **Read (UI/Viewer) - UI Thread:**
     *   **リアルタイム表示:** `finished_list` を直接イテレートし、最新チャンクを参照。
@@ -333,11 +341,11 @@ struct DataUpdatePayload {
     *   [x] 複数スレッドからの同時アクセスで競合しない
 
 #### 2-5. Logger Thread（保存スレッド）
-*   **作業内容:** Queueから取り出して一時ファイルへ書き出し、ChunkをPoolに戻す。
+*   **作業内容:** Queueから取り出して一時ファイルへ書き出す。Arc による自動メモリ管理。
 *   **中間確認:**
     *   [x] `%TEMP%\SerialMonitorEssential\<PID>` にファイルが作成される
     *   [x] 書き込まれたデータが正しい（バイナリエディタで確認）
-    *   [x] 書き込み後にChunkがプールに返却される
+    *   [x] 書き込み後に Arc 参照カウントが減少しメモリが解放される
 
 #### 2-6. PageMetadata管理
 *   **作業内容:** ディスク書き出し済みデータのインデックス管理。
@@ -362,6 +370,23 @@ struct DataUpdatePayload {
 *   [x] **データ受信動作:** データが data.bin に正しく書き込まれる
 *   [x] **高負荷耐久テスト:** 12Mbpsでダミーデータを1分間流し続け、受信バイト総数が送信バイト数と **1バイトの狂いもなく** 一致することを確認する（実機テスト必要）。
 *   [x] **メモリリーク確認:** メモリ使用量が一定範囲で頭打ちになり、増え続けないことを確認する（実機テスト必要）。
+
+> [!IMPORTANT]
+> **Phase 2完了時の必須データ構造チェックリスト:**
+> 
+> Phase 3へ進む前に、以下の項目を **必ず確認** してください：
+> 
+> - [x] `Chunk` 構造体に `global_offset: u64` フィールドが存在する
+> - [x] `Chunk` に `set_global_offset(&mut self, offset: u64)` メソッドが実装されている
+> - [x] `Chunk` に `global_offset(&self) -> u64` ゲッターが実装されている
+> - [x] `DataStore` の finished_queue が `Arc<RwLock<VecDeque<Arc<Chunk>>>>` として実装されている
+> - [x] Worker Thread がチャンクに `global_offset` を設定してから finished_list へ追加している
+> - [x] Worker Thread が `finished_list.write().push_back(Arc::new(chunk))` を使用している
+> - [x] Logger Thread が `finished_list.read().front()` で参照後、`finished_list.write().pop_front()` で削除している
+> - [x] Logger Thread が Arc<Chunk> を扱い、free_poolへの手動返却を行っていない（Arcのdropでメモリ解放）
+> - [x] `get_data` メソッドが finished_list を検索してから archived_index にフォールバックする
+> - [x] `total_bytes` メソッドが finished_list の最新チャンクも考慮している
+
 
 ---
 

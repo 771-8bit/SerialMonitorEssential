@@ -1,9 +1,9 @@
 use super::chunk::Chunk;
 use super::port::SerialPort;
-use crossbeam::queue::SegQueue;
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, RwLock,
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 /// Worker Thread: シリアルポートからデータを受信
 ///
 /// ReadFileを高速に呼び出し、Chunkにデータを詰める。
-/// 16ms経過 or 満杯で finished_queue に移動する。
+/// 16ms経過 or 満杯で finished_list に移動する。
 const SWAP_TIMEOUT_MS: u64 = 16; // 約60fps
 const READ_BUFFER_SIZE: usize = 4096; // 一度に読み取るサイズ
 
 pub fn spawn_worker_thread(
     port: Arc<Mutex<SerialPort>>,
-    free_pool: Arc<SegQueue<Chunk>>,
-    finished_queue: Arc<SegQueue<Chunk>>,
+    free_pool: Arc<crossbeam::queue::SegQueue<Chunk>>,
+    finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     stop_flag: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -27,6 +27,7 @@ pub fn spawn_worker_thread(
         let mut last_swap = Instant::now();
         let mut read_buffer = vec![0u8; READ_BUFFER_SIZE];
         let mut total_bytes_read = 0u64;
+        let mut global_offset = 0u64; // グローバルオフセットを追跡
 
         loop {
             // 停止フラグチェック
@@ -35,11 +36,14 @@ pub fn spawn_worker_thread(
                     "[Worker] Stop flag detected, total bytes read: {}",
                     total_bytes_read
                 );
-                // 残っているChunkがあればfinished_queueに送る
-                if let Some(chunk) = current_chunk.take() {
+                // 残っているChunkがあればfinished_listに送る
+                if let Some(mut chunk) = current_chunk.take() {
                     if chunk.has_data() {
+                        chunk.set_global_offset(global_offset);
                         println!("[Worker] Pushing final chunk with {} bytes", chunk.len());
-                        finished_queue.push(chunk);
+                        if let Ok(mut list) = finished_list.write() {
+                            list.push_back(Arc::new(chunk));
+                        }
                     }
                 }
                 break;
@@ -89,9 +93,13 @@ pub fn spawn_worker_thread(
 
                         // Chunkが満杯になったらスワップ
                         if chunk.is_full() {
-                            let full_chunk = current_chunk.take().unwrap();
-                            println!("[Worker] Chunk full, pushing to finished_queue");
-                            finished_queue.push(full_chunk);
+                            let mut full_chunk = current_chunk.take().unwrap();
+                            full_chunk.set_global_offset(global_offset);
+                            global_offset += full_chunk.len() as u64;
+                            println!("[Worker] Chunk full, pushing to finished_list");
+                            if let Ok(mut list) = finished_list.write() {
+                                list.push_back(Arc::new(full_chunk));
+                            }
                             // 次のChunkは次のループで取得
                         }
                     }
@@ -103,8 +111,12 @@ pub fn spawn_worker_thread(
                 let elapsed = last_swap.elapsed();
                 if elapsed >= Duration::from_millis(SWAP_TIMEOUT_MS) && chunk.has_data() {
                     println!("[Worker] Timeout, pushing chunk with {} bytes", chunk.len());
-                    let timeout_chunk = current_chunk.take().unwrap();
-                    finished_queue.push(timeout_chunk);
+                    let mut timeout_chunk = current_chunk.take().unwrap();
+                    timeout_chunk.set_global_offset(global_offset);
+                    global_offset += timeout_chunk.len() as u64;
+                    if let Ok(mut list) = finished_list.write() {
+                        list.push_back(Arc::new(timeout_chunk));
+                    }
                     last_swap = Instant::now();
                 }
             }

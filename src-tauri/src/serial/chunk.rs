@@ -9,6 +9,7 @@ pub struct Chunk {
     capacity: usize,
     valid_len: usize,
     timestamp: u64,
+    global_offset: u64,
 }
 
 impl Chunk {
@@ -23,6 +24,7 @@ impl Chunk {
             capacity,
             valid_len: 0,
             timestamp: Self::now(),
+            global_offset: 0,
         }
     }
 
@@ -68,6 +70,16 @@ impl Chunk {
     /// タイムスタンプを取得
     pub fn timestamp(&self) -> u64 {
         self.timestamp
+    }
+
+    /// グローバルオフセットを設定
+    pub fn set_global_offset(&mut self, offset: u64) {
+        self.global_offset = offset;
+    }
+
+    /// グローバルオフセットを取得
+    pub fn global_offset(&self) -> u64 {
+        self.global_offset
     }
 
     /// Chunkをクリアして再利用可能にする

@@ -1,4 +1,5 @@
 use crossbeam::queue::SegQueue;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{
@@ -22,7 +23,7 @@ const INITIAL_POOL_SIZE: usize = 100; // 約6.4MB
 /// Worker/Logger スレッドのライフサイクルを管理する。
 pub struct DataStore {
     free_pool: Arc<SegQueue<Chunk>>,
-    finished_queue: Arc<SegQueue<Chunk>>,
+    finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     archived_index: Arc<RwLock<Vec<PageMetadata>>>,
     temp_dir: PathBuf,
 
@@ -54,7 +55,7 @@ impl DataStore {
 
         Ok(Self {
             free_pool: pool.as_arc(),
-            finished_queue: Arc::new(SegQueue::new()),
+            finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),
             temp_dir,
             worker_handle: Mutex::new(None),
@@ -80,15 +81,14 @@ impl DataStore {
         let worker_handle = worker_thread::spawn_worker_thread(
             port,
             self.free_pool.clone(),
-            self.finished_queue.clone(),
+            self.finished_list.clone(),
             self.stop_flag.clone(),
         );
 
         // Logger Thread起動
         println!("[DataStore] Spawning Logger Thread");
         let logger_handle = logger_thread::spawn_logger_thread(
-            self.free_pool.clone(),
-            self.finished_queue.clone(),
+            self.finished_list.clone(),
             self.archived_index.clone(),
             self.temp_dir.clone(),
             self.stop_flag.clone(),
@@ -136,10 +136,34 @@ impl DataStore {
         let mut current_offset = offset;
         let mut remaining = length;
 
-        // まずメモリ上（finished_queue）を検索
-        // Note: SegQueueは順序アクセスのみなのでここでは簡易実装
-        // 本格実装では finished_queue の内容をキャッシュするか、別の構造が必要
-        // Phase 3でより効率的な実装を検討
+        // まずメモリ上（finished_list）を検索
+        if let Ok(list) = self.finished_list.read() {
+            for chunk in list.iter() {
+                let chunk_start = chunk.global_offset();
+                let chunk_end = chunk_start + chunk.len() as u64;
+
+                // このチャンクに要求範囲が含まれるか
+                if current_offset < chunk_end && chunk_start < current_offset + remaining as u64 {
+                    // チャンク内のオフセットを計算
+                    let chunk_offset = if current_offset >= chunk_start {
+                        (current_offset - chunk_start) as usize
+                    } else {
+                        0
+                    };
+
+                    let to_read = remaining.min(chunk.len() - chunk_offset);
+                    let data = chunk.data();
+                    result.extend_from_slice(&data[chunk_offset..chunk_offset + to_read]);
+
+                    current_offset += to_read as u64;
+                    remaining -= to_read;
+
+                    if remaining == 0 {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
 
         // ディスク上のデータを検索
         if let Ok(index) = self.archived_index.read() {
@@ -196,14 +220,24 @@ impl DataStore {
 
     /// 受信済み総バイト数を取得
     pub fn total_bytes(&self) -> u64 {
+        let mut total = 0u64;
+
+        // archived_indexから取得
         if let Ok(index) = self.archived_index.read() {
-            index
+            total = index
                 .last()
                 .map(|p| p.global_offset + p.data_length as u64)
-                .unwrap_or(0)
-        } else {
-            0
+                .unwrap_or(0);
         }
+
+        // finished_listの最後のチャンクから取得（より新しい）
+        if let Ok(list) = self.finished_list.read() {
+            if let Some(last_chunk) = list.back() {
+                total = last_chunk.global_offset() + last_chunk.len() as u64;
+            }
+        }
+
+        total
     }
 
     /// 一時ディレクトリパスを取得

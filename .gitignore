@@ -28,3 +28,7 @@ test_result.txt
 *.njsproj
 *.sln
 *.sw?
+
+# Python
+__pycache__/
+*.py[cod]
