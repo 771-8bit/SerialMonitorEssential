@@ -11,7 +11,7 @@ Raspberry Pi Picoは2つのCDCポートを作成し、SerialMonitorEssentialとP
 
 ### 1. ファームウェアのアップロード
 
-`tools/pico_serial_tx_test/pico_serial_tx_test.ino` を Pico にアップロード
+`test_tools/pico_serial_tx_test/pico_serial_tx_test.ino` を Pico にアップロード
 
 ### 2.ポートの確認
 

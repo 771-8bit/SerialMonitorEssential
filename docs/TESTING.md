@@ -64,7 +64,7 @@ cargo fmt -- --check
 
 #### 2. テストファームウェアの書き込み
 
-`tools/pico_serial_tx_test/pico_serial_tx_test.ino` を開き、Picoに書き込みます。
+`test_tools/pico_serial_tx_test/pico_serial_tx_test.ino` を開き、Picoに書き込みます。
 
 **手順:**
 
