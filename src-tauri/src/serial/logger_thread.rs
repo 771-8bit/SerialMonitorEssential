@@ -57,7 +57,7 @@ pub fn spawn_logger_thread(
             if stop_flag.load(Ordering::Relaxed) {
                 println!("[Logger] Stop flag detected, flushing remaining chunks");
                 // 残っているChunkをすべて処理
-                while let Some(chunk) = finished_queue.pop() {
+                while let Some(mut chunk) = finished_queue.pop() {
                     if let Err(e) = write_chunk(
                         &mut file,
                         &chunk,
@@ -67,6 +67,8 @@ pub fn spawn_logger_thread(
                     ) {
                         eprintln!("Failed to write chunk: {:?}", e);
                     }
+                    // チャンクをクリアしてからプールに返却
+                    chunk.clear();
                     free_pool.push(chunk);
                     chunks_written += 1;
                 }
@@ -78,7 +80,7 @@ pub fn spawn_logger_thread(
             }
 
             // Chunkを取得
-            if let Some(chunk) = finished_queue.pop() {
+            if let Some(mut chunk) = finished_queue.pop() {
                 println!("[Logger] Got chunk from queue with {} bytes", chunk.len());
                 if let Err(e) = write_chunk(
                     &mut file,
@@ -95,6 +97,8 @@ pub fn spawn_logger_thread(
                         chunks_written, global_offset
                     );
                 }
+                // チャンクをクリアしてからプールに返却
+                chunk.clear();
                 free_pool.push(chunk);
             } else {
                 // キューが空の場合は短時間スリープ

@@ -25,6 +25,9 @@ pub struct SerialState {
     pub data_store: Mutex<Option<Arc<DataStore>>>,
 }
 
+// Phase 3で使用予定: data-updateイベントのペイロード
+// UIへ受信データと総バイト数を通知するために使用
+#[allow(dead_code)]
 #[derive(Clone, serde::Serialize)]
 struct DataUpdatePayload {
     data: Vec<u8>,

@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Test results
+test_tools/test_results/
+*.csv
+memory_log_*.csv
+test_result.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

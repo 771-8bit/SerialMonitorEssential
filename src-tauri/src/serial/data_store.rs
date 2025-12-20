@@ -128,6 +128,9 @@ impl DataStore {
     /// # Returns
     /// データのVec<u8>
     pub fn get_data(&self, offset: u64, length: u32) -> Result<Vec<u8>, String> {
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
         let length = length as usize;
         let mut result = Vec::with_capacity(length);
         let mut current_offset = offset;
@@ -136,6 +139,7 @@ impl DataStore {
         // まずメモリ上（finished_queue）を検索
         // Note: SegQueueは順序アクセスのみなのでここでは簡易実装
         // 本格実装では finished_queue の内容をキャッシュするか、別の構造が必要
+        // Phase 3でより効率的な実装を検討
 
         // ディスク上のデータを検索
         if let Ok(index) = self.archived_index.read() {
@@ -144,12 +148,28 @@ impl DataStore {
                     && current_offset < page.global_offset + page.data_length as u64
                 {
                     // このページにデータがある
-                    let page_offset = (current_offset - page.global_offset) as usize;
-                    let to_read = remaining.min(page.data_length - page_offset);
+                    let page_offset = current_offset - page.global_offset;
+                    let to_read = remaining.min(page.data_length - page_offset as usize);
 
-                    // ファイルから読み取り（簡易実装）
-                    // TODO: 実際のファイル読み取り実装
-                    result.resize(result.len() + to_read, 0);
+                    // ファイルから読み取り
+                    let mut file = File::open(&page.file_path).map_err(|e| {
+                        format!("Failed to open file {:?}: {:?}", page.file_path, e)
+                    })?;
+
+                    file.seek(SeekFrom::Start(page.file_offset + page_offset))
+                        .map_err(|e| {
+                            format!(
+                                "Failed to seek to offset {}: {:?}",
+                                page.file_offset + page_offset,
+                                e
+                            )
+                        })?;
+
+                    let mut buffer = vec![0u8; to_read];
+                    file.read_exact(&mut buffer)
+                        .map_err(|e| format!("Failed to read {} bytes: {:?}", to_read, e))?;
+
+                    result.extend_from_slice(&buffer);
 
                     current_offset += to_read as u64;
                     remaining -= to_read;
@@ -159,6 +179,16 @@ impl DataStore {
                     }
                 }
             }
+        }
+
+        // 要求されたデータがすべて読み取れなかった場合はエラー
+        if remaining > 0 {
+            return Err(format!(
+                "Insufficient data: requested {} bytes at offset {}, but only {} bytes available",
+                length,
+                offset,
+                result.len()
+            ));
         }
 
         Ok(result)
