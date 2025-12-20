@@ -49,41 +49,23 @@ RustによるWin32 APIの直接制御で「データの完全性（取りこぼ�
 
 システムは大きく **Backend (Rust)**、**Bridge (IPC)**、**Frontend (React)** の3層で構成される。
 
-### 3.1. コンポーネント図 (Chunk-based Data Flow)
+### 3.1. コンポーネント図 (Chunk-based Data Flow / バケツリレー)
 
-```mermaid
-graph TD
-    subgraph "Device Layer"
-        HW[FPGA / Serial Device] -- 12Mbps --> OS[Windows Kernel / COM Driver]
-    end
-
-    subgraph "Rust Backend (Main Process)"
-        %% Threading Structure
-        ReaderThread[Serial Worker Thread]
-        LogThread[Logging/Paging Thread]
-        
-        %% Memory Structures
-        ObjectPool[Object Pool (Free Chunks)]
-        FinishedQueue[Finished Chunk Queue]
-        
-        %% Flow
-        ObjectPool -- 1. get_free_chunk() --> ReaderThread
-        OS -- 2. ReadFile --> ReaderThread
-        ReaderThread -- 3. Push Filled Chunk --> FinishedQueue
-        
-        FinishedQueue -- 4. Pop Chunk --> LogThread
-        LogThread -- 5. Write --> TempFile[Temp/Log File]
-        LogThread -- 6. Return Chunk --> ObjectPool
-    end
-
-    subgraph "Frontend (Tauri/React)"
-        StoreState[Shared State Access]
-        FinishedQueue -.-> StoreState
-        TempFile -.-> StoreState
-        
-        StoreState -- IPC (Shared Memory / Events) --> VirtualList[Virtual Scroller]
-    end
+```text
+[ 空きバケツ置き場 (Object Pool) ] 
+       ↑                  ↓ (空のチャンクを取得)
+       |          [受信スレッド (Producer)] 
+       |                  ↓ (データ注入: 16ms or 満杯で確定)
+       |          [ 完了チャンクリスト (Shared List) ] <=== [UIスレッド (Reader 1)]
+       |                  ↓ (取り出し)                      (最新データをここから参照)
+       |          [ロギングスレッド (Reader 2)]
+       |                  ↓ (ディスクへ書き込み)
+       └----------[ TEMPファイル / ログファイル ] <====== [UIスレッド (Reader 1)]
+                      (ページング完了)                    (過去ログはここから参照)
 ```
+
+> [!IMPORTANT]
+> **設計の核心:** UIは `finished_list` を **直接参照** する。Loggerのディスク書き込み完了を待たない。
 
 ### 3.2. スレッド設計 (Producer-Consumer Model)
 
@@ -96,17 +78,19 @@ graph TD
         *   **容量限界:** チャンクが満杯になった時。
         *   **タイムアウト:** 前回のスワップから **16ms (約60fps)** 経過し、かつデータが存在する時。
     *   **排他:** データのコピーやロック待ちは発生しない（チャンクの所有権移動のみ）。
+    *   **重要:** 16ms経ってもデータが0バイトならスワップしない（空チャンクの大量生成を防止）。
 
 2.  **Logging/Paging Thread (Consumer):**
     *   **役割:** データの永続化とメモリ再利用。
-    *   **挙動:** `Finished Queue` からデータ入りチャンクを受け取り、ディスク（Tempまたはログファイル）へ書き込む。
+    *   **挙動:** `finished_list` の **先頭** からチャンクを取り出し、ディスクへ書き込む。
     *   **再利用:** 書き込み完了後、チャンクを `Object Pool` へ返却する。
+    *   **注意:** UIがまだ参照中のチャンクは取り出さない（参照カウントまたはフラグで管理）。
 
-3.  **Main Thread (Tauri/IPC):**
-    *   **役割:** UIからのリクエスト処理。
-    *   **挙動:** メモリ上の最新チャンク（Finished Queue内）またはディスク上のデータを参照してUIへ返す。
-
-
+3.  **UI Thread (Reader):**
+    *   **役割:** リアルタイム表示と過去データスクロール。
+    *   **リアルタイム表示:** `finished_list` の **末尾** （最新チャンク）を参照。Loggerのディスク書き込みを待たない。
+    *   **過去データ表示:** `archived_index` を検索し、該当ファイルから読み出し。
+    *   **60fpsタイマー:** UIは約16ms間隔でデータを取得して描画。
 
 ---
 
@@ -118,21 +102,24 @@ graph TD
 
 ```rust
 struct Chunk {
-    buffer: Box<[u8]>,    // データ領域 (固定サイズ: 例 64KB - 128KB)
+    buffer: Box<[u8]>,    // データ領域 (固定サイズ: 64KB)
     capacity: usize,      // 最大サイズ
     valid_len: usize,     // 有効データ長
-    timestamp: u64,       // 受信開始時刻 (システム時刻)
+    timestamp: u64,       // 受信開始時刻
+    global_offset: u64,   // このチャンクの開始オフセット（通信全体での位置）
 }
 
 struct DataStore {
-    // 空きチャンクのプール (ロックフリーキュー または Mutex<Vec>)
+    // 空きチャンクのプール (ロックフリーキュー)
+    // Producer (Worker) のみが pop、Consumer (Logger) のみが push
     free_pool: Arc<SegQueue<Chunk>>,
     
-    // 受信完了したがディスク未書き込みのチャンク (UIはここも参照可能)
-    finished_queue: Arc<SegQueue<Chunk>>,
+    // 受信完了したチャンクのリスト (UI読み取り可能)
+    // ★重要: VecDeque を使用し、UIからの読み取り（iter）とLoggerからのpop_frontを両立
+    finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     
     // ディスク書き出し完了したデータのインデックス
-    archived_index: RwLock<Vec<PageMetadata>>,
+    archived_index: Arc<RwLock<Vec<PageMetadata>>>,
 }
 
 struct PageMetadata {
@@ -143,32 +130,56 @@ struct PageMetadata {
 }
 ```
 
-* **Chunk Size:** 12Mbps (約1.5MB/s) において 16ms 分のデータは約24KB。ゆとりを持たせて **64KB** 程度とする。
+> [!WARNING]
+> **SegQueue vs VecDeque の選択理由:**
+> - `SegQueue`: ロックフリーだが pop のみ可能（UI読み取り不可）
+> - `VecDeque + RwLock`: UI読み取り（iter）とLogger取り出し（pop_front）を両立
+
+* **Chunk Size:** 12Mbps (約1.5MB/s) において 16ms 分のデータは約24KB。ゆとりを持たせて **64KB** とする。
 
 ### 4.2. 読み書きフロー (The Bucket Relay)
 
 1.  **初期化:**
-    *   起動時に `Chunk` を一定数（例: 100個）生成し、`free_pool` に投入。以降、メモリ確保は行わない。
+    *   起動時に `Chunk` を一定数（例: 100個 = 約6.4MB）生成し、`free_pool` に投入。
+    *   以降、メモリ確保は行わない。
 
-2.  **Write (受信フェーズ):**
-    *   Workerは `free_pool` から1つ取り出す（なければログ書き込み待ち or 新規確保）。
-    *   データを書き込む。
-    *   **16ms経過** または **満杯** になったら `finished_queue` へ移動（Publish）。
+2.  **Write (受信フェーズ) - Worker Thread:**
+    *   `free_pool` から空チャンクを1つ取り出す。
+    *   シリアルデータを書き込む。
+    *   **16ms経過** または **満杯** になったら `finished_list` の末尾へ追加（Publish）。
+    *   **空データは追加しない**（16ms経ってもデータ0バイトならスワップしない）。
 
-3.  **Persist (保存フェーズ):**
-    *   Loggerは `finished_queue` から取り出す。
+3.  **Persist (保存フェーズ) - Logger Thread:**
+    *   `finished_list` の **先頭** からチャンクを取り出す。
     *   ディスクへ追記書き込み。
     *   書き込み完了後、`archived_index` を更新し、Chunkを `free_pool` へ返却（Recycle）。
 
-4.  **Read (UI/Viewer):**
-    *   最新データ: `finished_queue` 内のChunkを参照。
-    *   過去データ: `archived_index` を検索し、該当ファイルを `seek` して読み出し。
-    *   UIスレッドはデータの実体をコピーせず、必要な部分のみを参照/取得する。
+4.  **Read (UI/Viewer) - UI Thread:**
+    *   **リアルタイム表示:** `finished_list` を直接イテレートし、最新チャンクを参照。
+    *   **過去データ表示:** `archived_index` を検索し、該当ファイルを `seek` して読み出し。
+    *   **コピー最小化:** UIスレッドはデータの実体をコピーせず、必要な部分のみ参照。
 
-### 4.3. リスク管理 (Disk I/O Bottleneck)
+### 4.3. UIへのデータ通知 (Push Model)
 
-*   **リスク:** ディスク書き込み速度が長期間にわたって受信速度 (12Mbps) を下回ると、`free_pool` への返却が遅れ、最終的にプールが枯渇して受信停止する可能性があります。
-*   **対策:** OSのキャッシュフラッシュ等による一時的な遅延を吸収するため、**十分な数のチャンク（数秒〜数十秒分）** を確保することで実用上の問題を回避します。
+ポーリングではなく、Backend → Frontend への **Push 型通知** を採用する。
+
+**UiNotifier Thread:**
+*   Worker がチャンクを `finished_list` へ追加したタイミングで、最大60fpsに間引いてイベントを発火。
+*   イベントには `total_bytes` と最新チャンクの一部（または参照情報）を含む。
+
+```rust
+// data-update イベントのペイロード
+struct DataUpdatePayload {
+    total_bytes: u64,           // 受信済み総バイト数
+    recent_chunk_offset: u64,   // 最新チャンクの開始オフセット
+    recent_chunk_data: Vec<u8>, // 最新チャンクのデータ（最大4KB程度）
+}
+```
+
+### 4.4. リスク管理 (Disk I/O Bottleneck)
+
+*   **リスク:** ディスク書き込み速度が受信速度 (12Mbps) を下回ると、`free_pool` が枯渇する。
+*   **対策:** 十分な数のチャンク（数秒〜数十秒分）を確保し、一時的な遅延を吸収する。
 
 ---
 
