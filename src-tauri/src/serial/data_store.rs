@@ -7,11 +7,13 @@ use std::sync::{
     Arc, Mutex, RwLock,
 };
 use std::thread::JoinHandle;
+use tauri::AppHandle;
 
 use super::chunk::Chunk;
 use super::logger_thread::{self, PageMetadata};
 use super::object_pool::ObjectPool;
 use super::port::SerialPort;
+use super::ui_notifier;
 use super::worker_thread;
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB
@@ -20,7 +22,7 @@ const INITIAL_POOL_SIZE: usize = 100; // 約6.4MB
 /// DataStore: データ管理の中核
 ///
 /// ObjectPool、FinishedQueue、ArchivedIndexを統合し、
-/// Worker/Logger スレッドのライフサイクルを管理する。
+/// Worker/Logger/UiNotifier スレッドのライフサイクルを管理する。
 pub struct DataStore {
     free_pool: Arc<SegQueue<Chunk>>,
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
@@ -30,6 +32,7 @@ pub struct DataStore {
     // スレッド管理
     worker_handle: Mutex<Option<JoinHandle<()>>>,
     logger_handle: Mutex<Option<JoinHandle<()>>>,
+    ui_notifier_handle: Mutex<Option<JoinHandle<()>>>,
     stop_flag: Arc<AtomicBool>,
 }
 
@@ -60,6 +63,7 @@ impl DataStore {
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
+            ui_notifier_handle: Mutex::new(None),
             stop_flag: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -68,7 +72,14 @@ impl DataStore {
     ///
     /// # Arguments
     /// * `port` - SerialPortのArc<Mutex>
-    pub fn start_reception(&self, port: Arc<Mutex<SerialPort>>) -> Result<(), String> {
+    /// * `app_handle` - UIイベント送信用のTauri AppHandle
+    /// * `self_arc` - UI Notifier用のDataStore Arc参照
+    pub fn start_reception(
+        &self,
+        port: Arc<Mutex<SerialPort>>,
+        app_handle: AppHandle,
+        self_arc: Arc<Self>,
+    ) -> Result<(), String> {
         println!("[DataStore] Starting reception");
         // 既に動作中の場合は停止
         self.stop_reception();
@@ -94,9 +105,15 @@ impl DataStore {
             self.stop_flag.clone(),
         );
 
+        // UiNotifier Thread起動
+        println!("[DataStore] Spawning UiNotifier Thread");
+        let ui_notifier_handle =
+            ui_notifier::spawn_ui_notifier_thread(self_arc, self.stop_flag.clone(), app_handle);
+
         // ハンドルを保存
         *self.worker_handle.lock().unwrap() = Some(worker_handle);
         *self.logger_handle.lock().unwrap() = Some(logger_handle);
+        *self.ui_notifier_handle.lock().unwrap() = Some(ui_notifier_handle);
 
         println!("[DataStore] Reception started successfully");
         Ok(())
@@ -112,6 +129,9 @@ impl DataStore {
             let _ = handle.join();
         }
         if let Some(handle) = self.logger_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.ui_notifier_handle.lock().unwrap().take() {
             let _ = handle.join();
         }
 
@@ -240,7 +260,8 @@ impl DataStore {
         total
     }
 
-    /// 一時ディレクトリパスを取得
+    /// 一時ディレクトリパスを取得（診断/デバッグ用）
+    #[allow(dead_code)]
     pub fn temp_dir(&self) -> &PathBuf {
         &self.temp_dir
     }

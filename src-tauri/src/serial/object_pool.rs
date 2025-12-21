@@ -34,8 +34,8 @@ impl ObjectPool {
     /// 空きChunkを取得
     ///
     /// プールが空の場合は新規作成する。
-    /// Note: 現在は直接SegQueue::pop()を使用しているが、
-    /// 将来的なリファクタリングのために残している
+    /// Note: Arc<Chunk>設計採用により、Chunkはdrop時に自動解放されるため
+    /// return_chunkは不要。テスト用に残している。
     #[allow(dead_code)]
     pub fn get_free_chunk(&self) -> Chunk {
         self.pool.pop().unwrap_or_else(|| {
@@ -44,17 +44,16 @@ impl ObjectPool {
         })
     }
 
-    /// Chunkをプールに返却
-    ///
-    /// # Arguments
-    /// * `chunk` - 返却するChunk（クリアされて再利用可能になる）
-    pub fn return_chunk(&self, mut chunk: Chunk) {
+    /// Chunkをプールに返却（テスト用）
+    #[cfg(test)]
+    fn return_chunk(&self, mut chunk: Chunk) {
         chunk.clear();
         self.pool.push(chunk);
     }
 
-    /// プール内の利用可能Chunk数を取得（デバッグ用）
-    pub fn available_count(&self) -> usize {
+    /// プール内の利用可能Chunk数を取得（テスト用）
+    #[cfg(test)]
+    fn available_count(&self) -> usize {
         self.pool.len()
     }
 

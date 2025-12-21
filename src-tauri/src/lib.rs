@@ -19,7 +19,9 @@ pub fn run() {
             serial::list_ports,
             serial::open_port,
             serial::close_port,
-            serial::write_data
+            serial::write_data,
+            serial::get_read_data,
+            serial::get_display_rows
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

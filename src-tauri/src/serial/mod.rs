@@ -3,6 +3,7 @@ mod data_store;
 mod logger_thread;
 mod object_pool;
 pub mod port;
+mod ui_notifier;
 mod worker_thread;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
@@ -37,7 +38,7 @@ struct DataUpdatePayload {
 #[tauri::command]
 pub fn open_port(
     state: State<'_, SerialState>,
-    _app: AppHandle,
+    app: AppHandle,
     port_name: String,
     baud_rate: u32,
 ) -> Result<(), String> {
@@ -73,14 +74,11 @@ pub fn open_port(
     let port_arc = Arc::new(Mutex::new(port));
     *port_guard = Some(port_arc.clone());
 
-    // Create NEW DataStore and start reception
+    // Create NEW DataStore and start reception with UI event notification
     println!("[open_port] Creating new DataStore");
     let data_store = Arc::new(DataStore::new()?);
-    data_store.start_reception(port_arc.clone())?;
+    data_store.start_reception(port_arc.clone(), app, data_store.clone())?;
     *store_guard = Some(data_store.clone());
-
-    // Note: Phase 2では、data-updateイベントはまだ実装していません
-    // Phase 3で finished_queue を監視してUIイベントを送る仕組みを追加します
 
     Ok(())
 }
@@ -115,6 +113,148 @@ pub fn write_data(state: State<'_, SerialState>, data: Vec<u8>) -> Result<usize,
         }
     }
     Err("Port not open".to_string())
+}
+
+#[tauri::command]
+pub fn get_read_data(
+    state: State<'_, SerialState>,
+    offset: u64,
+    length: u32,
+) -> Result<Vec<u8>, String> {
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+    if let Some(ref data_store) = *store_guard {
+        data_store.get_data(offset, length)
+    } else {
+        Err("No data available".to_string())
+    }
+}
+
+const BYTES_PER_ROW: usize = 16;
+
+/// A single row of hex display data
+#[derive(Clone, serde::Serialize)]
+pub struct DisplayRow {
+    offset: u64,
+    hex: String,
+    ascii: String,
+}
+
+/// Payload for get_display_rows command
+#[derive(Clone, serde::Serialize)]
+pub struct DisplayRowsPayload {
+    rows: Vec<DisplayRow>,
+    total_rows: u64,
+}
+
+/// Convert a byte to its ASCII representation (printable or placeholder)
+fn byte_to_ascii(b: u8) -> char {
+    if (0x20..=0x7e).contains(&b) {
+        b as char
+    } else {
+        match b {
+            0x00 => '␀',
+            0x0a => '␊',
+            0x0d => '␍',
+            0x09 => '␉',
+            _ => '·',
+        }
+    }
+}
+
+/// Convert bytes to hex string with spaces
+fn bytes_to_hex(data: &[u8]) -> String {
+    data.iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Convert bytes to ASCII string
+fn bytes_to_ascii(data: &[u8]) -> String {
+    data.iter().map(|&b| byte_to_ascii(b)).collect()
+}
+
+#[tauri::command]
+pub fn get_display_rows(
+    state: State<'_, SerialState>,
+    start_row: u64,
+    row_count: u32,
+) -> Result<DisplayRowsPayload, String> {
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if let Some(ref data_store) = *store_guard {
+        let total_bytes = data_store.total_bytes();
+        let total_rows = total_bytes.div_ceil(BYTES_PER_ROW as u64);
+
+        // Calculate byte range
+        let start_offset = start_row * BYTES_PER_ROW as u64;
+        let bytes_needed = (row_count as usize) * BYTES_PER_ROW;
+
+        // Clamp to available data
+        if start_offset >= total_bytes {
+            return Ok(DisplayRowsPayload {
+                rows: vec![],
+                total_rows,
+            });
+        }
+
+        let actual_length = std::cmp::min(
+            bytes_needed as u64,
+            total_bytes.saturating_sub(start_offset),
+        ) as u32;
+
+        // Get raw data
+        let data = if actual_length > 0 {
+            match data_store.get_data(start_offset, actual_length) {
+                Ok(d) => {
+                    if d.len() != actual_length as usize {
+                        eprintln!(
+                            "[get_display_rows] Warning: requested {} bytes at offset {}, got {} bytes",
+                            actual_length, start_offset, d.len()
+                        );
+                    }
+                    d
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[get_display_rows] Error fetching data at offset {}, length {}: {}",
+                        start_offset, actual_length, e
+                    );
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        // Convert to display rows
+        let mut rows = Vec::new();
+        for i in 0..(row_count as usize) {
+            let row_offset = start_offset + (i * BYTES_PER_ROW) as u64;
+            if row_offset >= total_bytes {
+                break;
+            }
+
+            let data_start = i * BYTES_PER_ROW;
+            let data_end = std::cmp::min(data_start + BYTES_PER_ROW, data.len());
+
+            if data_start < data.len() {
+                let row_data = &data[data_start..data_end];
+                rows.push(DisplayRow {
+                    offset: row_offset,
+                    hex: bytes_to_hex(row_data),
+                    ascii: bytes_to_ascii(row_data),
+                });
+            }
+        }
+
+        Ok(DisplayRowsPayload { rows, total_rows })
+    } else {
+        Ok(DisplayRowsPayload {
+            rows: vec![],
+            total_rows: 0,
+        })
+    }
 }
 
 #[tauri::command]

@@ -8,6 +8,7 @@ pub struct Chunk {
     buffer: Box<[u8]>,
     capacity: usize,
     valid_len: usize,
+    #[allow(dead_code)] // Phase 4: タイムスタンプ表示機能で使用予定
     timestamp: u64,
     global_offset: u64,
 }
@@ -68,6 +69,8 @@ impl Chunk {
     }
 
     /// タイムスタンプを取得
+    /// Phase 4: タイムスタンプ表示機能で使用予定
+    #[allow(dead_code)]
     pub fn timestamp(&self) -> u64 {
         self.timestamp
     }
@@ -82,7 +85,9 @@ impl Chunk {
         self.global_offset
     }
 
-    /// Chunkをクリアして再利用可能にする
+    /// Chunkをクリアして再利用可能にする（テスト用）
+    /// Note: Arc設計でChunkは自動drop。プール返却不要のため実運用では未使用
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.valid_len = 0;
         self.timestamp = Self::now();
