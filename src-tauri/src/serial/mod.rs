@@ -1,17 +1,17 @@
 mod chunk;
 mod data_store;
 mod logger_thread;
-mod object_pool;
 pub mod port;
 mod ui_notifier;
 mod worker_thread;
+
+use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, DIGCF_PRESENT, SPDRP_FRIENDLYNAME, SP_DEVINFO_DATA,
 };
-// use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-// use windows::Win32::Devices::Communication::GUID_DEVINTERFACE_COMPORT; // Might need to check where this is
-use windows::core::{GUID, PCWSTR};
+
+use log::warn;
 
 // Standard GUID for COM ports (Ports class)
 // 4D36E978-E325-11CE-BFC1-08002BE10318
@@ -21,18 +21,10 @@ use data_store::DataStore;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
+/// シリアル通信の状態を管理する構造体
 pub struct SerialState {
     pub port: Mutex<Option<Arc<Mutex<port::SerialPort>>>>,
     pub data_store: Mutex<Option<Arc<DataStore>>>,
-}
-
-// Phase 3で使用予定: data-updateイベントのペイロード
-// UIへ受信データと総バイト数を通知するために使用
-#[allow(dead_code)]
-#[derive(Clone, serde::Serialize)]
-struct DataUpdatePayload {
-    data: Vec<u8>,
-    total_bytes: u64,
 }
 
 #[tauri::command]
@@ -48,7 +40,7 @@ pub fn open_port(
     // Close existing port and DataStore if open
     // This will drop the old DataStore and delete its temp files
     if let Some(existing_store) = store_guard.take() {
-        println!("[open_port] Stopping and dropping existing DataStore");
+        log::info!("[open_port] Stopping and dropping existing DataStore");
         existing_store.stop_reception();
         // existing_store is dropped here, temp files deleted
     }
@@ -75,7 +67,7 @@ pub fn open_port(
     *port_guard = Some(port_arc.clone());
 
     // Create NEW DataStore and start reception with UI event notification
-    println!("[open_port] Creating new DataStore");
+    log::info!("[open_port] Creating new DataStore");
     let data_store = Arc::new(DataStore::new()?);
     data_store.start_reception(port_arc.clone(), app, data_store.clone())?;
     *store_guard = Some(data_store.clone());
@@ -208,7 +200,7 @@ pub fn get_display_rows(
             match data_store.get_data(start_offset, actual_length) {
                 Ok(d) => {
                     if d.len() != actual_length as usize {
-                        eprintln!(
+                        warn!(
                             "[get_display_rows] Warning: requested {} bytes at offset {}, got {} bytes",
                             actual_length, start_offset, d.len()
                         );
@@ -216,7 +208,7 @@ pub fn get_display_rows(
                     d
                 }
                 Err(e) => {
-                    eprintln!(
+                    warn!(
                         "[get_display_rows] Error fetching data at offset {}, length {}: {}",
                         start_offset, actual_length, e
                     );

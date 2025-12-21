@@ -1,21 +1,22 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+// SerialMonitorEssential - Main library entry point
 mod serial;
 
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+use serial::SerialState;
+use std::sync::Mutex;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize logger
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    log::info!("SerialMonitorEssential starting...");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(serial::SerialState {
-            port: std::sync::Mutex::new(None),
-            data_store: std::sync::Mutex::new(None),
+        .manage(SerialState {
+            port: Mutex::new(None),
+            data_store: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             serial::list_ports,
             serial::open_port,
             serial::close_port,

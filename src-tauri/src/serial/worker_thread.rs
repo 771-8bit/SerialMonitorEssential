@@ -8,6 +8,8 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use log::{debug, info, warn};
+
 /// Worker Thread: シリアルポートからデータを受信
 ///
 /// ReadFileを高速に呼び出し、Chunkにデータを詰める。
@@ -22,7 +24,7 @@ pub fn spawn_worker_thread(
     stop_flag: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        println!("[Worker] Thread started");
+        info!("[Worker] Thread started");
         let mut current_chunk: Option<Chunk> = None;
         let mut last_swap = Instant::now();
         let mut read_buffer = vec![0u8; READ_BUFFER_SIZE];
@@ -32,7 +34,7 @@ pub fn spawn_worker_thread(
         loop {
             // 停止フラグチェック
             if stop_flag.load(Ordering::Relaxed) {
-                println!(
+                info!(
                     "[Worker] Stop flag detected, total bytes read: {}",
                     total_bytes_read
                 );
@@ -40,7 +42,7 @@ pub fn spawn_worker_thread(
                 if let Some(mut chunk) = current_chunk.take() {
                     if chunk.has_data() {
                         chunk.set_global_offset(global_offset);
-                        println!("[Worker] Pushing final chunk with {} bytes", chunk.len());
+                        debug!("[Worker] Pushing final chunk with {} bytes", chunk.len());
                         if let Ok(mut list) = finished_list.write() {
                             list.push_back(Arc::new(chunk));
                         }
@@ -61,19 +63,19 @@ pub fn spawn_worker_thread(
                     match p.read(&mut read_buffer) {
                         Ok(n) => n,
                         Err(e) => {
-                            eprintln!("[Worker] Read error: {}", e);
+                            warn!("[Worker] Read error: {}", e);
                             0
                         }
                     }
                 } else {
-                    eprintln!("[Worker] Mutex poisoned");
+                    warn!("[Worker] Mutex poisoned");
                     break;
                 }
             };
 
             if bytes_read > 0 {
                 total_bytes_read += bytes_read as u64;
-                println!(
+                debug!(
                     "[Worker] Read {} bytes (total: {})",
                     bytes_read, total_bytes_read
                 );
@@ -96,7 +98,7 @@ pub fn spawn_worker_thread(
                             let mut full_chunk = current_chunk.take().unwrap();
                             full_chunk.set_global_offset(global_offset);
                             global_offset += full_chunk.len() as u64;
-                            println!("[Worker] Chunk full, pushing to finished_list");
+                            debug!("[Worker] Chunk full, pushing to finished_list");
                             if let Ok(mut list) = finished_list.write() {
                                 list.push_back(Arc::new(full_chunk));
                             }
@@ -110,7 +112,7 @@ pub fn spawn_worker_thread(
             if let Some(ref chunk) = current_chunk {
                 let elapsed = last_swap.elapsed();
                 if elapsed >= Duration::from_millis(SWAP_TIMEOUT_MS) && chunk.has_data() {
-                    println!("[Worker] Timeout, pushing chunk with {} bytes", chunk.len());
+                    debug!("[Worker] Timeout, pushing chunk with {} bytes", chunk.len());
                     let mut timeout_chunk = current_chunk.take().unwrap();
                     timeout_chunk.set_global_offset(global_offset);
                     global_offset += timeout_chunk.len() as u64;
@@ -126,6 +128,6 @@ pub fn spawn_worker_thread(
                 thread::sleep(Duration::from_millis(1));
             }
         }
-        println!("[Worker] Thread exiting");
+        info!("[Worker] Thread exiting");
     })
 }

@@ -7,6 +7,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+use log::{debug, info, warn};
+
 /// UiNotifier Thread: フロントエンドへのデータ更新通知
 ///
 /// DataStoreのtotal_bytesを監視し、60fps（16ms間隔）で間引いてイベントを発火する。
@@ -24,7 +26,7 @@ pub fn spawn_ui_notifier_thread(
     app_handle: AppHandle,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        println!("[UiNotifier] Thread started");
+        info!("[UiNotifier] Thread started");
         let mut last_notify = Instant::now();
         let mut last_total_bytes: u64 = 0;
         let mut event_count: u64 = 0;
@@ -32,7 +34,7 @@ pub fn spawn_ui_notifier_thread(
         loop {
             // 停止フラグチェック
             if stop_flag.load(Ordering::Relaxed) {
-                println!(
+                info!(
                     "[UiNotifier] Stop flag detected, exiting. Total events sent: {}",
                     event_count
                 );
@@ -55,12 +57,12 @@ pub fn spawn_ui_notifier_thread(
                 let payload = DataUpdatePayload { total_bytes };
 
                 if let Err(e) = app_handle.emit("data-update", payload) {
-                    eprintln!("[UiNotifier] Failed to emit event: {:?}", e);
+                    warn!("[UiNotifier] Failed to emit event: {:?}", e);
                 } else {
                     event_count += 1;
                     // 最初の10回と100回ごとにログ出力
                     if event_count <= 10 || event_count.is_multiple_of(100) {
-                        println!(
+                        debug!(
                             "[UiNotifier] Event #{}: total_bytes = {}",
                             event_count, total_bytes
                         );
@@ -72,6 +74,6 @@ pub fn spawn_ui_notifier_thread(
 
             last_notify = Instant::now();
         }
-        println!("[UiNotifier] Thread exiting");
+        info!("[UiNotifier] Thread exiting");
     })
 }

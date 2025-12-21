@@ -9,9 +9,10 @@ use std::sync::{
 use std::thread::JoinHandle;
 use tauri::AppHandle;
 
+use log::{debug, error, info, warn};
+
 use super::chunk::Chunk;
 use super::logger_thread::{self, PageMetadata};
-use super::object_pool::ObjectPool;
 use super::port::SerialPort;
 use super::ui_notifier;
 use super::worker_thread;
@@ -53,11 +54,14 @@ impl DataStore {
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {:?}", e))?;
 
-        // ObjectPool初期化
-        let pool = ObjectPool::new(INITIAL_POOL_SIZE, CHUNK_SIZE);
+        // ObjectPool初期化（直接SegQueueを使用）
+        let free_pool = Arc::new(SegQueue::new());
+        for _ in 0..INITIAL_POOL_SIZE {
+            free_pool.push(Chunk::new(CHUNK_SIZE));
+        }
 
         Ok(Self {
-            free_pool: pool.as_arc(),
+            free_pool,
             finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),
             temp_dir,
@@ -80,7 +84,7 @@ impl DataStore {
         app_handle: AppHandle,
         self_arc: Arc<Self>,
     ) -> Result<(), String> {
-        println!("[DataStore] Starting reception");
+        info!("[DataStore] Starting reception");
         // 既に動作中の場合は停止
         self.stop_reception();
 
@@ -88,7 +92,7 @@ impl DataStore {
         self.stop_flag.store(false, Ordering::Relaxed);
 
         // Worker Thread起動
-        println!("[DataStore] Spawning Worker Thread");
+        debug!("[DataStore] Spawning Worker Thread");
         let worker_handle = worker_thread::spawn_worker_thread(
             port,
             self.free_pool.clone(),
@@ -97,7 +101,7 @@ impl DataStore {
         );
 
         // Logger Thread起動
-        println!("[DataStore] Spawning Logger Thread");
+        debug!("[DataStore] Spawning Logger Thread");
         let logger_handle = logger_thread::spawn_logger_thread(
             self.finished_list.clone(),
             self.archived_index.clone(),
@@ -106,7 +110,7 @@ impl DataStore {
         );
 
         // UiNotifier Thread起動
-        println!("[DataStore] Spawning UiNotifier Thread");
+        debug!("[DataStore] Spawning UiNotifier Thread");
         let ui_notifier_handle =
             ui_notifier::spawn_ui_notifier_thread(self_arc, self.stop_flag.clone(), app_handle);
 
@@ -115,7 +119,7 @@ impl DataStore {
         *self.logger_handle.lock().unwrap() = Some(logger_handle);
         *self.ui_notifier_handle.lock().unwrap() = Some(ui_notifier_handle);
 
-        println!("[DataStore] Reception started successfully");
+        info!("[DataStore] Reception started successfully");
         Ok(())
     }
 
@@ -147,6 +151,12 @@ impl DataStore {
     ///
     /// # Returns
     /// データのVec<u8>
+    ///
+    /// # Data Source Priority
+    /// 1. archived_index (ディスク) - 確定済みの古いデータ
+    /// 2. finished_list (メモリ) - 最新のデータ
+    ///
+    /// 両方のソースを global_offset 順に検索し、境界をまたぐリクエストにも対応。
     pub fn get_data(&self, offset: u64, length: u32) -> Result<Vec<u8>, String> {
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
@@ -156,7 +166,52 @@ impl DataStore {
         let mut current_offset = offset;
         let mut remaining = length;
 
-        // まずメモリ上（finished_list）を検索
+        // 1. まずディスク上（archived_index）を検索 - 確定済みデータ
+        if let Ok(index) = self.archived_index.read() {
+            for page in index.iter() {
+                let page_start = page.global_offset;
+                let page_end = page_start + page.data_length as u64;
+
+                // このページに要求範囲が含まれるか
+                if current_offset < page_end && page_start < current_offset + remaining as u64 {
+                    // current_offset がこのページ内にあるか確認
+                    if current_offset >= page_start {
+                        let page_offset = current_offset - page_start;
+                        let to_read =
+                            remaining.min((page.data_length as u64 - page_offset) as usize);
+
+                        // ファイルから読み取り
+                        let mut file = File::open(&page.file_path).map_err(|e| {
+                            format!("Failed to open file {:?}: {:?}", page.file_path, e)
+                        })?;
+
+                        file.seek(SeekFrom::Start(page.file_offset + page_offset))
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to seek to offset {}: {:?}",
+                                    page.file_offset + page_offset,
+                                    e
+                                )
+                            })?;
+
+                        let mut buffer = vec![0u8; to_read];
+                        file.read_exact(&mut buffer)
+                            .map_err(|e| format!("Failed to read {} bytes: {:?}", to_read, e))?;
+
+                        result.extend_from_slice(&buffer);
+
+                        current_offset += to_read as u64;
+                        remaining -= to_read;
+
+                        if remaining == 0 {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. 次にメモリ上（finished_list）を検索 - 最新データ
         if let Ok(list) = self.finished_list.read() {
             for chunk in list.iter() {
                 let chunk_start = chunk.global_offset();
@@ -164,62 +219,19 @@ impl DataStore {
 
                 // このチャンクに要求範囲が含まれるか
                 if current_offset < chunk_end && chunk_start < current_offset + remaining as u64 {
-                    // チャンク内のオフセットを計算
-                    let chunk_offset = if current_offset >= chunk_start {
-                        (current_offset - chunk_start) as usize
-                    } else {
-                        0
-                    };
+                    // current_offset がこのチャンク内にあるか確認
+                    if current_offset >= chunk_start {
+                        let chunk_offset = (current_offset - chunk_start) as usize;
+                        let to_read = remaining.min(chunk.len() - chunk_offset);
+                        let data = chunk.data();
+                        result.extend_from_slice(&data[chunk_offset..chunk_offset + to_read]);
 
-                    let to_read = remaining.min(chunk.len() - chunk_offset);
-                    let data = chunk.data();
-                    result.extend_from_slice(&data[chunk_offset..chunk_offset + to_read]);
+                        current_offset += to_read as u64;
+                        remaining -= to_read;
 
-                    current_offset += to_read as u64;
-                    remaining -= to_read;
-
-                    if remaining == 0 {
-                        return Ok(result);
-                    }
-                }
-            }
-        }
-
-        // ディスク上のデータを検索
-        if let Ok(index) = self.archived_index.read() {
-            for page in index.iter() {
-                if current_offset >= page.global_offset
-                    && current_offset < page.global_offset + page.data_length as u64
-                {
-                    // このページにデータがある
-                    let page_offset = current_offset - page.global_offset;
-                    let to_read = remaining.min(page.data_length - page_offset as usize);
-
-                    // ファイルから読み取り
-                    let mut file = File::open(&page.file_path).map_err(|e| {
-                        format!("Failed to open file {:?}: {:?}", page.file_path, e)
-                    })?;
-
-                    file.seek(SeekFrom::Start(page.file_offset + page_offset))
-                        .map_err(|e| {
-                            format!(
-                                "Failed to seek to offset {}: {:?}",
-                                page.file_offset + page_offset,
-                                e
-                            )
-                        })?;
-
-                    let mut buffer = vec![0u8; to_read];
-                    file.read_exact(&mut buffer)
-                        .map_err(|e| format!("Failed to read {} bytes: {:?}", to_read, e))?;
-
-                    result.extend_from_slice(&buffer);
-
-                    current_offset += to_read as u64;
-                    remaining -= to_read;
-
-                    if remaining == 0 {
-                        break;
+                        if remaining == 0 {
+                            return Ok(result);
+                        }
                     }
                 }
             }
@@ -269,7 +281,7 @@ impl DataStore {
 
 impl Drop for DataStore {
     fn drop(&mut self) {
-        println!(
+        info!(
             "[DataStore::Drop] Cleaning up, temp_dir: {:?}",
             self.temp_dir
         );
@@ -279,11 +291,11 @@ impl Drop for DataStore {
 
         // 一時ファイルを削除（ベストエフォート）
         match fs::remove_dir_all(&self.temp_dir) {
-            Ok(_) => println!("[DataStore::Drop] Successfully removed temp directory"),
-            Err(e) => eprintln!("[DataStore::Drop] Failed to remove temp directory: {:?}", e),
+            Ok(_) => info!("[DataStore::Drop] Successfully removed temp directory"),
+            Err(e) => warn!("[DataStore::Drop] Failed to remove temp directory: {:?}", e),
         }
 
-        println!("[DataStore::Drop] Cleanup complete");
+        debug!("[DataStore::Drop] Cleanup complete");
     }
 }
 
@@ -295,7 +307,7 @@ fn cleanup_stale_directories(base_dir: &std::path::Path, current_pid: u32) -> Re
         return Ok(());
     }
 
-    println!(
+    debug!(
         "[cleanup] Checking for stale directories in: {:?}",
         base_dir
     );
@@ -313,21 +325,21 @@ fn cleanup_stale_directories(base_dir: &std::path::Path, current_pid: u32) -> Re
 
                     // プロセスが存在しないなら削除
                     if !is_process_running(pid) {
-                        println!("[cleanup] Removing stale directory for PID: {}", pid);
+                        info!("[cleanup] Removing stale directory for PID: {}", pid);
                         if let Err(e) = fs::remove_dir_all(entry.path()) {
-                            eprintln!(
+                            warn!(
                                 "[cleanup] Failed to remove directory for PID {}: {:?}",
                                 pid, e
                             );
                         }
                     } else {
-                        println!("[cleanup] Keeping directory for active PID: {}", pid);
+                        debug!("[cleanup] Keeping directory for active PID: {}", pid);
                     }
                 }
             }
         }
         Err(e) => {
-            eprintln!("[cleanup] Failed to read base directory: {:?}", e);
+            error!("[cleanup] Failed to read base directory: {:?}", e);
         }
     }
 
@@ -361,14 +373,14 @@ fn is_process_running(pid: u32) -> bool {
                         let is_ours = process_path
                             .to_lowercase()
                             .contains("serialmonitoressential");
-                        println!(
+                        debug!(
                             "[is_process_running] PID {}: path={}, is_ours={}",
                             pid, process_path, is_ours
                         );
                         is_ours
                     }
                     Err(e) => {
-                        println!("[is_process_running] PID {}: Failed to get process name: {:?}, assuming not ours", pid, e);
+                        debug!("[is_process_running] PID {}: Failed to get process name: {:?}, assuming not ours", pid, e);
                         false
                     }
                 };
@@ -377,7 +389,7 @@ fn is_process_running(pid: u32) -> bool {
                 is_our_process
             }
             Err(e) => {
-                println!(
+                debug!(
                     "[is_process_running] PID {} does not exist (OpenProcess failed: {:?})",
                     pid, e
                 );
@@ -392,4 +404,194 @@ fn is_process_running(pid: u32) -> bool {
 fn is_process_running(_pid: u32) -> bool {
     // 非Windowsでは常にfalseを返す（削除する）
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// テスト用にDataStoreの内部状態を直接操作するためのヘルパー
+    fn create_test_data_store() -> DataStore {
+        let pid = std::process::id();
+        let base_dir = std::env::temp_dir().join("SerialMonitorEssential_test");
+        let temp_dir = base_dir.join(format!(
+            "{}_{}",
+            pid,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        DataStore {
+            free_pool: Arc::new(SegQueue::new()),
+            finished_list: Arc::new(RwLock::new(VecDeque::new())),
+            archived_index: Arc::new(RwLock::new(Vec::new())),
+            temp_dir,
+            worker_handle: Mutex::new(None),
+            logger_handle: Mutex::new(None),
+            ui_notifier_handle: Mutex::new(None),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// archived_indexのみからデータを取得できることを確認
+    #[test]
+    fn test_get_data_from_archived_only() {
+        let store = create_test_data_store();
+
+        // テストデータをファイルに書き込む
+        let test_file = store.temp_dir.join("test_data.bin");
+        let test_data: Vec<u8> = (0..100).collect();
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&test_data).unwrap();
+        }
+
+        // archived_indexにメタデータを追加
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+        }
+
+        // データを取得
+        let result = store.get_data(0, 100).unwrap();
+        assert_eq!(result, test_data);
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// finished_listのみからデータを取得できることを確認
+    #[test]
+    fn test_get_data_from_finished_list_only() {
+        let store = create_test_data_store();
+
+        // finished_listにチャンクを追加
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(0);
+
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // データを取得
+        let result = store.get_data(0, 50).unwrap();
+        assert_eq!(result, test_data);
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// 【問題を示すテスト】
+    /// archived_indexにデータがあり、finished_listにもデータがある場合、
+    /// 現在の実装ではfinished_listを先に検索するため、
+    /// archived_indexのデータを正しく取得できない可能性がある
+    #[test]
+    fn test_get_data_archived_then_finished() {
+        let store = create_test_data_store();
+
+        // --- archived_index に最初の100バイトを追加 ---
+        let test_file = store.temp_dir.join("test_data.bin");
+        let archived_data: Vec<u8> = (0..100).collect();
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&archived_data).unwrap();
+        }
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+        }
+
+        // --- finished_list に次の50バイトを追加 ---
+        let mut chunk = Chunk::new(100);
+        let finished_data: Vec<u8> = (100..150).collect();
+        chunk.push_data(&finished_data);
+        chunk.set_global_offset(100); // offset 100から開始
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // --- archived_indexのデータ(offset 0-100)を取得 ---
+        // 現在の実装: finished_listを先に検索するが、
+        // offset 0のデータはfinished_listにないのでスキップされ、
+        // 次にarchived_indexを検索して取得できるはず
+        let result = store.get_data(0, 100).unwrap();
+        assert_eq!(result.len(), 100);
+        assert_eq!(result, archived_data, "Should get data from archived_index");
+
+        // --- finished_listのデータ(offset 100-150)を取得 ---
+        let result2 = store.get_data(100, 50).unwrap();
+        assert_eq!(result2.len(), 50);
+        assert_eq!(result2, finished_data, "Should get data from finished_list");
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// 【境界をまたぐテスト】
+    /// archived_indexとfinished_listの両方にまたがるデータの取得
+    #[test]
+    fn test_get_data_spanning_archived_and_finished() {
+        let store = create_test_data_store();
+
+        // --- archived_index に最初の100バイトを追加 ---
+        let test_file = store.temp_dir.join("test_data.bin");
+        let archived_data: Vec<u8> = (0..100).collect();
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&archived_data).unwrap();
+        }
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+        }
+
+        // --- finished_list に次の100バイトを追加 ---
+        let mut chunk = Chunk::new(200);
+        let finished_data: Vec<u8> = (100..200).collect();
+        chunk.push_data(&finished_data);
+        chunk.set_global_offset(100);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // --- 境界をまたぐデータ(offset 50-150)を取得 ---
+        // archived: 50-100 (50 bytes) + finished: 100-150 (50 bytes) = 100 bytes
+        let result = store.get_data(50, 100).unwrap();
+
+        // 期待値: [50, 51, ..., 99, 100, 101, ..., 149]
+        let expected: Vec<u8> = (50..150).collect();
+
+        assert_eq!(result.len(), 100, "Should get 100 bytes total");
+        assert_eq!(
+            result, expected,
+            "Data should be continuous across boundary"
+        );
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
 }

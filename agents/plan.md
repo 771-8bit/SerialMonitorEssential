@@ -88,6 +88,7 @@ RustによるWin32 APIの直接制御で「データの完全性（取りこぼ�
         2. ディスクへ追記書き込み
         3. `archived_index` を更新（ここでデータが検索可能になる）
         4. `pop_front()` でチャンクを削除
+    *   **終了処理:** 通常処理と同じ順序で残りチャンクを処理。書き込み失敗時もログに記録して次へ進む（無限ループ防止）。
     *   **メモリ管理:** `Arc<Chunk>` の参照カウントが0になった時点でメモリ解放。プールへの返却は行わない（ゼロコピー設計）。
     *   **UI参照保護:** `Arc` により、UIが参照中のチャンクは自動的に保護される。
 
@@ -166,6 +167,7 @@ struct PageMetadata {
     *   **リアルタイム表示:** `data-update` イベントで `total_bytes` を受信 → `get_display_rows` APIで表示データを取得。
     *   **過去データ表示:** スクロール位置に応じて `get_display_rows` APIでバックエンドからデータ取得。
     *   **バックエンド処理:** Hex/ASCII変換はRust側で実行、フロントエンドは整形済みデータを受け取る。
+    *   **データ検索順序:** `get_data` は `archived_index`（確定データ）を先に検索し、足りない部分を `finished_list`（最新データ）から取得。これにより境界をまたぐリクエストにも正しく対応。
 
 ### 4.3. UIへのデータ通知 (Push Model)
 
@@ -485,7 +487,7 @@ const displayTop = scale === 1 ? currentStartRow * ROW_HEIGHT : scrollTop;
 > - [x] Worker Thread が `finished_list.write().push_back(Arc::new(chunk))` を使用している
 > - [x] Logger Thread が `finished_list.read().front()` で参照後、`finished_list.write().pop_front()` で削除している
 > - [x] Logger Thread が Arc<Chunk> を扱い、free_poolへの手動返却を行っていない（Arcのdropでメモリ解放）
-> - [x] `get_data` メソッドが finished_list を検索してから archived_index にフォールバックする
+> - [x] `get_data` メソッドが `archived_index`（確定データ）を先に検索し、`finished_list`（最新データ）にフォールバックする
 > - [x] `total_bytes` メソッドが finished_list の最新チャンクも考慮している
 
 
