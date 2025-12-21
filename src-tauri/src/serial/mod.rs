@@ -5,17 +5,7 @@ pub mod port;
 mod ui_notifier;
 mod worker_thread;
 
-use windows::core::{GUID, PCWSTR};
-use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-    SetupDiGetDeviceRegistryPropertyW, DIGCF_PRESENT, SPDRP_FRIENDLYNAME, SP_DEVINFO_DATA,
-};
-
 use log::warn;
-
-// Standard GUID for COM ports (Ports class)
-// 4D36E978-E325-11CE-BFC1-08002BE10318
-const GUID_DEVINTERFACE_COMPORT: GUID = GUID::from_u128(0x4D36E978_E325_11CE_BFC1_08002BE10318);
 
 use data_store::DataStore;
 use std::sync::{Arc, Mutex};
@@ -100,7 +90,7 @@ pub fn write_data(state: State<'_, SerialState>, data: Vec<u8>) -> Result<usize,
     let port_guard = state.port.lock().map_err(|e| e.to_string())?;
 
     if let Some(port) = port_guard.as_ref() {
-        if let Ok(p) = port.lock() {
+        if let Ok(mut p) = port.lock() {
             return p.write(&data);
         }
     }
@@ -251,60 +241,29 @@ pub fn get_display_rows(
 
 #[tauri::command]
 pub fn list_ports() -> Vec<String> {
-    let mut ports = Vec::new();
-
-    unsafe {
-        let h_dev_info = SetupDiGetClassDevsW(
-            Some(&GUID_DEVINTERFACE_COMPORT),
-            PCWSTR::null(),
-            None,
-            DIGCF_PRESENT,
-        );
-
-        if h_dev_info.is_err() {
-            return ports;
-        }
-        let h_dev_info = h_dev_info.unwrap();
-
-        let mut device_info_data = SP_DEVINFO_DATA {
-            cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
-            ..Default::default()
-        };
-
-        let mut index = 0;
-        while SetupDiEnumDeviceInfo(h_dev_info, index, &mut device_info_data).is_ok() {
-            let mut buffer = [0u16; 256];
-            let mut required_size = 0;
-
-            // Get Friendly Name
-            let res = SetupDiGetDeviceRegistryPropertyW(
-                h_dev_info,
-                &device_info_data,
-                SPDRP_FRIENDLYNAME,
-                None,
-                Some(std::slice::from_raw_parts_mut(
-                    buffer.as_mut_ptr() as *mut u8,
-                    512,
-                )),
-                Some(&mut required_size),
-            );
-
-            if res.is_ok() {
-                let len = (required_size / 2) as usize;
-                if len > 0 {
-                    let name = String::from_utf16_lossy(&buffer[..len - 1]); // remove null terminator
-                                                                             // Filter for "COM"
-                    if name.contains("(COM") {
-                        ports.push(name);
+    match serialport::available_ports() {
+        Ok(ports) => ports
+            .into_iter()
+            .map(|p| {
+                // Include friendly name for USB devices, or just the port name
+                match &p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        let product = info.product.as_deref().unwrap_or("Unknown Device");
+                        format!("{} ({})", product, p.port_name)
                     }
+                    serialport::SerialPortType::PciPort => {
+                        format!("PCI Device ({})", p.port_name)
+                    }
+                    serialport::SerialPortType::BluetoothPort => {
+                        format!("Bluetooth ({})", p.port_name)
+                    }
+                    serialport::SerialPortType::Unknown => p.port_name.clone(),
                 }
-            }
-
-            index += 1;
+            })
+            .collect(),
+        Err(e) => {
+            warn!("Failed to enumerate ports: {:?}", e);
+            vec![]
         }
-
-        let _ = SetupDiDestroyDeviceInfoList(h_dev_info);
     }
-
-    ports
 }

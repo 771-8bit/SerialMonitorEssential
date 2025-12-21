@@ -346,64 +346,39 @@ fn cleanup_stale_directories(base_dir: &std::path::Path, current_pid: u32) -> Re
     Ok(())
 }
 
-/// プロセスが実行中かどうかを確認（Windows）
-#[cfg(windows)]
+/// プロセスが実行中かどうかを確認（クロスプラットフォーム）
+///
+/// sysinfoクレートを使用して、指定されたPIDのプロセスが
+/// SerialMonitorEssentialであるかを確認する。
 fn is_process_running(pid: u32) -> bool {
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use sysinfo::{Pid, System};
 
-    unsafe {
-        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-            Ok(handle) => {
-                // プロセス名を取得して、SerialMonitorEssentialかどうか確認
-                let mut buffer = [0u16; 1024];
-                let mut size = buffer.len() as u32;
+    let mut sys = System::new();
+    let sysinfo_pid = Pid::from_u32(pid);
 
-                let is_our_process = match QueryFullProcessImageNameW(
-                    handle,
-                    windows::Win32::System::Threading::PROCESS_NAME_WIN32,
-                    PWSTR(buffer.as_mut_ptr()),
-                    &mut size,
-                ) {
-                    Ok(_) => {
-                        let process_path = String::from_utf16_lossy(&buffer[..size as usize]);
-                        let is_ours = process_path
-                            .to_lowercase()
-                            .contains("serialmonitoressential");
-                        debug!(
-                            "[is_process_running] PID {}: path={}, is_ours={}",
-                            pid, process_path, is_ours
-                        );
-                        is_ours
-                    }
-                    Err(e) => {
-                        debug!("[is_process_running] PID {}: Failed to get process name: {:?}, assuming not ours", pid, e);
-                        false
-                    }
-                };
+    // Refresh only the specific process
+    sys.refresh_processes(
+        sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
+        false, // Don't get all parents
+    );
 
-                let _ = CloseHandle(handle);
-                is_our_process
-            }
-            Err(e) => {
-                debug!(
-                    "[is_process_running] PID {} does not exist (OpenProcess failed: {:?})",
-                    pid, e
-                );
-                false
-            }
-        }
+    if let Some(process) = sys.process(sysinfo_pid) {
+        let process_name = process.name().to_string_lossy().to_lowercase();
+        let is_ours = process_name.contains("serialmonitoressential")
+            || process_name.contains("serial-monitor-essential")
+            || process_name.contains("serial_monitor_essential");
+        debug!(
+            "[is_process_running] PID {}: name={}, is_ours={}",
+            pid, process_name, is_ours
+        );
+        is_ours
+    } else {
+        debug!(
+            "[is_process_running] PID {} does not exist or not accessible",
+            pid
+        );
+        false
     }
-}
-
-/// プロセスが実行中かどうかを確認（非Windows）
-#[cfg(not(windows))]
-fn is_process_running(_pid: u32) -> bool {
-    // 非Windowsでは常にfalseを返す（削除する）
-    false
 }
 
 #[cfg(test)]

@@ -30,6 +30,8 @@ pub fn spawn_worker_thread(
         let mut read_buffer = vec![0u8; READ_BUFFER_SIZE];
         let mut total_bytes_read = 0u64;
         let mut global_offset = 0u64; // グローバルオフセットを追跡
+        let mut loop_count = 0u64;
+        let mut last_status_log = Instant::now();
 
         loop {
             // 停止フラグチェック
@@ -59,7 +61,7 @@ pub fn spawn_worker_thread(
 
             // データ読み取り
             let bytes_read = {
-                if let Ok(p) = port.lock() {
+                if let Ok(mut p) = port.lock() {
                     match p.read(&mut read_buffer) {
                         Ok(n) => n,
                         Err(e) => {
@@ -121,6 +123,18 @@ pub fn spawn_worker_thread(
                     }
                     last_swap = Instant::now();
                 }
+            }
+
+            // Periodic status logging (every 5 seconds)
+            loop_count += 1;
+            if last_status_log.elapsed() >= Duration::from_secs(5) {
+                info!(
+                    "[Worker] Status: loop_count={}, total_bytes_read={}, chunks_in_list={}",
+                    loop_count,
+                    total_bytes_read,
+                    finished_list.read().map(|l| l.len()).unwrap_or(0)
+                );
+                last_status_log = Instant::now();
             }
 
             // CPU負荷軽減：データがない場合は短時間スリープ

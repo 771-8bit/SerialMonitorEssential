@@ -1,144 +1,127 @@
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Devices::Communication::{
-    GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT,
-};
-use windows::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
-};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
-};
-// FILE_LOCKED_WITH_ONLY_READERS might not be standard, checking CreateFileW docs.
-// Usually for Serial: OPEN_EXISTING, GENERIC_READ | GENERIC_WRITE.
-// Attributes: FILE_FLAG_OVERLAPPED is essential for async/non-blocking or high perf later.
-// But for Phase 1 start, maybe synchronous is easier to debug?
-// Plan says "Basic Reader". "Reader Thread".
-// "RustによるWin32 APIの直接制御".
-// Let's stick to simple blocking or basic overlapped if needed.
-// For "12Mbps", overlapped is likely better to keep the pipe full.
-// But valid_len, chunk etc comes in Phase 2.
-// Phase 1 is just "Open, Write, Read".
+use log::{debug, info, warn};
+use serialport::{DataBits, FlowControl, Parity, SerialPort as SerialPortTrait, StopBits};
+use std::io::{Read, Write};
+use std::time::Duration;
 
+/// SerialPort wrapper using the serialport crate
 pub struct SerialPort {
-    handle: HANDLE,
+    inner: Box<dyn SerialPortTrait>,
+    port_name: String,
 }
 
+// serialport's Box<dyn SerialPort> is Send
 unsafe impl Send for SerialPort {}
 unsafe impl Sync for SerialPort {}
 
 impl SerialPort {
+    /// Create a new SerialPort with the specified port name and baud rate
+    ///
+    /// # Arguments
+    /// * `port_name` - Port name (e.g., "COM3" or "USB Serial Device (COM3)")
+    /// * `baud_rate` - Baud rate (e.g., 9600, 115200, 12000000)
     pub fn new(port_name: &str, baud_rate: u32) -> Result<Self, String> {
-        let mut wide_name: Vec<u16> = OsStr::new(port_name).encode_wide().collect();
-        wide_name.push(0);
+        info!(
+            "[SerialPort] Opening port {} with baud rate {}",
+            port_name, baud_rate
+        );
 
-        // Prefix with \\.\ for COM ports > 9
-        let full_name = if port_name.starts_with("\\\\.\\") {
-            port_name.to_string()
+        let mut port = serialport::new(port_name, baud_rate)
+            .data_bits(DataBits::Eight)
+            .parity(Parity::None)
+            .stop_bits(StopBits::One)
+            .flow_control(FlowControl::None) // Explicitly set no flow control
+            .timeout(Duration::from_millis(10)) // 10ms timeout for reading
+            .open()
+            .map_err(|e| format!("Failed to open port {}: {:?}", port_name, e))?;
+
+        // Enable DTR (Data Terminal Ready) - required for Arduino to send data
+        if let Err(e) = port.write_data_terminal_ready(true) {
+            warn!("[SerialPort] Failed to set DTR: {:?}", e);
         } else {
-            format!("\\\\.\\{}", port_name)
-        };
-        let wide_name = HSTRING::from(&full_name);
+            info!("[SerialPort] DTR enabled");
+        }
 
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide_name.as_ptr()),
-                GENERIC_READ.0 | GENERIC_WRITE.0,
-                windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0), // Exclusive access
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                None,
-            )
-            .map_err(|e| format!("Failed to open port {}: {:?}", port_name, e))?
-        };
+        // Enable RTS (Request to Send) - some devices require this
+        if let Err(e) = port.write_request_to_send(true) {
+            warn!("[SerialPort] Failed to set RTS: {:?}", e);
+        } else {
+            info!("[SerialPort] RTS enabled");
+        }
 
-        let mut port = Self { handle };
-        port.configure(baud_rate)?;
+        // Log the actual configuration
+        info!(
+            "[SerialPort] Port opened successfully. Actual baud rate: {:?}",
+            port.baud_rate()
+        );
 
-        Ok(port)
+        Ok(Self {
+            inner: port,
+            port_name: port_name.to_string(),
+        })
     }
 
-    fn configure(&mut self, baud_rate: u32) -> Result<(), String> {
-        unsafe {
-            let mut dcb = DCB {
-                DCBlength: std::mem::size_of::<DCB>() as u32,
-                ..Default::default()
-            };
-
-            if GetCommState(self.handle, &mut dcb).is_err() {
-                return Err("Failed to get current comm state".to_string());
+    /// Read data from the serial port
+    ///
+    /// Returns the number of bytes read. Returns 0 on timeout (no data available).
+    pub fn read(&mut self, buffer: &mut [u8]) -> Result<usize, String> {
+        match self.inner.read(buffer) {
+            Ok(n) => {
+                if n > 0 {
+                    debug!("[SerialPort::read] {} - Read {} bytes", self.port_name, n);
+                }
+                Ok(n)
             }
-
-            // Basic 8N1 configuration
-            dcb.BaudRate = baud_rate;
-            dcb.ByteSize = 8;
-            dcb.Parity = NOPARITY;
-            dcb.StopBits = ONESTOPBIT;
-
-            // fBinary = 1
-            // fDtrControl = DTR_CONTROL_ENABLE (1) -> 1 << 4 = 16 (0x10)
-            // fRtsControl = RTS_CONTROL_ENABLE (1) -> 1 << 12 = 4096 (0x1000)
-            // Total: 0x1011
-            dcb._bitfield = 0x1011;
-
-            if SetCommState(self.handle, &dcb).is_err() {
-                return Err(format!("Failed to set comm state to {} baud", baud_rate));
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // This is normal - no data available
+                Ok(0)
             }
-
-            // Configure Timeouts
-            // For now, non-blocking read behavior or short timeout?
-            // "12Mbps" needs fast reading.
-            // ReadFile with MAXDWORD for ReadIntervalTimeout causes it to return immediately with whatever is available.
-            // Behavior: return immediately with available data
-            let timeouts = COMMTIMEOUTS {
-                ReadIntervalTimeout: u32::MAX,
-                ReadTotalTimeoutMultiplier: 0,
-                ReadTotalTimeoutConstant: 0,
-                WriteTotalTimeoutMultiplier: 0,
-                WriteTotalTimeoutConstant: 0,
-            };
-
-            if SetCommTimeouts(self.handle, &timeouts).is_err() {
-                return Err("Failed to set comm timeouts".to_string());
+            Err(ref e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                warn!("[SerialPort::read] {} - BrokenPipe error", self.port_name);
+                Err(format!("Port disconnected: {:?}", e))
+            }
+            Err(e) => {
+                warn!(
+                    "[SerialPort::read] {} - Error: {:?} (kind: {:?})",
+                    self.port_name,
+                    e,
+                    e.kind()
+                );
+                Err(format!("Failed to read from port: {:?}", e))
             }
         }
-        Ok(())
     }
 
-    pub fn read(&self, buffer: &mut [u8]) -> Result<usize, String> {
-        let mut bytes_read = 0;
-        unsafe {
-            if ReadFile(self.handle, Some(buffer), Some(&mut bytes_read), None).is_err() {
-                return Err("Failed to read from port".to_string());
-            }
-        }
-        Ok(bytes_read as usize)
+    /// Write data to the serial port
+    ///
+    /// Returns the number of bytes written.
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
+        debug!(
+            "[SerialPort::write] {} - Writing {} bytes",
+            self.port_name,
+            data.len()
+        );
+        self.inner
+            .write(data)
+            .map_err(|e| format!("Failed to write to port: {:?}", e))
     }
 
-    pub fn write(&self, data: &[u8]) -> Result<usize, String> {
-        let mut bytes_written = 0;
-        unsafe {
-            if WriteFile(self.handle, Some(data), Some(&mut bytes_written), None).is_err() {
-                return Err("Failed to write to port".to_string());
-            }
-        }
-        Ok(bytes_written as usize)
-    }
-
+    /// Close the serial port (no-op, handled by Drop)
     pub fn close(&mut self) {
-        if self.handle != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = CloseHandle(self.handle);
-            }
-            self.handle = INVALID_HANDLE_VALUE;
-        }
+        info!("[SerialPort::close] {} - Closing port", self.port_name);
+        // serialport handles closing via Drop automatically
     }
-}
 
-impl Drop for SerialPort {
-    fn drop(&mut self) {
-        self.close();
+    /// Check if the port configuration is valid (for testing purposes)
+    #[allow(dead_code)]
+    pub fn is_valid(&self) -> bool {
+        self.inner.baud_rate().is_ok()
+    }
+
+    /// Get the number of bytes available to read
+    #[allow(dead_code)]
+    pub fn bytes_to_read(&self) -> Result<u32, String> {
+        self.inner
+            .bytes_to_read()
+            .map_err(|e| format!("Failed to get bytes to read: {:?}", e))
     }
 }
