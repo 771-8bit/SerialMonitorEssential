@@ -16,7 +16,17 @@ Rust + Win32 APIによる直接制御で、データの完全性を保証しま�
 - **Frontend**: React + TypeScript + Vite
 - **対応OS**: Windows
 
+## 前提条件
+
+- **Node.js**: v22 以上
+- **Rust**: 最新の Stable 版 (1.92.0 以上推奨)
+
 ## セットアップ
+
+> [!NOTE]
+> CIなどで `npm ci` が失敗する場合は、`package-lock.json` が `package.json` と同期していない可能性があります。
+> 手元の環境で `npm install` を実行して `package-lock.json` を更新し、コミットしてください。
+
 
 ```bash
 # 依存関係のインストール
