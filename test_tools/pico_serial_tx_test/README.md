@@ -67,16 +67,36 @@ SerialMonitorEssentialの高速シリアル通信テスト用ファームウェ�
 シリアルコマンドでテストを制御できます：
 
 ```
-START:<duration>  - 指定秒数のテスト実行（例: START:60）
-STOP              - テスト停止
-STATUS            - 現在の状態を表示
+START:<duration>    - 高速テスト (12Mbps) 開始（例: START:60）
+SLOW:<duration>     - 低速テスト (1行/秒) 開始（例: SLOW:30）
+PLOTTER:<duration>  - プロッタテスト (CSV 10Hz) 開始（例: PLOTTER:30）
+STOP                - テスト停止
+STATUS              - 現在の状態を表示
+IDENTIFY            - ポート識別情報を表示
 ```
 
-### Pythonコントローラーでの制御
+### 高速テスト（Pythonコントローラー）
 
 ```bash
 python ../pico_stress_test_controller.py --port COM3 --duration 60
 ```
+
+### 低速テスト（1行/秒）
+
+```bash
+python ../pico_slow_test_controller.py --port COM3 --duration 30
+```
+
+### プロッタテスト（CSV 10Hz）
+
+```bash
+python ../pico_plotter_test_controller.py --port COM3 --duration 30
+```
+
+**プロッタテストのデータ形式:**
+- 10Hz (100msごと) でCSVデータを送信
+- フォーマット: `timestamp,sin_wave,cos_wave,random_walk`
+- シリアルプロッタ機能の動作確認用
 
 ## 仕様
 

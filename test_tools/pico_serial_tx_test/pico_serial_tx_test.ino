@@ -36,8 +36,10 @@ uint32_t testDuration = 0; // テスト時間（秒、0なら無限）
 uint32_t testStartTime = 0;
 bool testRunning = false;
 bool slowTestMode = false;    // 低速テストモード
+bool plotterTestMode = false; // プロッタテストモード
 uint32_t slowTestCounter = 0; // 低速テスト用カウンタ
 uint32_t lastSlowSend = 0;    // 低速テストの最後の送信時刻
+float randomWalkValue = 0.0;  // ランダムウォーク値
 SHA256 sha256;                // Crypto library
 
 void setup() {
@@ -73,6 +75,8 @@ void setup() {
       "  START:<duration>  - Start stress test for <duration> seconds");
   SerialControl.println("  SLOW:<duration>   - Start slow test (1 line/sec) "
                         "for <duration> seconds");
+  SerialControl.println("  PLOTTER:<duration> - Start plotter test (CSV data) "
+                        "for <duration> seconds");
   SerialControl.println("  STOP              - Stop test");
   SerialControl.println("  STATUS            - Show current status");
   SerialControl.println("  IDENTIFY          - Show port identification info");
@@ -101,7 +105,9 @@ void loop() {
     }
 
     // データ送信（Serialへ）
-    if (slowTestMode) {
+    if (plotterTestMode) {
+      sendPlotterData();
+    } else if (slowTestMode) {
       sendSlowData();
     } else {
       sendDataChunk();
@@ -135,10 +141,13 @@ void sendPortIdentification() {
 void handleCommand(String cmd) {
   if (cmd.startsWith("START:")) {
     int duration = cmd.substring(6).toInt();
-    startTest(duration, false); // 高速テスト
+    startTest(duration, 0); // 高速テスト
   } else if (cmd.startsWith("SLOW:")) {
     int duration = cmd.substring(5).toInt();
-    startTest(duration, true); // 低速テスト
+    startTest(duration, 1); // 低速テスト
+  } else if (cmd.startsWith("PLOTTER:")) {
+    int duration = cmd.substring(8).toInt();
+    startTest(duration, 2); // プロッタテスト
   } else if (cmd == "STOP") {
     stopTest();
   } else if (cmd == "STATUS") {
@@ -147,33 +156,60 @@ void handleCommand(String cmd) {
     sendPortIdentification();
   } else {
     SerialControl.println("ERROR: Unknown command: " + cmd);
-    SerialControl.println("Available commands: START:<seconds>, "
-                          "SLOW:<seconds>, STOP, STATUS, IDENTIFY");
+    SerialControl.println(
+        "Available commands: START:<seconds>, "
+        "SLOW:<seconds>, PLOTTER:<seconds>, STOP, STATUS, IDENTIFY");
   }
 }
 
-void startTest(uint32_t duration, bool slowMode) {
+// testMode: 0=fast, 1=slow, 2=plotter
+void startTest(uint32_t duration, int testMode) {
   testDuration = duration;
   testStartTime = millis();
   totalBytesSent = 0;
   testRunning = true;
-  slowTestMode = slowMode;
+  slowTestMode = (testMode == 1);
+  plotterTestMode = (testMode == 2);
   slowTestCounter = 0;
   lastSlowSend = 0;
 
   // チェックサムリセット
   sha256.reset();
 
+  // ランダムウォーク初期化（プロッタモード用）
+  if (plotterTestMode) {
+    randomWalkValue = 0.0;
+  }
+
   // 制御ポートに通知
-  SerialControl.println(slowMode ? "SLOW_TEST_START" : "TEST_START");
+  const char *modeName;
+  const char *startMsg;
+  if (plotterTestMode) {
+    modeName = "PLOTTER (CSV data, 10Hz)";
+    startMsg = "PLOTTER_TEST_START";
+  } else if (slowTestMode) {
+    modeName = "SLOW (1 line/sec)";
+    startMsg = "SLOW_TEST_START";
+  } else {
+    modeName = "FAST (12Mbps)";
+    startMsg = "TEST_START";
+  }
+  SerialControl.println(startMsg);
   SerialControl.print("Mode: ");
-  SerialControl.println(slowMode ? "SLOW (1 line/sec)" : "FAST (12Mbps)");
+  SerialControl.println(modeName);
   SerialControl.print("Duration: ");
   SerialControl.print(duration);
   SerialControl.println(duration == 0 ? " seconds (infinite)" : " seconds");
   SerialControl.flush();
 
-  // データポートには何も送信しない（純粋なデータのみ）
+  // プロッタモードの場合、データポートにヘッダー行を送信
+  if (plotterTestMode) {
+    const char *header = "time,sin,cos,random\r\n";
+    size_t headerLen = strlen(header);
+    Serial.write((uint8_t *)header, headerLen);
+    totalBytesSent += headerLen;
+    sha256.update((uint8_t *)header, headerLen);
+  }
 }
 
 void stopTest() {
@@ -273,5 +309,60 @@ void printStatus() {
     SerialControl.print(" / ");
     SerialControl.print(testDuration);
     SerialControl.println(" seconds");
+  }
+}
+
+// プロッタテスト用データ送信（100msごとにCSV行送信）
+void sendPlotterData() {
+  static uint32_t lastPlotterSend = 0;
+  uint32_t now = millis();
+
+  // 100msごと（10Hz）
+  if (now - lastPlotterSend < 100) {
+    return;
+  }
+  lastPlotterSend = now;
+
+  // 経過時間（秒、小数点以下2桁）
+  float elapsed = (now - testStartTime) / 1000.0;
+
+  // 各チャンネルのデータ生成
+  // Ch1: Sin波 (周期2秒、振幅100)
+  float ch1 = 100.0 * sin(2.0 * PI * elapsed / 2.0);
+
+  // Ch2: Cos波 (周期3秒、振幅80)
+  float ch2 = 80.0 * cos(2.0 * PI * elapsed / 3.0);
+
+  // Ch3: ランダムウォーク (±5の範囲で変動)
+  randomWalkValue += (random(-100, 101) / 100.0) * 5.0;
+  // -150～150の範囲にクランプ
+  if (randomWalkValue > 150.0)
+    randomWalkValue = 150.0;
+  if (randomWalkValue < -150.0)
+    randomWalkValue = -150.0;
+
+  // CSVフォーマットで送信: timestamp,ch1,ch2,ch3
+  char line[80];
+  int len = snprintf(line, sizeof(line), "%.2f,%.2f,%.2f,%.2f\r\n", elapsed,
+                     ch1, ch2, randomWalkValue);
+
+  // データ送信（Serialへ）
+  size_t written = Serial.write((uint8_t *)line, len);
+
+  if (written > 0) {
+    totalBytesSent += written;
+    slowTestCounter++; // カウンタとして再利用
+
+    // チェックサム更新
+    sha256.update((uint8_t *)line, written);
+
+    // 10秒ごとに制御ポートに進捗表示
+    if (slowTestCounter % 100 == 0) {
+      SerialControl.print("Plotter: ");
+      SerialControl.print(slowTestCounter);
+      SerialControl.print(" lines, ");
+      SerialControl.print(totalBytesSent);
+      SerialControl.println(" bytes");
+    }
   }
 }
