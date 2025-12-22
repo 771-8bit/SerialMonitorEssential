@@ -8,7 +8,8 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use tauri::{AppHandle, Emitter};
 
 /// Worker Thread: シリアルポートからデータを受信
 ///
@@ -17,11 +18,19 @@ use log::{debug, info, warn};
 const SWAP_TIMEOUT_MS: u64 = 16; // 約60fps
 const READ_BUFFER_SIZE: usize = 4096; // 一度に読み取るサイズ
 
+/// Payload for serial-status event
+#[derive(Clone, serde::Serialize)]
+struct SerialStatusPayload {
+    connected: bool,
+    error: Option<String>,
+}
+
 pub fn spawn_worker_thread(
     port: Arc<Mutex<SerialPort>>,
     free_pool: Arc<crossbeam::queue::SegQueue<Chunk>>,
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     stop_flag: Arc<AtomicBool>,
+    app_handle: AppHandle,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         info!("[Worker] Thread started");
@@ -60,18 +69,47 @@ pub fn spawn_worker_thread(
             }
 
             // データ読み取り
-            let bytes_read = {
+            let read_result = {
                 if let Ok(mut p) = port.lock() {
-                    match p.read(&mut read_buffer) {
-                        Ok(n) => n,
-                        Err(e) => {
-                            warn!("[Worker] Read error: {}", e);
-                            0
-                        }
-                    }
+                    p.read(&mut read_buffer)
                 } else {
                     warn!("[Worker] Mutex poisoned");
                     break;
+                }
+            };
+
+            let bytes_read = match read_result {
+                Ok(n) => n,
+                Err(e) => {
+                    // Check if it's a timeout (normal) or a fatal error (disconnect)
+                    let error_str = e.to_string().to_lowercase();
+                    if error_str.contains("timed out") || error_str.contains("timeout") {
+                        // Normal timeout, continue
+                        0
+                    } else {
+                        // Fatal error - device probably disconnected
+                        error!("[Worker] Fatal read error (device disconnected?): {}", e);
+
+                        // Emit serial-status event to notify frontend
+                        let payload = SerialStatusPayload {
+                            connected: false,
+                            error: Some(e.to_string()),
+                        };
+                        if let Err(emit_err) = app_handle.emit("serial-status", payload) {
+                            error!("[Worker] Failed to emit serial-status event: {}", emit_err);
+                        }
+
+                        // Push remaining data if any
+                        if let Some(mut chunk) = current_chunk.take() {
+                            if chunk.has_data() {
+                                chunk.set_global_offset(global_offset);
+                                if let Ok(mut list) = finished_list.write() {
+                                    list.push_back(Arc::new(chunk));
+                                }
+                            }
+                        }
+                        break;
+                    }
                 }
             };
 

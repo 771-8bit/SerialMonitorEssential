@@ -98,6 +98,7 @@ impl DataStore {
             self.free_pool.clone(),
             self.finished_list.clone(),
             self.stop_flag.clone(),
+            app_handle.clone(),
         );
 
         // Logger Thread起動
@@ -165,6 +166,14 @@ impl DataStore {
         let mut result = Vec::with_capacity(length);
         let mut current_offset = offset;
         let mut remaining = length;
+
+        // Debug: Log the state of archived_index and finished_list
+        let archived_count = self.archived_index.read().map(|i| i.len()).unwrap_or(0);
+        let finished_count = self.finished_list.read().map(|l| l.len()).unwrap_or(0);
+        warn!(
+            "[get_data] offset={}, length={}, archived_pages={}, finished_chunks={}",
+            offset, length, archived_count, finished_count
+        );
 
         // 1. まずディスク上（archived_index）を検索 - 確定済みデータ
         if let Ok(index) = self.archived_index.read() {

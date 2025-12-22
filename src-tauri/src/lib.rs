@@ -12,6 +12,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(SerialState {
             port: Mutex::new(None),
             data_store: Mutex::new(None),
@@ -22,7 +23,8 @@ pub fn run() {
             serial::close_port,
             serial::write_data,
             serial::get_read_data,
-            serial::get_display_rows
+            serial::get_display_rows,
+            serial::export_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

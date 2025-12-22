@@ -128,8 +128,8 @@ export default function HexViewer({ totalBytes, autoScroll }: HexViewerProps) {
         const newScrollTop = e.currentTarget.scrollTop;
         setScrollTop(newScrollTop);
 
+        // Ignore programmatic scroll events (e.g., from autoScroll)
         if (ignoreScrollRef.current) return;
-        if (autoScroll) return;
 
         const { scale } = getScaleInfo(totalRows);
 
@@ -146,7 +146,7 @@ export default function HexViewer({ totalBytes, autoScroll }: HexViewerProps) {
         if (Math.abs(newStartRow - currentStartRow) > BUFFER_ROWS / 2) {
             fetchRows(newStartRow);
         }
-    }, [currentStartRow, fetchRows, getScaleInfo, totalRows, autoScroll]);
+    }, [currentStartRow, fetchRows, getScaleInfo, totalRows]);
 
     const { scale, scrollHeight } = getScaleInfo(totalRows);
 

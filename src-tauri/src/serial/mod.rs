@@ -267,3 +267,38 @@ pub fn list_ports() -> Vec<String> {
         }
     }
 }
+
+/// Export received data to a file
+#[tauri::command]
+pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, String> {
+    use std::fs::File;
+    use std::io::Write;
+
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if let Some(ref data_store) = *store_guard {
+        let total = data_store.total_bytes();
+        if total == 0 {
+            return Err("No data to export".to_string());
+        }
+
+        // Read all data in chunks to avoid memory issues with large files
+        const CHUNK_SIZE: u32 = 1024 * 1024; // 1MB chunks
+        let mut file = File::create(&path)
+            .map_err(|e| format!("Failed to create file '{}': {:?}", path, e))?;
+
+        let mut offset = 0u64;
+        while offset < total {
+            let to_read = std::cmp::min(CHUNK_SIZE as u64, total - offset) as u32;
+            let data = data_store.get_data(offset, to_read)?;
+            file.write_all(&data)
+                .map_err(|e| format!("Failed to write data: {:?}", e))?;
+            offset += data.len() as u64;
+        }
+
+        log::info!("[export_log] Exported {} bytes to {}", total, path);
+        Ok(total)
+    } else {
+        Err("No data available".to_string())
+    }
+}
