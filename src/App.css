@@ -110,8 +110,8 @@ textarea {
 
 /* Controls */
 select,
-input[type="text"],
-input[type="number"] {
+input[type='text'],
+input[type='number'] {
   padding: 4px 8px;
   border: 1px solid #444;
   background-color: #2a2a2a;
@@ -122,7 +122,7 @@ input[type="number"] {
   box-sizing: border-box;
 }
 
-input[type="checkbox"] {
+input[type='checkbox'] {
   accent-color: #1976d2;
 }
 

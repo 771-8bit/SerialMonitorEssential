@@ -139,7 +139,9 @@ jobs:
           cache: 'npm'
       
       - name: Install dependencies
-        run: npm ci
+        run: |
+          rm -rf node_modules
+          npm install
       
       - name: Build Tauri app
         run: npm run tauri build
