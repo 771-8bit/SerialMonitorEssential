@@ -1,7 +1,19 @@
 use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort as SerialPortTrait, StopBits};
 use std::io::{Read, Write};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerialConfig {
+    pub baud_rate: u32,
+    pub data_bits: u8,        // 5, 6, 7, 8
+    pub flow_control: String, // "None", "Software", "Hardware"
+    pub parity: String,       // "None", "Odd", "Even"
+    pub stop_bits: u8,        // 1, 2
+    pub dtr: bool,
+    pub rts: bool,
+}
 
 /// SerialPort wrapper using the serialport crate
 pub struct SerialPort {
@@ -14,38 +26,62 @@ unsafe impl Send for SerialPort {}
 unsafe impl Sync for SerialPort {}
 
 impl SerialPort {
-    /// Create a new SerialPort with the specified port name and baud rate
-    ///
-    /// # Arguments
-    /// * `port_name` - Port name (e.g., "COM3" or "USB Serial Device (COM3)")
-    /// * `baud_rate` - Baud rate (e.g., 9600, 115200, 12000000)
-    pub fn new(port_name: &str, baud_rate: u32) -> Result<Self, String> {
+    /// Create a new SerialPort with the specified port name and configuration
+    pub fn new(port_name: &str, config: SerialConfig) -> Result<Self, String> {
         info!(
-            "[SerialPort] Opening port {} with baud rate {}",
-            port_name, baud_rate
+            "[SerialPort] Opening port {} with config {:?}",
+            port_name, config
         );
 
-        let mut port = serialport::new(port_name, baud_rate)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::None)
-            .stop_bits(StopBits::One)
-            .flow_control(FlowControl::None) // Explicitly set no flow control
+        let data_bits = match config.data_bits {
+            5 => DataBits::Five,
+            6 => DataBits::Six,
+            7 => DataBits::Seven,
+            8 => DataBits::Eight,
+            _ => return Err(format!("Invalid data bits: {}", config.data_bits)),
+        };
+
+        let flow_control = match config.flow_control.as_str() {
+            "None" => FlowControl::None,
+            "Software" => FlowControl::Software,
+            "Hardware" => FlowControl::Hardware,
+            _ => return Err(format!("Invalid flow control: {}", config.flow_control)),
+        };
+
+        let parity = match config.parity.as_str() {
+            "None" => Parity::None,
+            "Odd" => Parity::Odd,
+            "Even" => Parity::Even,
+            _ => return Err(format!("Invalid parity: {}", config.parity)),
+        };
+
+        let stop_bits = match config.stop_bits {
+            1 => StopBits::One,
+            2 => StopBits::Two,
+            _ => return Err(format!("Invalid stop bits: {}", config.stop_bits)),
+        };
+
+        let mut port = serialport::new(port_name, config.baud_rate)
+            .data_bits(data_bits)
+            .parity(parity)
+            .stop_bits(stop_bits)
+            .flow_control(flow_control)
             .timeout(Duration::from_millis(10)) // 10ms timeout for reading
             .open()
             .map_err(|e| format!("Failed to open port {}: {:?}", port_name, e))?;
 
-        // Enable DTR (Data Terminal Ready) - required for Arduino to send data
-        if let Err(e) = port.write_data_terminal_ready(true) {
+        // Enable/Disable DTR
+        if let Err(e) = port.write_data_terminal_ready(config.dtr) {
             warn!("[SerialPort] Failed to set DTR: {:?}", e);
         } else {
-            info!("[SerialPort] DTR enabled");
+            info!("[SerialPort] DTR set to {}", config.dtr);
         }
 
-        // Enable RTS (Request to Send) - some devices require this
-        if let Err(e) = port.write_request_to_send(true) {
+        // Enable/Disable RTS
+        if let Err(e) = port.write_request_to_send(config.rts) {
             warn!("[SerialPort] Failed to set RTS: {:?}", e);
         } else {
-            info!("[SerialPort] RTS enabled");
+            info!("[SerialPort] RTS set to {}", config.rts);
         }
 
         // Log the actual configuration
@@ -123,5 +159,18 @@ impl SerialPort {
         self.inner
             .bytes_to_read()
             .map_err(|e| format!("Failed to get bytes to read: {:?}", e))
+    }
+    /// Set DTR line state
+    pub fn write_dtr(&mut self, level: bool) -> Result<(), String> {
+        self.inner
+            .write_data_terminal_ready(level)
+            .map_err(|e| format!("Failed to set DTR: {:?}", e))
+    }
+
+    /// Set RTS line state
+    pub fn write_rts(&mut self, level: bool) -> Result<(), String> {
+        self.inner
+            .write_request_to_send(level)
+            .map_err(|e| format!("Failed to set RTS: {:?}", e))
     }
 }

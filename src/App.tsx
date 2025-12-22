@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
-import HexViewer from "./components/HexViewer";
+import { save, ask } from "@tauri-apps/plugin-dialog";
+import SettingsPanel, { SerialConfig } from "./components/SettingsPanel";
 import SendPanel from "./components/SendPanel";
+import ReceivePanel from "./components/ReceivePanel";
 import "./App.css";
 
 interface DataUpdatePayload {
@@ -16,8 +17,16 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [totalBytes, setTotalBytes] = useState<number>(0);
   const [autoScroll, setAutoScroll] = useState(true);
-  const [baudRate, setBaudRate] = useState<number>(115200);
-  const [baudRateEditing, setBaudRateEditing] = useState(false);
+
+  const [config, setConfig] = useState<SerialConfig>({
+    baud_rate: 115200,
+    data_bits: 8,
+    flow_control: "None",
+    parity: "None",
+    stop_bits: 1,
+    dtr: true,
+    rts: true
+  });
 
   useEffect(() => {
     updatePorts();
@@ -61,6 +70,20 @@ function App() {
     };
   }, []);
 
+  // Update DTR when config changes while connected
+  useEffect(() => {
+    if (isConnected) {
+      invoke("write_dtr", { level: config.dtr }).catch(console.error);
+    }
+  }, [config.dtr, isConnected]);
+
+  // Update RTS when config changes while connected
+  useEffect(() => {
+    if (isConnected) {
+      invoke("write_rts", { level: config.rts }).catch(console.error);
+    }
+  }, [config.rts, isConnected]);
+
   async function updatePorts() {
     try {
       const p = await invoke<string[]>("list_ports");
@@ -88,7 +111,7 @@ function App() {
     } else {
       if (!selectedPort) return;
       try {
-        await invoke("open_port", { portName: selectedPort, baudRate: Number(baudRate) });
+        await invoke("open_port", { portName: selectedPort, config: config });
         setIsConnected(true);
         setTotalBytes(0);
       } catch (e) {
@@ -123,86 +146,69 @@ function App() {
     }
   }
 
+  async function handleClear() {
+    try {
+      await invoke("clear_data");
+      setTotalBytes(0);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to clear data: " + e);
+    }
+  }
+
+  async function handleCopy() {
+    if (totalBytes === 0) return;
+
+    if (totalBytes > 10 * 1024 * 1024) { // 10MB
+      const confirmed = await ask("The data is quite large (>10MB). Copying to clipboard might freeze the application momentarily. Continue?", {
+        title: "Large Data Warning",
+        kind: 'warning'
+      });
+      if (!confirmed) return;
+    }
+
+    try {
+      const text = await invoke<string>("get_clipboard_text");
+      if (text) {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to copy: " + e);
+    }
+  }
+
   return (
-    <main className="container">
-      <h1>Serial Monitor Essential</h1>
-
-      <div className="control-panel">
-        <select
-          value={selectedPort}
-          onChange={(e) => setSelectedPort(e.target.value)}
-          disabled={isConnected}
-          onClick={updatePorts}
-        >
-          {ports.map((port) => (
-            <option key={port} value={port}>{port}</option>
-          ))}
-          {ports.length === 0 && <option value="">No ports found</option>}
-        </select>
-
-        {baudRateEditing ? (
-          <input
-            type="number"
-            value={baudRate}
-            onChange={(e) => setBaudRate(Number(e.target.value))}
-            onClick={() => setBaudRateEditing(false)}
-            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-            disabled={isConnected}
-            autoFocus
-            style={{ marginLeft: '10px', width: '120px' }}
-          />
-        ) : (
-          <select
-            value={baudRate}
-            onChange={(e) => setBaudRate(Number(e.target.value))}
-            onDoubleClick={() => !isConnected && setBaudRateEditing(true)}
-            disabled={isConnected}
-            style={{ marginLeft: '10px' }}
-          >
-            <option value={9600}>9600</option>
-            <option value={19200}>19200</option>
-            <option value={38400}>38400</option>
-            <option value={57600}>57600</option>
-            <option value={115200}>115200</option>
-            <option value={230400}>230400</option>
-            <option value={460800}>460800</option>
-            <option value={921600}>921600</option>
-            <option value={1000000}>1000000 (1Mbps)</option>
-            <option value={2000000}>2000000 (2Mbps)</option>
-            <option value={3000000}>3000000 (3Mbps)</option>
-            <option value={12000000}>12000000 (12Mbps)</option>
-          </select>
-        )}
-
-        <button onClick={handleToggleConnection}>
-          {isConnected ? "Close" : "Open"}
-        </button>
-
-        <button onClick={handleExport} disabled={totalBytes === 0}>
-          Export
-        </button>
-
-        <label style={{ marginLeft: '20px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-          <input
-            type="checkbox"
-            checked={autoScroll}
-            onChange={(e) => setAutoScroll(e.target.checked)}
-          />
-          Auto-scroll
-        </label>
+    <div className="app-container">
+      <div className="header-section">
+        <SettingsPanel
+          ports={ports}
+          selectedPort={selectedPort}
+          onPortChange={setSelectedPort}
+          onRefreshPorts={updatePorts}
+          config={config}
+          onConfigChange={setConfig}
+          isConnected={isConnected}
+          onConnect={handleToggleConnection}
+          onDisconnect={handleToggleConnection}
+        />
       </div>
 
-      <div style={{ marginTop: '10px' }}>
+      <div className="middle-section">
         <SendPanel connected={isConnected} />
       </div>
 
-      <div className="monitor-area" style={{ marginTop: '10px' }}>
-        <HexViewer
+      <div className="bottom-section">
+        <ReceivePanel
           totalBytes={totalBytes}
+          onExport={handleExport}
+          onClear={handleClear}
+          onCopy={handleCopy}
           autoScroll={autoScroll}
+          onAutoScrollChange={setAutoScroll}
         />
       </div>
-    </main>
+    </div>
   );
 }
 

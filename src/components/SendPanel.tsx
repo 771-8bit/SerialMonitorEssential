@@ -14,6 +14,7 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
     const [inputText, setInputText] = useState("");
     const [lineEnding, setLineEnding] = useState<LineEnding>("LF");
     const [sendOnEnter, setSendOnEnter] = useState(false);
+    const [sendBinary, setSendBinary] = useState(false);
 
     // History
     const [history, setHistory] = useState<string[]>([]);
@@ -25,7 +26,7 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
         let dataToSend: number[] = [];
 
         try {
-            if (inputMode === "HEX") {
+            if (inputMode === "HEX" || sendBinary) { // sendBinary flag or HEX mode
                 // Parse hex string (ignore spaces)
                 const cleanHex = inputText.replace(/\s+/g, "");
                 if (cleanHex.length % 2 !== 0) {
@@ -62,11 +63,6 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
                 return newHistory;
             });
             setHistoryIndex(-1);
-
-            // Clear input if needed (optional: keep for repeat send?)
-            // For now, let's clear it to emulate standard terminals, 
-            // or maybe keep it if user wants to spam. 
-            // Let's clear it for now.
             setInputText("");
 
             if (onSend) onSend(dataToSend.length);
@@ -104,63 +100,57 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
     };
 
     return (
-        <div className="send-panel p-2 border rounded bg-gray-50 flex flex-col gap-2">
-            <div className="flex gap-2 items-center mb-1">
-                <label className="text-sm font-bold flex items-center gap-1">
-                    <input
-                        type="radio"
-                        checked={inputMode === "TEXT"}
-                        onChange={() => setInputMode("TEXT")}
-                    /> Text
-                </label>
-                <label className="text-sm font-bold flex items-center gap-1">
-                    <input
-                        type="radio"
-                        checked={inputMode === "HEX"}
-                        onChange={() => setInputMode("HEX")}
-                    /> Hex
-                </label>
-
-                <div className="flex-1"></div>
-
-                <select
-                    value={lineEnding}
-                    onChange={(e) => setLineEnding(e.target.value as LineEnding)}
-                    className="text-sm border rounded p-1"
-                    disabled={inputMode === "HEX"}
-                >
-                    <option value="NONE">No Line Ending</option>
-                    <option value="LF">LF (\n)</option>
-                    <option value="CR">CR (\r)</option>
-                    <option value="CRLF">CRLF (\r\n)</option>
-                </select>
-
-                <label className="text-sm flex items-center gap-1">
-                    <input
-                        type="checkbox"
-                        checked={sendOnEnter}
-                        onChange={(e) => setSendOnEnter(e.target.checked)}
-                    /> Send on Enter
-                </label>
-            </div>
-
-            <div className="flex gap-2">
-                <input
-                    type="text"
-                    className="flex-1 border rounded p-2 font-mono"
-                    placeholder={inputMode === "HEX" ? "e.g. 48 65 6C 6C 6F" : "Type message..."}
+        <div className="send-panel">
+            <div className="panel-header">Send</div>
+            <div className="send-body">
+                <textarea
+                    className="send-input"
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
                     onKeyDown={handleKeyDown}
                     disabled={!connected}
+                    placeholder={inputMode === "HEX" || sendBinary ? "e.g. 48 65 6C 6C 6F" : ""}
                 />
-                <button
-                    onClick={handleSend}
-                    disabled={!connected || !inputText}
-                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-                >
-                    Send
-                </button>
+                <div className="send-controls">
+                    <button
+                        onClick={handleSend}
+                        disabled={!connected || !inputText}
+                        className="send-button"
+                    >
+                        Send
+                    </button>
+                    <div className="send-options">
+                        <label>
+                            <input
+                                type="checkbox"
+                                checked={sendOnEnter}
+                                onChange={(e) => setSendOnEnter(e.target.checked)}
+                            /> Send with Enter
+                        </label>
+                        <label>
+                            <input
+                                type="checkbox"
+                                checked={sendBinary}
+                                onChange={(e) => {
+                                    setSendBinary(e.target.checked);
+                                    if (e.target.checked) setInputMode("HEX");
+                                    else setInputMode("TEXT");
+                                }}
+                            /> Send Binary
+                        </label>
+                    </div>
+                    <select
+                        value={lineEnding}
+                        onChange={(e) => setLineEnding(e.target.value as LineEnding)}
+                        className="line-ending-select"
+                        disabled={sendBinary}
+                    >
+                        <option value="NONE">None</option>
+                        <option value="LF">LF (\n)</option>
+                        <option value="CR">CR (\r)</option>
+                        <option value="CRLF">CRLF (\r\n)</option>
+                    </select>
+                </div>
             </div>
         </div>
     );

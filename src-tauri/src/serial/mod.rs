@@ -22,7 +22,7 @@ pub fn open_port(
     state: State<'_, SerialState>,
     app: AppHandle,
     port_name: String,
-    baud_rate: u32,
+    config: port::SerialConfig,
 ) -> Result<(), String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
@@ -52,7 +52,7 @@ pub fn open_port(
     };
 
     // Create SerialPort
-    let port = port::SerialPort::new(port_path, baud_rate)?;
+    let port = port::SerialPort::new(port_path, config)?;
     let port_arc = Arc::new(Mutex::new(port));
     *port_guard = Some(port_arc.clone());
 
@@ -92,6 +92,30 @@ pub fn write_data(state: State<'_, SerialState>, data: Vec<u8>) -> Result<usize,
     if let Some(port) = port_guard.as_ref() {
         if let Ok(mut p) = port.lock() {
             return p.write(&data);
+        }
+    }
+    Err("Port not open".to_string())
+}
+
+#[tauri::command]
+pub fn write_dtr(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
+    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+
+    if let Some(port) = port_guard.as_ref() {
+        if let Ok(mut p) = port.lock() {
+            return p.write_dtr(level).map_err(|e| e.to_string());
+        }
+    }
+    Err("Port not open".to_string())
+}
+
+#[tauri::command]
+pub fn write_rts(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
+    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+
+    if let Some(port) = port_guard.as_ref() {
+        if let Ok(mut p) = port.lock() {
+            return p.write_rts(level).map_err(|e| e.to_string());
         }
     }
     Err("Port not open".to_string())
@@ -300,5 +324,61 @@ pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, St
         Ok(total)
     } else {
         Err("No data available".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), String> {
+    let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+
+    if let Some(old_store) = store_guard.take() {
+        log::info!("[clear_data] Stopping old DataStore");
+        old_store.stop_reception();
+    }
+
+    // If port is open, restart DataStore
+    if let Some(port_arc) = port_guard.as_ref() {
+        log::info!("[clear_data] Creating new DataStore");
+        let new_store = Arc::new(DataStore::new()?);
+        // Reuse the existing port
+        new_store.start_reception(port_arc.clone(), app, new_store.clone())?;
+        *store_guard = Some(new_store);
+    } else {
+        // If port not open, we just leave store as None (cleared) or create an empty one?
+        // Actually SerialState currently holds DataStore only when open_port is called?
+        // Wait, open_port creates it. close_port keeps it alive?
+        // close_port stops reception but keeps DataStore handle.
+        // If we clear while closed, we probably just want to drop the old one and maybe create a fresh empty one?
+        // Or just None?
+        // If we set it to None, then `get_display_rows` returns empty. That's fine.
+        log::info!("[clear_data] Port closed, DataStore cleared (set to None)");
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_clipboard_text(state: State<'_, SerialState>) -> Result<String, String> {
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if let Some(ref data_store) = *store_guard {
+        let total = data_store.total_bytes();
+        if total == 0 {
+            return Ok(String::new());
+        }
+
+        // Limit for clipboard to avoid crash?
+        // User handles confirmation. We just try to read.
+        // Fetch all data
+        // WARNING: If total is huge (e.g. 100MB), Vec<u8> is 100MB, String is another 100MB+.
+        // Ideally we stream, but we return a String.
+        // For now, read all.
+        let to_read = total as u32; // Limit to u32
+        let data = data_store.get_data(0, to_read)?;
+
+        Ok(String::from_utf8_lossy(&data).to_string())
+    } else {
+        Ok(String::new())
     }
 }

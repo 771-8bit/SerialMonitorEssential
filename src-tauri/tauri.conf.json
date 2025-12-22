@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-appserial-monitor-essential",
-        "width": 800,
-        "height": 600
+        "title": "Serial Monitor Essential",
+        "width": 725,
+        "height": 600,
+        "minWidth": 725,
+        "minHeight": 450
       }
     ],
     "security": {

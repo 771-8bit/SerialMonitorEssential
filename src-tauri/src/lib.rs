@@ -24,7 +24,11 @@ pub fn run() {
             serial::write_data,
             serial::get_read_data,
             serial::get_display_rows,
-            serial::export_log
+            serial::export_log,
+            serial::clear_data,
+            serial::get_clipboard_text,
+            serial::write_dtr,
+            serial::write_rts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
