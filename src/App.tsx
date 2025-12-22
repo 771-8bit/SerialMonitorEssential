@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import HexViewer from "./components/HexViewer";
+import SendPanel from "./components/SendPanel";
 import "./App.css";
 
 interface DataUpdatePayload {
@@ -191,7 +192,11 @@ function App() {
         </label>
       </div>
 
-      <div className="monitor-area" style={{ marginTop: '20px' }}>
+      <div style={{ marginTop: '10px' }}>
+        <SendPanel connected={isConnected} />
+      </div>
+
+      <div className="monitor-area" style={{ marginTop: '10px' }}>
         <HexViewer
           totalBytes={totalBytes}
           autoScroll={autoScroll}
