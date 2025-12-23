@@ -19,7 +19,7 @@ export default function ReceivePanel({
 }: ReceivePanelProps) {
   return (
     <div className="receive-panel">
-      <div className="panel-header">Recieve</div>
+      <div className="panel-header">Receive</div>
       <div className="user-note">
         <input type="text" placeholder="User's Note" />
       </div>

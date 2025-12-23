@@ -382,3 +382,56 @@ pub fn get_clipboard_text(state: State<'_, SerialState>) -> Result<String, Strin
         Ok(String::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_byte_to_ascii_printable() {
+        // Printable ASCII characters (0x20-0x7e)
+        assert_eq!(byte_to_ascii(b'A'), 'A');
+        assert_eq!(byte_to_ascii(b'z'), 'z');
+        assert_eq!(byte_to_ascii(b' '), ' ');
+        assert_eq!(byte_to_ascii(b'~'), '~');
+        assert_eq!(byte_to_ascii(b'0'), '0');
+    }
+
+    #[test]
+    fn test_byte_to_ascii_special_chars() {
+        // Special control characters with dedicated symbols
+        assert_eq!(byte_to_ascii(0x00), '␀');
+        assert_eq!(byte_to_ascii(0x0a), '␊'); // LF
+        assert_eq!(byte_to_ascii(0x0d), '␍'); // CR
+        assert_eq!(byte_to_ascii(0x09), '␉'); // TAB
+    }
+
+    #[test]
+    fn test_byte_to_ascii_other_non_printable() {
+        // Other non-printable should be '·'
+        assert_eq!(byte_to_ascii(0x01), '·');
+        assert_eq!(byte_to_ascii(0x1f), '·');
+        assert_eq!(byte_to_ascii(0x7f), '·');
+        assert_eq!(byte_to_ascii(0xff), '·');
+    }
+
+    #[test]
+    fn test_bytes_to_hex() {
+        assert_eq!(bytes_to_hex(&[]), "");
+        assert_eq!(bytes_to_hex(&[0x00]), "00");
+        assert_eq!(bytes_to_hex(&[0xff]), "FF");
+        assert_eq!(
+            bytes_to_hex(&[0x48, 0x65, 0x6c, 0x6c, 0x6f]),
+            "48 65 6C 6C 6F"
+        ); // "Hello"
+        assert_eq!(bytes_to_hex(&[0x01, 0x23, 0x45]), "01 23 45");
+    }
+
+    #[test]
+    fn test_bytes_to_ascii() {
+        assert_eq!(bytes_to_ascii(&[]), "");
+        assert_eq!(bytes_to_ascii(b"Hello"), "Hello");
+        assert_eq!(bytes_to_ascii(&[0x00, 0x0a, 0x0d]), "␀␊␍");
+        assert_eq!(bytes_to_ascii(&[0x48, 0x69, 0x00, 0x21]), "Hi␀!");
+    }
+}

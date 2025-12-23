@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import './SettingsPanel.css';
 
 export interface SerialConfig {
   baud_rate: number;
@@ -59,7 +60,7 @@ export default function SettingsPanel({
           {ports.length === 0 && <option value="">No ports found</option>}
         </select>
 
-        <div className="baud-custom-container" style={{ position: 'relative', width: '130px' }}>
+        <div className="baud-custom-container">
           {baudRateEditing ? (
             <input
               type="number"
@@ -70,93 +71,48 @@ export default function SettingsPanel({
               disabled={isConnected}
               autoFocus
               className="baud-input"
-              style={{ width: '100%' }}
             />
           ) : (
             <div
-              className="baud-trigger"
+              className={`baud-trigger ${isConnected ? 'disabled' : ''}`}
               onClick={() => {
                 if (isConnected) return;
                 setBaudDropdownOpen(!baudDropdownOpen);
               }}
-              style={{
-                border: '1px solid #444',
-                borderRadius: '3px',
-                padding: '4px 8px',
-                fontSize: '13px',
-                backgroundColor: isConnected ? '#2a2a2a' : '#2a2a2a',
-                color: isConnected ? '#888' : '#eee',
-                cursor: isConnected ? 'not-allowed' : 'pointer',
-                height: '28px',
-                boxSizing: 'border-box',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}
             >
               <span>{config.baud_rate} bps</span>
-              <span style={{ fontSize: '10px', marginLeft: '4px' }}>▼</span>
+              <span className="baud-trigger-arrow">▼</span>
             </div>
           )}
 
           {baudDropdownOpen && !baudRateEditing && !isConnected && (
             <>
               <div
-                style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 999 }}
+                className="baud-dropdown-overlay"
                 onClick={() => setBaudDropdownOpen(false)}
               />
-              <ul
-                style={{
-                  position: 'absolute',
-                  top: '100%',
-                  left: 0,
-                  width: '100%',
-                  border: '1px solid #444',
-                  backgroundColor: '#2a2a2a',
-                  listStyle: 'none',
-                  padding: 0,
-                  margin: 0,
-                  zIndex: 1000,
-                  boxShadow: '0 2px 4px rgba(0,0,0,0.5)',
-                }}
-              >
+              <ul className="baud-dropdown-list">
                 {[
                   9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1000000, 2000000,
                   3000000, 12000000,
                 ].map((rate) => (
                   <li
                     key={rate}
+                    className="baud-dropdown-item"
                     onClick={() => {
                       handleChange('baud_rate', rate);
                       setBaudDropdownOpen(false);
                     }}
-                    style={{
-                      padding: '4px 8px',
-                      cursor: 'pointer',
-                      fontSize: '13px',
-                      color: '#eee',
-                      borderBottom: '1px solid #333',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#3a3a3a')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
                   >
                     {rate}
                   </li>
                 ))}
                 <li
+                  className="baud-dropdown-edit"
                   onClick={() => {
                     setBaudRateEditing(true);
                     setBaudDropdownOpen(false);
                   }}
-                  style={{
-                    padding: '4px 8px',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    color: '#8cf',
-                    fontStyle: 'italic',
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#3a3a3a')}
-                  onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
                 >
                   [edit]
                 </li>

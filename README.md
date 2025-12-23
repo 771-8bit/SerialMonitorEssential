@@ -39,6 +39,47 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## コード品質チェック
+
+### Frontend (TypeScript)
+
+```bash
+# 型チェック
+npm run type-check
+
+# Lint
+npm run lint
+
+# フォーマットチェック
+npm run format:check
+
+# フォーマット適用
+npm run format
+```
+
+### Backend (Rust)
+
+```bash
+cd src-tauri
+
+# テスト
+cargo test --lib
+
+# Lint (Clippy)
+cargo clippy --lib -- -D warnings
+
+# フォーマットチェック
+cargo fmt -- --check
+
+# フォーマット適用
+cargo fmt
+
+# カバレッジ（要 cargo-llvm-cov）
+cargo install cargo-llvm-cov  # 初回のみ
+cargo llvm-cov --lib
+cargo llvm-cov --lib --html --open  # HTMLレポート
+```
+
 ## 実装状況
 
 - ✅ **Phase 1**: Win32 API基盤構築と基本通信機能

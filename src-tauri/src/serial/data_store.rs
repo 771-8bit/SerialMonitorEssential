@@ -578,4 +578,123 @@ mod tests {
         // クリーンアップ
         let _ = fs::remove_dir_all(&store.temp_dir);
     }
+
+    /// total_bytes() が空の状態で0を返すことを確認
+    #[test]
+    fn test_total_bytes_empty() {
+        let store = create_test_data_store();
+        assert_eq!(store.total_bytes(), 0);
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// total_bytes() がfinished_listからバイト数を正しく取得することを確認
+    #[test]
+    fn test_total_bytes_from_finished_list() {
+        let store = create_test_data_store();
+
+        // finished_listにチャンクを追加
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(0);
+
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        assert_eq!(store.total_bytes(), 50);
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// total_bytes() がarchived_indexとfinished_listの両方から正しく計算することを確認
+    #[test]
+    fn test_total_bytes_from_archived_and_finished() {
+        let store = create_test_data_store();
+
+        // archived_indexにメタデータを追加
+        let test_file = store.temp_dir.join("test_total.bin");
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&[0u8; 100]).unwrap();
+        }
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+        }
+
+        // finished_listにチャンクを追加
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(100); // archived の後から開始
+
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // archived: 0-100 (100 bytes), finished: 100-150 (50 bytes) = total 150 bytes
+        assert_eq!(store.total_bytes(), 150);
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_data() が空の状態でエラーを返すことを確認
+    #[test]
+    fn test_get_data_empty_store() {
+        let store = create_test_data_store();
+        let result = store.get_data(0, 10);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_data() が要求範囲外のオフセットでエラーを返すことを確認
+    #[test]
+    fn test_get_data_offset_out_of_range() {
+        let store = create_test_data_store();
+
+        // finished_listにチャンクを追加
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(0);
+
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // 存在しないオフセットを要求
+        let result = store.get_data(100, 10);
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// チャンク内からの部分読み取りテスト
+    #[test]
+    fn test_get_data_partial_read_within_chunk() {
+        let store = create_test_data_store();
+
+        // finished_listにチャンクを追加
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(0);
+
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // 中間の10バイトを読み取り
+        let result = store.get_data(20, 10).unwrap();
+        let expected: Vec<u8> = (20..30).collect();
+        assert_eq!(result, expected);
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
 }
