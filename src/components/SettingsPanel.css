@@ -2,86 +2,86 @@
 
 /* Baud rate custom dropdown container */
 .baud-custom-container {
-    position: relative;
-    width: 130px;
+  position: relative;
+  width: 130px;
 }
 
 /* Baud rate trigger button (dropdown closed state) */
 .baud-trigger {
-    border: 1px solid #444;
-    border-radius: 3px;
-    padding: 4px 8px;
-    font-size: 13px;
-    background-color: #2a2a2a;
-    color: #eee;
-    cursor: pointer;
-    height: 28px;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 13px;
+  background-color: #2a2a2a;
+  color: #eee;
+  cursor: pointer;
+  height: 28px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .baud-trigger.disabled {
-    color: #888;
-    cursor: not-allowed;
+  color: #888;
+  cursor: not-allowed;
 }
 
 .baud-trigger-arrow {
-    font-size: 10px;
-    margin-left: 4px;
+  font-size: 10px;
+  margin-left: 4px;
 }
 
 /* Baud rate dropdown overlay (closes dropdown on outside click) */
 .baud-dropdown-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 999;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
 }
 
 /* Baud rate dropdown list */
 .baud-dropdown-list {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    width: 100%;
-    border: 1px solid #444;
-    background-color: #2a2a2a;
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    z-index: 1000;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  border: 1px solid #444;
+  background-color: #2a2a2a;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  z-index: 1000;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
 }
 
 .baud-dropdown-item {
-    padding: 4px 8px;
-    cursor: pointer;
-    font-size: 13px;
-    color: #eee;
-    border-bottom: 1px solid #333;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #eee;
+  border-bottom: 1px solid #333;
 }
 
 .baud-dropdown-item:hover {
-    background-color: #3a3a3a;
+  background-color: #3a3a3a;
 }
 
 .baud-dropdown-item:last-child {
-    border-bottom: none;
+  border-bottom: none;
 }
 
 /* Edit option in dropdown */
 .baud-dropdown-edit {
-    padding: 4px 8px;
-    cursor: pointer;
-    font-size: 13px;
-    color: #8cf;
-    font-style: italic;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #8cf;
+  font-style: italic;
 }
 
 .baud-dropdown-edit:hover {
-    background-color: #3a3a3a;
+  background-color: #3a3a3a;
 }
