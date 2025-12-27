@@ -11,9 +11,9 @@ import { MAX_SCROLL_HEIGHT, BYTES_PER_ROW, ROW_HEIGHT } from './viewerConstants'
  * Applies scaling if height exceeds MAX_SCROLL_HEIGHT.
  */
 export function calculateScrollHeight(totalBytes: number): number {
-    const totalRows = Math.ceil(totalBytes / BYTES_PER_ROW);
-    const naturalHeight = totalRows * ROW_HEIGHT;
-    return Math.min(naturalHeight, MAX_SCROLL_HEIGHT);
+  const totalRows = Math.ceil(totalBytes / BYTES_PER_ROW);
+  const naturalHeight = totalRows * ROW_HEIGHT;
+  return Math.min(naturalHeight, MAX_SCROLL_HEIGHT);
 }
 
 /**
@@ -21,36 +21,36 @@ export function calculateScrollHeight(totalBytes: number): number {
  * scale = 1 when no compression, < 1 when compressed.
  */
 export function calculateScale(totalBytes: number): number {
-    const totalRows = Math.ceil(totalBytes / BYTES_PER_ROW);
-    const naturalHeight = totalRows * ROW_HEIGHT;
-    if (naturalHeight <= MAX_SCROLL_HEIGHT) {
-        return 1;
-    }
-    return MAX_SCROLL_HEIGHT / naturalHeight;
+  const totalRows = Math.ceil(totalBytes / BYTES_PER_ROW);
+  const naturalHeight = totalRows * ROW_HEIGHT;
+  if (naturalHeight <= MAX_SCROLL_HEIGHT) {
+    return 1;
+  }
+  return MAX_SCROLL_HEIGHT / naturalHeight;
 }
 
 /**
  * Convert scroll position to byte offset.
  */
 export function scrollTopToByteOffset(
-    scrollTop: number,
-    scrollHeight: number,
-    totalBytes: number
+  scrollTop: number,
+  scrollHeight: number,
+  totalBytes: number
 ): number {
-    if (scrollHeight <= 0 || totalBytes <= 0) return 0;
-    return Math.floor((scrollTop / scrollHeight) * totalBytes);
+  if (scrollHeight <= 0 || totalBytes <= 0) return 0;
+  return Math.floor((scrollTop / scrollHeight) * totalBytes);
 }
 
 /**
  * Convert byte offset to scroll position.
  */
 export function byteOffsetToScrollTop(
-    byteOffset: number,
-    scrollHeight: number,
-    totalBytes: number
+  byteOffset: number,
+  scrollHeight: number,
+  totalBytes: number
 ): number {
-    if (totalBytes <= 0) return 0;
-    return (byteOffset / totalBytes) * scrollHeight;
+  if (totalBytes <= 0) return 0;
+  return (byteOffset / totalBytes) * scrollHeight;
 }
 
 /**
@@ -58,19 +58,19 @@ export function byteOffsetToScrollTop(
  * Returns the byte offset that would show the last data.
  */
 export function calculateBottomByteOffset(
-    totalBytes: number,
-    viewportHeight: number,
-    scrollHeight: number
+  totalBytes: number,
+  viewportHeight: number,
+  scrollHeight: number
 ): number {
-    if (totalBytes <= 0 || scrollHeight <= 0) return 0;
-    // How many bytes fit in viewport
-    const viewportBytes = (viewportHeight / scrollHeight) * totalBytes;
-    return Math.max(0, totalBytes - viewportBytes);
+  if (totalBytes <= 0 || scrollHeight <= 0) return 0;
+  // How many bytes fit in viewport
+  const viewportBytes = (viewportHeight / scrollHeight) * totalBytes;
+  return Math.max(0, totalBytes - viewportBytes);
 }
 
 /**
  * Clamp byte offset to valid range.
  */
 export function clampByteOffset(byteOffset: number, totalBytes: number): number {
-    return Math.max(0, Math.min(byteOffset, totalBytes));
+  return Math.max(0, Math.min(byteOffset, totalBytes));
 }

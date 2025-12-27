@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  calculateScrollHeight,
-  calculateScale,
-} from './viewers/scrollUtils';
+import { calculateScrollHeight, calculateScale } from './viewers/scrollUtils';
 import { BYTES_PER_ROW, ROW_HEIGHT, MAX_SCROLL_HEIGHT } from './viewers/viewerConstants';
 
 /**
@@ -60,7 +57,12 @@ describe('HexViewer - Row Calculation', () => {
   const calculateTotalRows = (totalBytes: number) => Math.ceil(totalBytes / BYTES_PER_ROW);
 
   // Helper function to calculate start row (matching HexViewer logic)
-  const calculateStartRow = (scrollTop: number, scrollHeight: number, totalBytes: number, bufferRows: number = 5) => {
+  const calculateStartRow = (
+    scrollTop: number,
+    scrollHeight: number,
+    totalBytes: number,
+    bufferRows: number = 5
+  ) => {
     const totalRows = calculateTotalRows(totalBytes);
     const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
     const targetRow = Math.floor(scrollRatio * totalRows);
@@ -76,7 +78,7 @@ describe('HexViewer - Row Calculation', () => {
 
   it('calculates start row at scale 1', () => {
     const totalBytes = 1000 * BYTES_PER_ROW; // 1000 rows
-    const scrollHeight = 1000 * ROW_HEIGHT;  // No scaling
+    const scrollHeight = 1000 * ROW_HEIGHT; // No scaling
 
     // scrollTop = 100 -> scrollRatio = 100/20000 = 0.005 -> targetRow = 5, with buffer -> 0
     expect(calculateStartRow(100, scrollHeight, totalBytes, 5)).toBe(0);

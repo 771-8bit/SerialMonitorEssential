@@ -1,6 +1,11 @@
 import { useState, KeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { parseHexString, appendLineEnding, addToHistory, type LineEnding } from '../utils/sendUtils';
+import {
+  parseHexString,
+  appendLineEnding,
+  addToHistory,
+  type LineEnding,
+} from '../utils/sendUtils';
 
 interface SendPanelProps {
   connected: boolean;
