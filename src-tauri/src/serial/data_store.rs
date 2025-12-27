@@ -20,6 +20,16 @@ use super::worker_thread;
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const INITIAL_POOL_SIZE: usize = 100; // 約6.4MB
 
+/// ByteTimestamp: バイトカウントとタイムスタンプのペア
+///
+/// 100ms間隔で累積バイト数とタイムスタンプを記録し、
+/// 表示時に二分探索でオフセットに対応するタイムスタンプを取得する。
+#[derive(Clone, Debug)]
+pub struct ByteTimestamp {
+    pub timestamp: u64,        // Unix time (ms)
+    pub cumulative_bytes: u64, // その時点での累積バイト数
+}
+
 /// DataStore: データ管理の中核
 ///
 /// ObjectPool、FinishedQueue、ArchivedIndexを統合し、
@@ -28,6 +38,8 @@ pub struct DataStore {
     free_pool: Arc<SegQueue<Chunk>>,
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     archived_index: Arc<RwLock<Vec<PageMetadata>>>,
+    timestamp_index: Arc<RwLock<Vec<ByteTimestamp>>>,
+    line_index: Arc<RwLock<Vec<u64>>>, // 各行の開始オフセット（改行検出時に記録）
     temp_dir: PathBuf,
 
     // スレッド管理
@@ -64,6 +76,8 @@ impl DataStore {
             free_pool,
             finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),
+            timestamp_index: Arc::new(RwLock::new(Vec::new())),
+            line_index: Arc::new(RwLock::new(vec![0])), // 最初の行はオフセット0から始まる
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
@@ -97,6 +111,7 @@ impl DataStore {
             port,
             self.free_pool.clone(),
             self.finished_list.clone(),
+            self.line_index.clone(), // Phase 2: pass line_index for pre-indexing
             self.stop_flag.clone(),
             app_handle.clone(),
         );
@@ -170,15 +185,34 @@ impl DataStore {
         // Debug: Log the state of archived_index and finished_list
         let archived_count = self.archived_index.read().map(|i| i.len()).unwrap_or(0);
         let finished_count = self.finished_list.read().map(|l| l.len()).unwrap_or(0);
-        warn!(
+        debug!(
             "[get_data] offset={}, length={}, archived_pages={}, finished_chunks={}",
             offset, length, archived_count, finished_count
         );
 
         // 1. まずディスク上（archived_index）を検索 - 確定済みデータ
         if let Ok(index) = self.archived_index.read() {
-            for page in index.iter() {
+            // 二分探索で開始位置を特定: offsetが含まれる可能性のある最初のページを探す
+            // offsetよりもstartが大きい最初のページの一つ前が候補
+            let start_idx = match index.binary_search_by(|p| p.global_offset.cmp(&offset)) {
+                Ok(i) => i,
+                Err(i) => {
+                    if i > 0 {
+                        i - 1
+                    } else {
+                        0
+                    }
+                }
+            };
+
+            for page in index.iter().skip(start_idx) {
                 let page_start = page.global_offset;
+
+                // 最適化: 要求範囲を超えたら検索終了
+                if page_start >= offset + length as u64 {
+                    break;
+                }
+
                 let page_end = page_start + page.data_length as u64;
 
                 // このページに要求範囲が含まれるか
@@ -222,8 +256,15 @@ impl DataStore {
 
         // 2. 次にメモリ上（finished_list）を検索 - 最新データ
         if let Ok(list) = self.finished_list.read() {
+            // finished_listは短い前提だが、念のため最適化
             for chunk in list.iter() {
                 let chunk_start = chunk.global_offset();
+
+                // 最適化: 要求範囲を超えたら検索終了
+                if chunk_start >= offset + length as u64 {
+                    break;
+                }
+
                 let chunk_end = chunk_start + chunk.len() as u64;
 
                 // このチャンクに要求範囲が含まれるか
@@ -281,10 +322,114 @@ impl DataStore {
         total
     }
 
-    /// 一時ディレクトリパスを取得（診断/デバッグ用）
+    /// 現在のバイトカウントとタイムスタンプを記録
+    ///
+    /// 100ms間隔でUiNotifierから呼び出される。
+    /// 前回と同じバイト数の場合は記録しない（データ未受信時）。
+    pub fn record_timestamp(&self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let current_bytes = self.total_bytes();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        if let Ok(mut index) = self.timestamp_index.write() {
+            // 前回と同じバイト数の場合はスキップ
+            if let Some(last) = index.last() {
+                if last.cumulative_bytes == current_bytes {
+                    return;
+                }
+            }
+
+            index.push(ByteTimestamp {
+                timestamp,
+                cumulative_bytes: current_bytes,
+            });
+
+            // 定期的にログ出力（1000エントリごと）
+            if index.len() % 1000 == 0 {
+                debug!("[DataStore] timestamp_index size: {} entries", index.len());
+            }
+        }
+    }
+
+    /// 指定オフセットに対応するタイムスタンプを取得
+    ///
+    /// 二分探索でcumulative_bytes <= offsetとなる最大のエントリを検索。
+    /// 見つからない場合はNoneを返す。
+    pub fn get_timestamp_for_offset(&self, offset: u64) -> Option<u64> {
+        if let Ok(index) = self.timestamp_index.read() {
+            if index.is_empty() {
+                return None;
+            }
+
+            // 二分探索: cumulative_bytes <= offset となる最大のエントリを探す
+            let result = index.binary_search_by(|entry| entry.cumulative_bytes.cmp(&offset));
+
+            match result {
+                Ok(i) => Some(index[i].timestamp),
+                Err(0) => None, // offset が最小値よりも小さい
+                Err(i) => Some(index[i - 1].timestamp),
+            }
+        } else {
+            None
+        }
+    }
+
+    /// timestamp_indexをクリア（データクリア時に使用）
+    #[allow(dead_code)] // Will be used when clear_data is implemented
+    pub fn clear_timestamps(&self) {
+        if let Ok(mut index) = self.timestamp_index.write() {
+            index.clear();
+        }
+    }
+
+    /// 総行数を取得
+    pub fn total_lines(&self) -> u64 {
+        self.line_index
+            .read()
+            .map(|idx| idx.len() as u64)
+            .unwrap_or(0)
+    }
+
+    /// 指定範囲の行オフセットを取得
+    pub fn get_line_offsets(&self, start_line: u64, count: u32) -> Vec<(u64, u64)> {
+        if let Ok(index) = self.line_index.read() {
+            let total = index.len();
+            let start = start_line as usize;
+            let end = std::cmp::min(start + count as usize, total);
+
+            if start >= total {
+                return Vec::new();
+            }
+
+            let mut result = Vec::with_capacity(end - start);
+            for i in start..end {
+                let line_start = index[i];
+                // 次の行の開始位置、または total_bytes
+                let line_end = if i + 1 < total {
+                    index[i + 1]
+                } else {
+                    // 最後の行はtotal_bytesまで
+                    self.total_bytes()
+                };
+                result.push((line_start, line_end));
+            }
+            result
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// line_indexをクリア（データクリア時に使用）
     #[allow(dead_code)]
-    pub fn temp_dir(&self) -> &PathBuf {
-        &self.temp_dir
+    pub fn clear_lines(&self) {
+        if let Ok(mut index) = self.line_index.write() {
+            index.clear();
+            index.push(0); // 最初の行はオフセット0から
+        }
     }
 }
 
@@ -413,6 +558,8 @@ mod tests {
             free_pool: Arc::new(SegQueue::new()),
             finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),
+            timestamp_index: Arc::new(RwLock::new(Vec::new())),
+            line_index: Arc::new(RwLock::new(vec![0])),
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
@@ -695,6 +842,456 @@ mod tests {
         let result = store.get_data(20, 10).unwrap();
         let expected: Vec<u8> = (20..30).collect();
         assert_eq!(result, expected);
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    // ====== Timestamp Tests ======
+
+    /// record_timestamp が正しくタイムスタンプを記録することを確認
+    #[test]
+    fn test_record_timestamp_basic() {
+        let store = create_test_data_store();
+
+        // データがないので total_bytes() は 0
+        // 最初の record_timestamp は記録される
+        store.record_timestamp();
+
+        {
+            let index = store.timestamp_index.read().unwrap();
+            assert_eq!(index.len(), 1);
+            assert_eq!(index[0].cumulative_bytes, 0);
+        }
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// record_timestamp が同じバイト数の場合は記録しないことを確認
+    #[test]
+    fn test_record_timestamp_skip_duplicate() {
+        let store = create_test_data_store();
+
+        // 1回目の記録
+        store.record_timestamp();
+
+        // 2回目の記録（バイト数変わらず）
+        store.record_timestamp();
+
+        {
+            let index = store.timestamp_index.read().unwrap();
+            // バイト数が同じなので1エントリのみ
+            assert_eq!(index.len(), 1);
+        }
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// record_timestamp がバイト数増加時に記録することを確認
+    #[test]
+    fn test_record_timestamp_with_data() {
+        let store = create_test_data_store();
+
+        // 最初の記録（0バイト）
+        store.record_timestamp();
+
+        // データを追加
+        let mut chunk = Chunk::new(100);
+        chunk.push_data(&[1, 2, 3, 4, 5]);
+        chunk.set_global_offset(0);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // 2回目の記録（5バイト）
+        store.record_timestamp();
+
+        {
+            let index = store.timestamp_index.read().unwrap();
+            assert_eq!(index.len(), 2);
+            assert_eq!(index[0].cumulative_bytes, 0);
+            assert_eq!(index[1].cumulative_bytes, 5);
+        }
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_timestamp_for_offset が空の状態でNoneを返すことを確認
+    #[test]
+    fn test_get_timestamp_for_offset_empty() {
+        let store = create_test_data_store();
+
+        let result = store.get_timestamp_for_offset(0);
+        assert!(result.is_none());
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_timestamp_for_offset が正しいタイムスタンプを返すことを確認
+    #[test]
+    fn test_get_timestamp_for_offset_exact_match() {
+        let store = create_test_data_store();
+
+        // タイムスタンプを手動で追加
+        {
+            let mut index = store.timestamp_index.write().unwrap();
+            index.push(ByteTimestamp {
+                timestamp: 1000,
+                cumulative_bytes: 0,
+            });
+            index.push(ByteTimestamp {
+                timestamp: 2000,
+                cumulative_bytes: 100,
+            });
+            index.push(ByteTimestamp {
+                timestamp: 3000,
+                cumulative_bytes: 200,
+            });
+        }
+
+        // 完全一致のケース
+        assert_eq!(store.get_timestamp_for_offset(0), Some(1000));
+        assert_eq!(store.get_timestamp_for_offset(100), Some(2000));
+        assert_eq!(store.get_timestamp_for_offset(200), Some(3000));
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_timestamp_for_offset が二分探索で正しいタイムスタンプを返すことを確認
+    #[test]
+    fn test_get_timestamp_for_offset_binary_search() {
+        let store = create_test_data_store();
+
+        {
+            let mut index = store.timestamp_index.write().unwrap();
+            index.push(ByteTimestamp {
+                timestamp: 1000,
+                cumulative_bytes: 0,
+            });
+            index.push(ByteTimestamp {
+                timestamp: 2000,
+                cumulative_bytes: 100,
+            });
+            index.push(ByteTimestamp {
+                timestamp: 3000,
+                cumulative_bytes: 200,
+            });
+        }
+
+        // 中間のオフセット (cumulative_bytes <= offset となる最大エントリ)
+        assert_eq!(store.get_timestamp_for_offset(50), Some(1000)); // 0 <= 50
+        assert_eq!(store.get_timestamp_for_offset(150), Some(2000)); // 100 <= 150
+        assert_eq!(store.get_timestamp_for_offset(250), Some(3000)); // 200 <= 250
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// clear_timestamps がタイムスタンプをクリアすることを確認
+    #[test]
+    fn test_clear_timestamps() {
+        let store = create_test_data_store();
+
+        // タイムスタンプを追加
+        {
+            let mut index = store.timestamp_index.write().unwrap();
+            index.push(ByteTimestamp {
+                timestamp: 1000,
+                cumulative_bytes: 0,
+            });
+        }
+
+        // クリア
+        store.clear_timestamps();
+
+        {
+            let index = store.timestamp_index.read().unwrap();
+            assert!(index.is_empty());
+        }
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    // ====== Line Index Tests ======
+
+    /// total_lines が初期状態で0を返すことを確認
+    #[test]
+    fn test_total_lines_initial() {
+        let store = create_test_data_store();
+
+        // line_indexは[0]で初期化されているので1エントリあるが、
+        // total_linesは行数を返す（エントリ数）
+        // 初期状態は1行目のオフセット0のみ
+        assert_eq!(store.total_lines(), 1);
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+    /// get_line_offsets が正しい範囲を返すことを確認
+    #[test]
+    fn test_get_line_offsets() {
+        let store = create_test_data_store();
+
+        // データを追加してtotal_bytesを設定
+        let mut chunk = Chunk::new(100);
+        let test_data = b"Line1\nLine2\nLine3";
+        chunk.push_data(test_data);
+        chunk.set_global_offset(0);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // 行インデックスを直接設定
+        {
+            let mut index = store.line_index.write().unwrap();
+            index.push(6); // "Line1\n" の後
+            index.push(12); // "Line2\n" の後
+        }
+
+        // 行0から2行取得
+        let offsets = store.get_line_offsets(0, 2);
+        assert_eq!(offsets.len(), 2);
+        assert_eq!(offsets[0], (0, 6)); // Line1\n
+        assert_eq!(offsets[1], (6, 12)); // Line2\n
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_line_offsets が範囲外の場合に空を返すことを確認
+    #[test]
+    fn test_get_line_offsets_out_of_range() {
+        let store = create_test_data_store();
+
+        // 行インデックスは初期状態 [0] のみ
+        let offsets = store.get_line_offsets(100, 10);
+        assert!(offsets.is_empty());
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_line_offsets が最後の行でtotal_bytesを使うことを確認
+    #[test]
+    fn test_get_line_offsets_last_line() {
+        let store = create_test_data_store();
+
+        // データを追加（改行なし）
+        let mut chunk = Chunk::new(100);
+        let test_data = b"NoNewline";
+        chunk.push_data(test_data);
+        chunk.set_global_offset(0);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // 行インデックスは [0] のみ（改行なし）
+        let offsets = store.get_line_offsets(0, 1);
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets[0], (0, 9)); // 0 から total_bytes (9) まで
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// clear_lines が行インデックスをリセットすることを確認
+    #[test]
+    fn test_clear_lines() {
+        let store = create_test_data_store();
+
+        // 行を直接追加
+        {
+            let mut index = store.line_index.write().unwrap();
+            index.push(6);
+            index.push(12);
+        }
+
+        // クリア
+        store.clear_lines();
+
+        {
+            let index = store.line_index.read().unwrap();
+            // [0] にリセット
+            assert_eq!(index.len(), 1);
+            assert_eq!(index[0], 0);
+        }
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+    /// get_data with length 0 should return empty vec
+    #[test]
+    fn test_get_data_zero_length() {
+        let store = create_test_data_store();
+
+        // Add some data
+        let mut chunk = Chunk::new(100);
+        let test_data: Vec<u8> = (0..50).collect();
+        chunk.push_data(&test_data);
+        chunk.set_global_offset(0);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // Request zero bytes
+        let result = store.get_data(0, 0).unwrap();
+        assert!(result.is_empty());
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_data from multiple archived chunks
+    #[test]
+    fn test_get_data_multiple_archived_chunks() {
+        let store = create_test_data_store();
+
+        // Create two separate archived pages
+        let test_file = store.temp_dir.join("test_data.bin");
+        let data1: Vec<u8> = (0..100).collect();
+        let data2: Vec<u8> = (100..200).collect();
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&data1).unwrap();
+            file.write_all(&data2).unwrap();
+        }
+
+        // Add two pages to archived_index
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 100,
+                data_length: 100,
+                global_offset: 100,
+            });
+        }
+
+        // Read spanning both chunks
+        let result = store.get_data(50, 100).unwrap();
+        let expected: Vec<u8> = (50..150).collect();
+        assert_eq!(result.len(), 100);
+        assert_eq!(result, expected);
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_data binary search edge case: exact match at page boundary
+    #[test]
+    fn test_get_data_exact_boundary() {
+        let store = create_test_data_store();
+
+        let test_file = store.temp_dir.join("test_data.bin");
+        let data: Vec<u8> = (0..100).collect();
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(&data).unwrap();
+        }
+
+        {
+            let mut index = store.archived_index.write().unwrap();
+            index.push(PageMetadata {
+                file_path: test_file.clone(),
+                file_offset: 0,
+                data_length: 100,
+                global_offset: 0,
+            });
+        }
+
+        // Read exactly from start (offset 0)
+        let result = store.get_data(0, 50).unwrap();
+        let expected: Vec<u8> = (0..50).collect();
+        assert_eq!(result, expected);
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_data from multiple finished_list chunks
+    #[test]
+    fn test_get_data_multiple_finished_chunks() {
+        let store = create_test_data_store();
+
+        // Add two chunks to finished_list
+        {
+            let mut chunk1 = Chunk::new(100);
+            let data1: Vec<u8> = (0..50).collect();
+            chunk1.push_data(&data1);
+            chunk1.set_global_offset(0);
+
+            let mut chunk2 = Chunk::new(100);
+            let data2: Vec<u8> = (50..100).collect();
+            chunk2.push_data(&data2);
+            chunk2.set_global_offset(50);
+
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk1));
+            list.push_back(Arc::new(chunk2));
+        }
+
+        // Read spanning both chunks
+        let result = store.get_data(25, 50).unwrap();
+        let expected: Vec<u8> = (25..75).collect();
+        assert_eq!(result.len(), 50);
+        assert_eq!(result, expected);
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// get_timestamp_for_offset should return None when offset is before first entry
+    #[test]
+    fn test_get_timestamp_for_offset_before_first() {
+        let store = create_test_data_store();
+
+        // Add timestamp starting at offset 100
+        {
+            let mut index = store.timestamp_index.write().unwrap();
+            index.push(ByteTimestamp {
+                timestamp: 1000,
+                cumulative_bytes: 100,
+            });
+        }
+
+        // Query for offset 50 (before first entry)
+        let result = store.get_timestamp_for_offset(50);
+        assert!(result.is_none());
+
+        // Query for offset 100 (exact match)
+        let result = store.get_timestamp_for_offset(100);
+        assert_eq!(result, Some(1000));
+
+        let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    /// Test get_line_offsets with partial count request
+    #[test]
+    fn test_get_line_offsets_partial_count() {
+        let store = create_test_data_store();
+
+        // Add data with newlines
+        let mut chunk = Chunk::new(100);
+        let test_data = b"A\nB\nC\nD\n";
+        chunk.push_data(test_data);
+        chunk.set_global_offset(0);
+        {
+            let mut list = store.finished_list.write().unwrap();
+            list.push_back(Arc::new(chunk));
+        }
+
+        // Set line index directly: [0, 2, 4, 6, 8]
+        {
+            let mut index = store.line_index.write().unwrap();
+            index.push(2); // "A\n"
+            index.push(4); // "B\n"
+            index.push(6); // "C\n"
+            index.push(8); // "D\n"
+        }
+
+        // Request more lines than available
+        let offsets = store.get_line_offsets(0, 100);
+        // Should return only available lines: [0, 2, 4, 6, 8] = 5 entries
+        assert_eq!(offsets.len(), 5);
+
         let _ = fs::remove_dir_all(&store.temp_dir);
     }
 }

@@ -1,15 +1,12 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 /// Chunk: データ受信の基本単位
 ///
 /// 高速データ受信のために固定サイズのバッファを持ち、
 /// データが満杯になるか16ms経過したらスワップする。
+/// タイムスタンプ管理はByteTimestamp（data_store.rs）で行う。
 pub struct Chunk {
     buffer: Box<[u8]>,
     capacity: usize,
     valid_len: usize,
-    #[allow(dead_code)] // Phase 4: タイムスタンプ表示機能で使用予定
-    timestamp: u64,
     global_offset: u64,
 }
 
@@ -24,7 +21,6 @@ impl Chunk {
             buffer,
             capacity,
             valid_len: 0,
-            timestamp: Self::now(),
             global_offset: 0,
         }
     }
@@ -68,13 +64,6 @@ impl Chunk {
         self.valid_len
     }
 
-    /// タイムスタンプを取得
-    /// Phase 4: タイムスタンプ表示機能で使用予定
-    #[allow(dead_code)]
-    pub fn timestamp(&self) -> u64 {
-        self.timestamp
-    }
-
     /// グローバルオフセットを設定
     pub fn set_global_offset(&mut self, offset: u64) {
         self.global_offset = offset;
@@ -90,15 +79,6 @@ impl Chunk {
     #[cfg(test)]
     pub fn clear(&mut self) {
         self.valid_len = 0;
-        self.timestamp = Self::now();
-    }
-
-    /// 現在時刻をミリ秒で取得
-    fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
     }
 }
 
@@ -176,14 +156,5 @@ mod tests {
         assert_eq!(written, 0);
         assert_eq!(chunk.len(), 0);
         assert!(!chunk.has_data());
-    }
-
-    #[test]
-    fn test_chunk_timestamp() {
-        let chunk = Chunk::new(10);
-        let ts = chunk.timestamp();
-
-        // タイムスタンプが妥当な範囲か（2020年以降）
-        assert!(ts > 1577836800000); // 2020-01-01 00:00:00 UTC
     }
 }

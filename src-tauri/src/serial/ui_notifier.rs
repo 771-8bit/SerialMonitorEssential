@@ -13,7 +13,9 @@ use log::{debug, info, warn};
 ///
 /// DataStoreのtotal_bytesを監視し、60fps（16ms間隔）で間引いてイベントを発火する。
 /// 高速データ受信時もUIへの通知頻度を制限し、パフォーマンスを維持する。
+/// また、100ms間隔（16ms × 6）でタイムスタンプを記録する。
 const NOTIFY_INTERVAL_MS: u64 = 16; // 約60fps
+const TIMESTAMP_RECORD_INTERVAL: u32 = 6; // 100ms (16ms × 6 ≈ 96ms)
 
 #[derive(Clone, serde::Serialize)]
 pub struct DataUpdatePayload {
@@ -30,6 +32,7 @@ pub fn spawn_ui_notifier_thread(
         let mut last_notify = Instant::now();
         let mut last_total_bytes: u64 = 0;
         let mut event_count: u64 = 0;
+        let mut timestamp_counter: u32 = 0;
 
         loop {
             // 停止フラグチェック
@@ -70,6 +73,13 @@ pub fn spawn_ui_notifier_thread(
                 }
 
                 last_total_bytes = total_bytes;
+            }
+
+            // 100ms間隔でタイムスタンプを記録 (16ms × 6 ≈ 96ms)
+            timestamp_counter += 1;
+            if timestamp_counter >= TIMESTAMP_RECORD_INTERVAL {
+                timestamp_counter = 0;
+                data_store.record_timestamp();
             }
 
             last_notify = Instant::now();

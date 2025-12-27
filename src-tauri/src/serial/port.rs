@@ -147,19 +147,6 @@ impl SerialPort {
         // serialport handles closing via Drop automatically
     }
 
-    /// Check if the port configuration is valid (for testing purposes)
-    #[allow(dead_code)]
-    pub fn is_valid(&self) -> bool {
-        self.inner.baud_rate().is_ok()
-    }
-
-    /// Get the number of bytes available to read
-    #[allow(dead_code)]
-    pub fn bytes_to_read(&self) -> Result<u32, String> {
-        self.inner
-            .bytes_to_read()
-            .map_err(|e| format!("Failed to get bytes to read: {:?}", e))
-    }
     /// Set DTR line state
     pub fn write_dtr(&mut self, level: bool) -> Result<(), String> {
         self.inner

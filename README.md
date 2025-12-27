@@ -1,20 +1,21 @@
 # SerialMonitorEssential
 
 高速シリアル通信（12Mbps級）に対応したデスクトップアプリケーション。  
-Rust + Win32 APIによる直接制御で、データの完全性を保証します。
+Rustの `serialport` クレートによるクロスプラットフォーム対応で、Windows, Linux, macOS で動作します。
 
 ## 特徴
 
 - **高速通信対応**: 12Mbps以上の非標準ボーレートに対応
-- **データ完全性**: Win32 API直接制御により、受信データを1バイトも取りこぼさない設計
+- **データ完全性**: 受信データを1バイトも取りこぼさない設計（Chunk-based Memory Management）
 - **モダンUI**: Tauri (React + TypeScript) による応答性の高いインターフェース
-- **リアルタイム表示**: 受信データを16進数でリアルタイム表示
+- **リアルタイム表示**: 受信データをHex/ASCIIでリアルタイム表示（仮想スクロール対応）
+- **クロスプラットフォーム**: Windows / Linux / macOS 対応
 
 ## 開発環境
 
-- **Backend**: Rust (windows crate, Tauri)
+- **Backend**: Rust (Tauri, serialport)
 - **Frontend**: React + TypeScript + Vite
-- **対応OS**: Windows
+- **対応OS**: Windows, Linux, macOS
 
 ## 前提条件
 
@@ -82,17 +83,13 @@ cargo llvm-cov --lib --html --open  # HTMLレポート
 
 ## 実装状況
 
-- ✅ **Phase 1**: Win32 API基盤構築と基本通信機能
-  - COMポート列挙
-  - ポート開閉
-  - データ受信・表示（Hex）
-  - DTR/RTS制御
-  
-- 🚧 **Phase 2** (予定): 高速受信エンジン
-  - Chunk-based メモリ管理
-  - Object Pool
-  - Worker Thread分離
-  - Tempファイルページング
+- ✅ **Phase 1**: 基盤構築と基本通信機能
+- ✅ **Phase 2**: 高速受信エンジン (Chunk-based Memory Management)
+- ✅ **Phase 3**: ビューアUIと仮想スクロール (Hex/ASCII)
+- ✅ **Phase 4**: 設定機能・ログエクスポート
+- ✅ **Phase 5**: 送信機能
+- 🚧 **Phase 6**: UIリファイン・拡張機能 (現在進行中)
+- 📅 **Phase 7**: シリアルプロッタ (予定)
 
 詳細は [`agents/plan.md`](agents/plan.md) を参照してください。
 

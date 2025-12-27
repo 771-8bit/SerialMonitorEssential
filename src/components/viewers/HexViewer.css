@@ -6,23 +6,21 @@
   border: 1px solid #3c3c3c;
   border-radius: 4px;
   overflow: hidden;
-}
-
-.hex-viewer-empty {
+  min-width: 0;
+  height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 400px;
+  flex-direction: column;
 }
 
-.hex-placeholder {
-  color: #6c6c6c;
-  font-style: italic;
+.hex-scroll-container {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
 }
 
 .hex-header {
   display: flex;
-  padding: 8px 12px;
+  padding: 8px 8px;
   background-color: #2d2d2d;
   border-bottom: 1px solid #3c3c3c;
   color: #808080;
@@ -31,7 +29,7 @@
 
 .hex-row {
   display: flex;
-  padding: 0 12px;
+  padding: 0 8px;
   color: #d4d4d4;
 }
 
@@ -40,25 +38,48 @@
 }
 
 .hex-offset {
-  width: 80px;
+  width: 70px;
   color: #569cd6;
   flex-shrink: 0;
 }
 
 .hex-bytes {
-  flex: 1;
-  min-width: 400px;
+  width: 370px;
+  flex-shrink: 0;
   color: #ce9178;
   letter-spacing: 0.5px;
 }
 
 .hex-ascii {
-  width: 160px;
-  color: #dcdcaa;
+  display: flex;
+  width: 230px;
   flex-shrink: 0;
-  padding-left: 16px;
+  padding-left: 8px;
   border-left: 1px solid #3c3c3c;
+  box-sizing: border-box;
 }
+
+/* Fixed-width character container */
+.ascii-char {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 20px;
+  color: #dcdcaa;
+  font-size: 13px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Control character label - small text */
+.ascii-ctrl {
+  font-size: 6px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+/* (ascii-chars-batch removed - each char now rendered individually) */
 
 .hex-footer {
   display: flex;
@@ -87,4 +108,10 @@
 
 .hex-viewer ::-webkit-scrollbar-thumb:hover {
   background: #5c5c5c;
+}
+
+.hex-debug {
+  font-size: 10px;
+  color: #808080;
+  font-family: 'Consolas', monospace;
 }

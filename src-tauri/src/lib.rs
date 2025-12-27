@@ -24,6 +24,7 @@ pub fn run() {
             serial::write_data,
             serial::get_read_data,
             serial::get_display_rows,
+            serial::get_ascii_lines,
             serial::export_log,
             serial::clear_data,
             serial::get_clipboard_text,

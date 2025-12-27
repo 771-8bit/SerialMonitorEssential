@@ -1,10 +1,25 @@
-import HexViewer from './HexViewer';
+import { useState, useCallback } from 'react';
+import HexViewer from './viewers/HexViewer';
+import AsciiViewer from './viewers/AsciiViewer';
+import './ReceivePanel.css';
+
+export type ViewMode = 'hex' | 'ascii';
+
+export interface ReceiveOptions {
+  viewMode: ViewMode;
+  lineWrap: boolean;
+  showCtrl: boolean;
+  showTimestamp: boolean;
+  autoScroll: boolean;
+  filterEnabled: boolean;
+  searchQuery: string;
+}
 
 interface ReceivePanelProps {
   totalBytes: number;
   onExport: () => void;
   onClear: () => void;
-  onCopy: () => void;
+  onCopy: (mode: ViewMode) => void;
   autoScroll: boolean;
   onAutoScrollChange: (enabled: boolean) => void;
 }
@@ -17,50 +32,144 @@ export default function ReceivePanel({
   autoScroll,
   onAutoScrollChange,
 }: ReceivePanelProps) {
+  // View mode: 'hex' (Binary checked) or 'ascii' (Binary unchecked)
+  const [viewMode, setViewMode] = useState<ViewMode>('ascii');
+
+  // Display options (ASCII mode only)
+  const [lineWrap, setLineWrap] = useState(true);
+  const [showTimestamp, setShowTimestamp] = useState(true);
+
+  // Scroll position as byte offset (preserved across mode switches)
+  const [scrollOffset, setScrollOffset] = useState(0);
+
+  // Search & Filter
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterEnabled, setFilterEnabled] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    onCopy(viewMode);
+  }, [onCopy, viewMode]);
+
+  const handlePlotter = useCallback(() => {
+    // Phase 7で実装予定
+    alert('Plotter will be available in Phase 7');
+  }, []);
+
   return (
     <div className="receive-panel">
       <div className="panel-header">Receive</div>
-      <div className="user-note">
-        <input type="text" placeholder="User's Note" />
+
+      {/* Search Bar */}
+      <div className="search-bar">
+        <input
+          type="text"
+          placeholder={viewMode === 'ascii' ? 'Search (regex supported)...' : 'Search...'}
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="search-input"
+        />
+        <button
+          className={`filter-toggle ${filterEnabled ? 'active' : ''}`}
+          onClick={() => setFilterEnabled(!filterEnabled)}
+          title="Filter: Show only matching lines"
+        >
+          {filterEnabled ? '🔍 Filter ON' : '🔍 Filter'}
+        </button>
       </div>
 
-      <div className="hex-viewer-wrapper">
-        <HexViewer totalBytes={totalBytes} autoScroll={autoScroll} />
+      {/* Log Viewer Area - Switch between HexViewer and AsciiViewer */}
+      <div className="viewer-wrapper">
+        {viewMode === 'hex' ? (
+          <HexViewer
+            totalBytes={totalBytes}
+            autoScroll={autoScroll}
+            initialOffset={scrollOffset}
+            onScrollChange={setScrollOffset}
+          />
+        ) : (
+          <AsciiViewer
+            totalBytes={totalBytes}
+            autoScroll={autoScroll}
+            showTimestamp={showTimestamp}
+            lineWrap={lineWrap}
+            initialOffset={scrollOffset}
+            onScrollChange={setScrollOffset}
+          />
+        )}
       </div>
 
+      {/* Footer Controls */}
       <div className="receive-footer">
         <div className="footer-left">
-          <label>
-            <input type="checkbox" defaultChecked /> Line Wrap
+          {/* Hex/ASCII Toggle Switch */}
+          <div className="mode-switch" title="Toggle between Hex and ASCII view">
+            <span className={`mode-label ${viewMode === 'hex' ? 'active hex' : ''}`}>Hex</span>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={viewMode === 'ascii'}
+                onChange={(e) => setViewMode(e.target.checked ? 'ascii' : 'hex')}
+              />
+              <span className="slider"></span>
+            </label>
+            <span className={`mode-label ${viewMode === 'ascii' ? 'active ascii' : ''}`}>
+              ASCII
+            </span>
+          </div>
+
+          <div className="control-separator"></div>
+
+          <label
+            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
+            title="Wrap long lines (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={lineWrap}
+              onChange={(e) => setLineWrap(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Line Wrap
           </label>
-          <label>
-            <input type="checkbox" /> Binary (hex)
+
+          <label
+            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
+            title="Show timestamp (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={showTimestamp}
+              onChange={(e) => setShowTimestamp(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Timestamp
           </label>
-          <label>
-            <input type="checkbox" defaultChecked /> Show [CRLF]
-          </label>
-          <label>
-            <input type="checkbox" defaultChecked /> Show [NUL]
-          </label>
-          <label>
+
+          <div className="control-separator"></div>
+
+          <label className="control-label" title="Auto scroll to bottom on new data">
             <input
               type="checkbox"
               checked={autoScroll}
               onChange={(e) => onAutoScrollChange(e.target.checked)}
-            />{' '}
+            />
             Auto Scroll
           </label>
-          <label>
-            <input type="checkbox" defaultChecked /> Show Timestamp
-          </label>
         </div>
+
         <div className="footer-right">
-          <select disabled>
-            <option>{'>'}</option>
-          </select>
-          <button onClick={onExport}>Save</button>
-          <button onClick={onCopy}>Copy</button>
-          <button onClick={onClear}>CLEAR</button>
+          <button onClick={handlePlotter} className="plotter-button" title="Open Plotter (Phase 7)">
+            📈 Plotter
+          </button>
+          <button onClick={onExport} title="Save to file">
+            Save
+          </button>
+          <button onClick={handleCopy} title="Copy all data to clipboard">
+            Copy
+          </button>
+          <button onClick={onClear} title="Clear all data (including disk)">
+            Clear
+          </button>
         </div>
       </div>
     </div>

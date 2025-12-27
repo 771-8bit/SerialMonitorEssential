@@ -1,0 +1,105 @@
+.ascii-viewer {
+  font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  line-height: 20px;
+  background-color: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  overflow: hidden;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.ascii-content-wrapper {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* Fixed timestamp column - only vertical scroll */
+.ascii-timestamp-column {
+  width: 90px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background-color: #1e1e1e;
+  border-right: 1px solid #3c3c3c;
+}
+
+/* Hide scrollbar for timestamp column - scrolls sync with text */
+.ascii-timestamp-column::-webkit-scrollbar {
+  display: none;
+}
+
+.ascii-timestamp-row {
+  padding: 0 8px 0 12px;
+  color: #6a9955;
+  display: flex;
+  align-items: center;
+}
+
+/* Scrollable text column - both vertical and horizontal scroll */
+.ascii-text-column {
+  flex: 1;
+  overflow: auto;
+  min-width: 0;
+}
+
+.ascii-text-row {
+  padding: 0 12px;
+  color: #d4d4d4;
+  display: flex;
+  align-items: center;
+}
+
+.ascii-text-row:hover {
+  background-color: #2a2d2e;
+}
+
+/* Line wrap mode */
+.ascii-viewer.line-wrap .ascii-text-row {
+  white-space: pre-wrap;
+  word-break: break-all;
+  height: auto !important;
+  min-height: 20px;
+}
+
+.ascii-viewer:not(.line-wrap) .ascii-text-row {
+  white-space: pre;
+}
+
+.ascii-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background-color: #2d2d2d;
+  border-top: 1px solid #3c3c3c;
+  color: #6c6c6c;
+  font-size: 12px;
+}
+
+/* Scrollbar styling */
+.ascii-viewer ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.ascii-viewer ::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.ascii-viewer ::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 5px;
+}
+
+.ascii-viewer ::-webkit-scrollbar-thumb:hover {
+  background: #5c5c5c;
+}
+
+.ascii-debug {
+  font-size: 10px;
+  color: #808080;
+  font-family: 'Consolas', monospace;
+}

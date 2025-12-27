@@ -1,12 +1,12 @@
 import { useState, KeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { parseHexString, appendLineEnding, addToHistory, type LineEnding } from '../utils/sendUtils';
 
 interface SendPanelProps {
   connected: boolean;
   onSend?: (bytes: number) => void;
 }
 
-type LineEnding = 'NONE' | 'CR' | 'LF' | 'CRLF';
 type InputMode = 'TEXT' | 'HEX';
 
 export default function SendPanel({ connected, onSend }: SendPanelProps) {
@@ -28,47 +28,25 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
     try {
       if (inputMode === 'HEX' || sendBinary) {
         // sendBinary flag or HEX mode
-        // Parse hex string (ignore spaces)
-        const cleanHex = inputText.replace(/\s+/g, '');
-        if (cleanHex.length % 2 !== 0) {
-          alert('Invalid Hex: Odd number of characters');
+        const parsed = parseHexString(inputText);
+        if (parsed === null) {
+          alert('Invalid Hex: Odd number of characters or invalid hex');
           return;
         }
-        for (let i = 0; i < cleanHex.length; i += 2) {
-          const byte = parseInt(cleanHex.substring(i, i + 2), 16);
-          if (isNaN(byte)) throw new Error('Invalid hex character');
-          dataToSend.push(byte);
-        }
+        dataToSend = parsed;
       } else {
         // Convert string to bytes (UTF-8)
         const encoder = new TextEncoder();
         dataToSend = Array.from(encoder.encode(inputText));
 
         // Append line ending
-        switch (lineEnding) {
-          case 'CR':
-            dataToSend.push(0x0d);
-            break;
-          case 'LF':
-            dataToSend.push(0x0a);
-            break;
-          case 'CRLF':
-            dataToSend.push(0x0d, 0x0a);
-            break;
-        }
+        dataToSend = appendLineEnding(dataToSend, lineEnding);
       }
 
       await invoke('write_data', { data: dataToSend });
 
       // Update history
-      setHistory((prev) => {
-        // If expected input is same as the most recent one, don't add it
-        if (prev.length > 0 && prev[0] === inputText) {
-          return prev;
-        }
-        const newHistory = [inputText, ...prev].slice(0, 20); // Keep last 20
-        return newHistory;
-      });
+      setHistory((prev) => addToHistory(prev, inputText));
       setHistoryIndex(-1);
       setInputText('');
 

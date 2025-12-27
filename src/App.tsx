@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { save, ask } from '@tauri-apps/plugin-dialog';
 import SettingsPanel, { SerialConfig } from './components/SettingsPanel';
 import SendPanel from './components/SendPanel';
-import ReceivePanel from './components/ReceivePanel';
+import ReceivePanel, { ViewMode } from './components/ReceivePanel';
 import './App.css';
 
 interface DataUpdatePayload {
@@ -160,7 +160,7 @@ function App() {
     }
   }
 
-  async function handleCopy() {
+  async function handleCopy(mode: ViewMode) {
     if (totalBytes === 0) return;
 
     if (totalBytes > 10 * 1024 * 1024) {
@@ -176,7 +176,7 @@ function App() {
     }
 
     try {
-      const text = await invoke<string>('get_clipboard_text');
+      const text = await invoke<string>('get_clipboard_text', { mode });
       if (text) {
         await navigator.clipboard.writeText(text);
       }

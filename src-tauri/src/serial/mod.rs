@@ -7,6 +7,7 @@ mod worker_thread;
 
 use log::warn;
 
+use chrono::{Local, TimeZone};
 use data_store::DataStore;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
@@ -153,17 +154,21 @@ pub struct DisplayRowsPayload {
 }
 
 /// Convert a byte to its ASCII representation (printable or placeholder)
+/// Control characters (0x00-0x1F) use Unicode Control Pictures (U+2400-U+241F)
+/// DEL (0x7F) uses U+2421, non-ASCII (>0x7F) uses middle dot
 fn byte_to_ascii(b: u8) -> char {
     if (0x20..=0x7e).contains(&b) {
+        // Printable ASCII
         b as char
+    } else if b <= 0x1f {
+        // Control characters 0x00-0x1F -> Unicode Control Pictures U+2400-U+241F
+        char::from_u32(0x2400 + b as u32).unwrap_or('·')
+    } else if b == 0x7f {
+        // DEL -> U+2421
+        '␡'
     } else {
-        match b {
-            0x00 => '␀',
-            0x0a => '␊',
-            0x0d => '␍',
-            0x09 => '␉',
-            _ => '·',
-        }
+        // Non-ASCII (0x80-0xFF) -> middle dot
+        '·'
     }
 }
 
@@ -259,6 +264,126 @@ pub fn get_display_rows(
         Ok(DisplayRowsPayload {
             rows: vec![],
             total_rows: 0,
+        })
+    }
+}
+
+/// A single line of ASCII display data
+#[derive(Clone, serde::Serialize)]
+pub struct AsciiLine {
+    offset: u64,
+    text: String,
+    timestamp: Option<String>,
+}
+
+/// Payload for get_ascii_lines command
+#[derive(Clone, serde::Serialize)]
+pub struct AsciiLinesPayload {
+    lines: Vec<AsciiLine>,
+    total_lines: u64,
+}
+
+#[tauri::command]
+pub fn get_ascii_lines(
+    state: State<'_, SerialState>,
+    start_line: u64,
+    line_count: u32,
+    _show_ctrl: bool, // Unused: all control chars now use Unicode Control Pictures like HexViewer
+    show_timestamp: bool,
+) -> Result<AsciiLinesPayload, String> {
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if let Some(ref data_store) = *store_guard {
+        let total_bytes = data_store.total_bytes();
+        if total_bytes == 0 {
+            return Ok(AsciiLinesPayload {
+                lines: vec![],
+                total_lines: 0,
+            });
+        }
+
+        // Phase 2: line_index is now updated by Worker Thread in real-time
+        // No need to call update_line_index here
+
+        let total_lines = data_store.total_lines();
+
+        if total_lines == 0 {
+            return Ok(AsciiLinesPayload {
+                lines: vec![],
+                total_lines: 0,
+            });
+        }
+
+        // Get line offsets for requested range
+        let line_offsets = data_store.get_line_offsets(start_line, line_count);
+
+        if line_offsets.is_empty() {
+            return Ok(AsciiLinesPayload {
+                lines: vec![],
+                total_lines,
+            });
+        }
+
+        // Phase 1 optimization: Batch fetch all lines data at once instead of per-line
+        let first_offset = line_offsets[0].0;
+        let last_end = line_offsets.last().unwrap().1;
+        let batch_length = (last_end - first_offset).min(1024 * 1024) as u32; // Cap at 1MB
+
+        // Single batch fetch
+        let batch_data = match data_store.get_data(first_offset, batch_length) {
+            Ok(data) => data,
+            Err(_) => {
+                // Fallback: if batch fails, return empty
+                return Ok(AsciiLinesPayload {
+                    lines: vec![],
+                    total_lines,
+                });
+            }
+        };
+
+        // Extract each line from batch data
+        let mut lines = Vec::with_capacity(line_offsets.len());
+        for (line_start, line_end) in line_offsets {
+            let local_start = (line_start - first_offset) as usize;
+            let local_end =
+                ((line_end - first_offset).min(batch_length as u64) as usize).min(batch_data.len());
+
+            if local_start < batch_data.len() && local_start <= local_end {
+                let line_data = &batch_data[local_start..local_end];
+                let text = bytes_to_ascii(line_data);
+
+                // Get timestamp from timestamp_index using binary search
+                let timestamp = if show_timestamp {
+                    if let Some(ts_millis) = data_store.get_timestamp_for_offset(line_start) {
+                        // Use chrono to convert UTC timestamp (millis) to Local time
+                        // timestamp_millis_opt handles the conversion safely
+                        if let Some(dt) = Local.timestamp_millis_opt(ts_millis as i64).single() {
+                            let time_str = dt.format("%H:%M:%S").to_string();
+                            let d = (ts_millis % 1000) / 100;
+                            Some(format!("{}.{}", time_str, d))
+                        } else {
+                            Some("--:--:--.0".to_string())
+                        }
+                    } else {
+                        Some("--:--:--.0".to_string())
+                    }
+                } else {
+                    None
+                };
+
+                lines.push(AsciiLine {
+                    offset: line_start,
+                    text,
+                    timestamp,
+                });
+            }
+        }
+
+        Ok(AsciiLinesPayload { lines, total_lines })
+    } else {
+        Ok(AsciiLinesPayload {
+            lines: vec![],
+            total_lines: 0,
         })
     }
 }
@@ -359,7 +484,7 @@ pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn get_clipboard_text(state: State<'_, SerialState>) -> Result<String, String> {
+pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result<String, String> {
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -377,7 +502,13 @@ pub fn get_clipboard_text(state: State<'_, SerialState>) -> Result<String, Strin
         let to_read = total as u32; // Limit to u32
         let data = data_store.get_data(0, to_read)?;
 
-        Ok(String::from_utf8_lossy(&data).to_string())
+        if mode == "hex" {
+            // Hex mode: space-separated hex string
+            Ok(bytes_to_hex(&data))
+        } else {
+            // ASCII mode: lossy UTF-8 conversion
+            Ok(String::from_utf8_lossy(&data).to_string())
+        }
     } else {
         Ok(String::new())
     }
@@ -408,10 +539,12 @@ mod tests {
 
     #[test]
     fn test_byte_to_ascii_other_non_printable() {
-        // Other non-printable should be '·'
-        assert_eq!(byte_to_ascii(0x01), '·');
-        assert_eq!(byte_to_ascii(0x1f), '·');
-        assert_eq!(byte_to_ascii(0x7f), '·');
+        // All control characters (0x00-0x1F) get Unicode Control Pictures
+        assert_eq!(byte_to_ascii(0x01), '␁'); // SOH -> U+2401
+        assert_eq!(byte_to_ascii(0x1f), '␟'); // US -> U+241F
+                                              // DEL gets special symbol
+        assert_eq!(byte_to_ascii(0x7f), '␡'); // DEL -> U+2421
+                                              // Non-ASCII should be '·'
         assert_eq!(byte_to_ascii(0xff), '·');
     }
 
@@ -433,5 +566,7 @@ mod tests {
         assert_eq!(bytes_to_ascii(b"Hello"), "Hello");
         assert_eq!(bytes_to_ascii(&[0x00, 0x0a, 0x0d]), "␀␊␍");
         assert_eq!(bytes_to_ascii(&[0x48, 0x69, 0x00, 0x21]), "Hi␀!");
+        // All control chars get symbols
+        assert_eq!(bytes_to_ascii(&[0x01, 0x02, 0x03]), "␁␂␃");
     }
 }

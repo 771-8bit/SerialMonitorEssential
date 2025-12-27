@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "Serial Monitor Essential",
-        "width": 725,
+        "width": 730,
         "height": 600,
-        "minWidth": 725,
+        "minWidth": 730,
         "minHeight": 450
       }
     ],

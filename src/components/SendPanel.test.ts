@@ -1,50 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { parseHexString, appendLineEnding, addToHistory } from '../utils/sendUtils';
 
 /**
  * SendPanel utility function tests
- * These test the core logic without rendering the component
+ * Testing the actual sendUtils functions used by SendPanel
  */
-
-// Extract hex parsing logic for testing
-function parseHexString(input: string): number[] | null {
-  const cleanHex = input.replace(/\s+/g, '');
-  if (cleanHex.length % 2 !== 0) {
-    return null; // Invalid: odd number of characters
-  }
-  const result: number[] = [];
-  for (let i = 0; i < cleanHex.length; i += 2) {
-    const byte = parseInt(cleanHex.substring(i, i + 2), 16);
-    if (isNaN(byte)) return null; // Invalid hex character
-    result.push(byte);
-  }
-  return result;
-}
-
-// Extract line ending logic for testing
-function appendLineEnding(data: number[], lineEnding: 'NONE' | 'CR' | 'LF' | 'CRLF'): number[] {
-  const result = [...data];
-  switch (lineEnding) {
-    case 'CR':
-      result.push(0x0d);
-      break;
-    case 'LF':
-      result.push(0x0a);
-      break;
-    case 'CRLF':
-      result.push(0x0d, 0x0a);
-      break;
-  }
-  return result;
-}
-
-// Extract history management logic for testing
-function addToHistory(history: string[], newItem: string, maxSize: number = 20): string[] {
-  // If same as the most recent one, don't add
-  if (history.length > 0 && history[0] === newItem) {
-    return history;
-  }
-  return [newItem, ...history].slice(0, maxSize);
-}
 
 describe('SendPanel - Hex Parsing', () => {
   it('parses valid hex string without spaces', () => {
