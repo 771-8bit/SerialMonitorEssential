@@ -27,7 +27,7 @@ export default function HexViewer({
   totalBytes,
   autoScroll,
   initialOffset = 0,
-  onScrollChange = () => {},
+  onScrollChange = () => { },
 }: HexViewerProps) {
   // Data state
   const [rows, setRows] = useState<DisplayRow[]>([]);
@@ -73,6 +73,15 @@ export default function HexViewer({
     [visibleRows]
   );
 
+  // Force initial fetch on mount/switch to ensure data is displayed immediately
+  // even if scroll event is suppressed or delayed.
+  useEffect(() => {
+    if (totalBytes > 0) {
+      const startRow = Math.max(0, Math.floor((initialOffset || 0) / BYTES_PER_ROW) - BUFFER_ROWS);
+      fetchRows(startRow, true);
+    }
+  }, []);
+
   // Effect: fetch data when scroll position changes
   useEffect(() => {
     if (totalBytes === 0) {
@@ -99,9 +108,11 @@ export default function HexViewer({
   const scale = scrollHeight < naturalHeight ? scrollHeight / naturalHeight : 1;
   const byteOffset = getByteOffset();
 
-  // Always position rows at scrollTop - this ensures rows are visible in viewport
-  // regardless of scale mode (rows are always placed where the viewport is looking)
-  const displayTop = scrollTop;
+  // Always position rows at scrollTop - CORRECTED to account for buffer offset
+  // We fetch rows starting at 'currentStartRow' (which is usually targetRow - BUFFER).
+  // We need to shift the display top UP by the buffer amount so the target row aligns with scrollTop.
+  const targetRow = Math.floor(byteOffset / BYTES_PER_ROW);
+  const displayTop = scrollTop - (targetRow - currentStartRow) * ROW_HEIGHT;
 
   return (
     <div className="hex-viewer">

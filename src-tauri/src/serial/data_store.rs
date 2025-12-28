@@ -396,6 +396,7 @@ impl DataStore {
 
     /// 指定範囲の行オフセットを取得
     pub fn get_line_offsets(&self, start_line: u64, count: u32) -> Vec<(u64, u64)> {
+        // ... (existing implementation)
         if let Ok(index) = self.line_index.read() {
             let total = index.len();
             let start = start_line as usize;
@@ -420,6 +421,32 @@ impl DataStore {
             result
         } else {
             Vec::new()
+        }
+    }
+
+    /// 指定バイトオフセットに対応する行インデックスを取得
+    pub fn get_line_index_for_offset(&self, offset: u64) -> u64 {
+        if let Ok(index) = self.line_index.read() {
+            if index.is_empty() {
+                return 0;
+            }
+
+            // Allow exact match or find insertion point (index of first element >= offset)
+            match index.binary_search(&offset) {
+                Ok(i) => i as u64, // Exact match, this is the start of line i
+                Err(i) => {
+                    // Insertion point is 'i'.
+                    // If i > 0, the offset falls within line i-1.
+                    // If i == 0, the offset is before the first line (should assume line 0)
+                    if i > 0 {
+                        (i - 1) as u64
+                    } else {
+                        0
+                    }
+                }
+            }
+        } else {
+            0
         }
     }
 

@@ -276,11 +276,30 @@ pub struct AsciiLine {
     timestamp: Option<String>,
 }
 
-/// Payload for get_ascii_lines command
 #[derive(Clone, serde::Serialize)]
 pub struct AsciiLinesPayload {
     lines: Vec<AsciiLine>,
     total_lines: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct LineIndexPayload {
+    line_index: u64,
+}
+
+#[tauri::command]
+pub fn get_line_index(
+    state: State<'_, SerialState>,
+    offset: u64,
+) -> Result<LineIndexPayload, String> {
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if let Some(ref data_store) = *store_guard {
+        let line_index = data_store.get_line_index_for_offset(offset);
+        Ok(LineIndexPayload { line_index })
+    } else {
+        Ok(LineIndexPayload { line_index: 0 })
+    }
 }
 
 #[tauri::command]

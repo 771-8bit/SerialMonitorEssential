@@ -24,6 +24,11 @@ describe('scrollUtils', () => {
     it('handles zero', () => {
       expect(calculateScrollHeight(0)).toBe(0);
     });
+
+    it('uses explicit totalRows when provided', () => {
+      // 100 rows * 20px = 2000px, regardless of bytes
+      expect(calculateScrollHeight(500, 100)).toBe(2000);
+    });
   });
 
   describe('calculateScale', () => {

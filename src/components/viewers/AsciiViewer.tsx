@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ROW_HEIGHT, BUFFER_ROWS, MAX_SCROLL_HEIGHT } from './viewerConstants';
+import { ROW_HEIGHT, BUFFER_ROWS } from './viewerConstants';
 import { useByteScroll } from './useByteScroll';
 import './AsciiViewer.css';
 
@@ -30,7 +30,7 @@ export default function AsciiViewer({
   showTimestamp = false,
   lineWrap = false,
   initialOffset = 0,
-  onScrollChange = () => {},
+  onScrollChange = () => { },
 }: AsciiViewerProps) {
   // Data state
   const [lines, setLines] = useState<AsciiLine[]>([]);
@@ -46,6 +46,16 @@ export default function AsciiViewer({
   const timestampColumnRef = useRef<HTMLDivElement>(null);
   const isSyncingScrollRef = useRef(false);
 
+  // Track total lines from backend for proper scroll calculation
+  const totalLinesRef = useRef(0);
+
+  // Track initialization to prevent double-setting
+  const [initialLineSet, setInitialLineSet] = useState(false);
+
+  // Determine effective total lines for scroll calculation
+  const effectiveTotalLines =
+    totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
+
   // Byte-based scroll (Text column is main scroll)
   const {
     containerRef,
@@ -54,19 +64,46 @@ export default function AsciiViewer({
     visibleRows,
     handleScroll: baseHandleScroll,
     getByteOffset,
+    scrollTo,
   } = useByteScroll({
     totalBytes,
+    totalRows: effectiveTotalLines,
     autoScroll,
     initialOffset,
     onScrollChange,
   });
 
-  // Track total lines from backend for proper scroll calculation
-  const totalLinesRef = useRef(0);
-
   // Calculate ASCII-specific scroll height based on actual line count
-  // This prevents AutoScroll from overshooting when totalLines < bytes/16
-  const asciiScrollHeight = Math.min(totalLines * ROW_HEIGHT, MAX_SCROLL_HEIGHT) || scrollHeight;
+  // NOW HANDLED BY HOOK via totalRows
+  const asciiScrollHeight = scrollHeight;
+
+  // Initialize scroll position using exact line mapping from backend
+  useEffect(() => {
+    // Only run if we have an initial offset (e.g. switched from Hex), haven't set it yet, and data exists
+    if (!initialLineSet && totalBytes > 0) {
+      if (initialOffset > 0) {
+        invoke<{ line_index: number }>('get_line_index', { offset: initialOffset })
+          .then((res) => {
+            // Calculate exact target scrollTop for this line
+            const targetScrollTop = res.line_index * ROW_HEIGHT;
+
+            // Force scroll to this position and update anchor to match
+            // Passing initialOffset ensures the "Byte Anchor" remains exact (e.g. 5000),
+            // even though visual position is now at Line Start (e.g. 4980 bytes).
+            scrollTo(targetScrollTop, initialOffset);
+
+            setInitialLineSet(true);
+          })
+          .catch((err) => {
+            console.error("Failed to get line index:", err);
+            setInitialLineSet(true); // Fallback to default behavior
+          });
+      } else {
+        // No offset, just mark as set
+        setInitialLineSet(true);
+      }
+    }
+  }, [initialOffset, totalBytes, scrollTo, initialLineSet]);
 
   // Fetch lines from backend
   const fetchLines = useCallback(
@@ -110,8 +147,8 @@ export default function AsciiViewer({
     // Use byte offset for consistent Hex/ASCII scroll position
     const byteOffset = getByteOffset();
     // Use totalLines from backend if available, otherwise estimate
-    const effectiveTotalLines =
-      totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
+    // const effectiveTotalLines =
+    //   totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
 
     // Calculate start line from byte ratio (same approach as HexViewer)
     const scrollRatio = totalBytes > 0 ? byteOffset / totalBytes : 0;
@@ -152,11 +189,15 @@ export default function AsciiViewer({
   );
 
   // Calculate display position
-  // Always position rows at scrollTop - this ensures rows are visible in viewport
-  // regardless of scale mode (same approach as HexViewer)
+  // Adjust top position to account for the buffer offset (we fetched starting at 'startLine' which is < 'targetLine')
+  // We want the line corresponding to 'startLine' to appear at 'startLine * Height', not 'scrollTop'.
+  // displayTop = scrollTop - (targetLine - startLine) * ROW_HEIGHT
+  const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
+  const targetLine = Math.floor(scrollRatio * effectiveTotalLines);
+  const displayTop = scrollTop - (targetLine - currentStartLine) * ROW_HEIGHT;
+
   const naturalLineHeight = totalLines * ROW_HEIGHT;
   const isScaled = asciiScrollHeight < naturalLineHeight;
-  const displayTop = scrollTop;
 
   return (
     <div className={`ascii-viewer ${lineWrap ? 'line-wrap' : ''}`}>
