@@ -10,6 +10,8 @@
   height: 100%;
   display: flex;
   flex-direction: column;
+  user-select: none;
+  /* Disable selection by default */
 }
 
 .hex-scroll-container {
@@ -25,12 +27,15 @@
   border-bottom: 1px solid #3c3c3c;
   color: #808080;
   font-weight: 600;
+  user-select: none;
 }
 
 .hex-row {
   display: flex;
   padding: 0 8px;
   color: #d4d4d4;
+  user-select: none;
+  /* rows themselves not selectable, only content */
 }
 
 .hex-row:hover {
@@ -41,6 +46,9 @@
   width: 70px;
   color: #569cd6;
   flex-shrink: 0;
+  user-select: none;
+  /* Offset not selectable */
+  cursor: default;
 }
 
 .hex-bytes {
@@ -48,6 +56,9 @@
   flex-shrink: 0;
   color: #ce9178;
   letter-spacing: 0.5px;
+  user-select: text;
+  /* Enable selection */
+  cursor: text;
 }
 
 .hex-ascii {
@@ -57,6 +68,9 @@
   padding-left: 8px;
   border-left: 1px solid #3c3c3c;
   box-sizing: border-box;
+  user-select: none;
+  /* Disable selection */
+  cursor: default;
 }
 
 /* Fixed-width character container */

@@ -4,6 +4,7 @@ import AsciiViewer from './viewers/AsciiViewer';
 import './ReceivePanel.css';
 
 export type ViewMode = 'hex' | 'ascii';
+export type TimestampSeparator = ' ' | ',' | '\t';
 
 export interface ReceiveOptions {
   viewMode: ViewMode;
@@ -38,6 +39,7 @@ export default function ReceivePanel({
   // Display options (ASCII mode only)
   const [lineWrap, setLineWrap] = useState(true);
   const [showTimestamp, setShowTimestamp] = useState(true);
+  const [timestampSeparator, setTimestampSeparator] = useState<TimestampSeparator>(' ');
 
   // Scroll position as byte offset (preserved across mode switches)
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -94,6 +96,7 @@ export default function ReceivePanel({
             lineWrap={lineWrap}
             initialOffset={scrollOffset}
             onScrollChange={setScrollOffset}
+            timestampSeparator={timestampSeparator}
           />
         )}
       </div>
@@ -143,6 +146,29 @@ export default function ReceivePanel({
               disabled={viewMode === 'hex'}
             />
             Timestamp
+            <select
+              value={timestampSeparator}
+              onChange={(e) => setTimestampSeparator(e.target.value as TimestampSeparator)}
+              disabled={viewMode === 'hex' || !showTimestamp}
+              className="separator-select"
+              title="Separator between Timestamp and Data"
+              style={{
+                marginLeft: '8px',
+                background: '#3c3c3c',
+                color: '#d4d4d4',
+                border: '1px solid #555',
+                borderRadius: '3px',
+                padding: '1px 4px',
+                fontSize: '11px',
+                outline: 'none',
+                cursor: 'pointer',
+                opacity: (!showTimestamp || viewMode === 'hex') ? 0.5 : 1
+              }}
+            >
+              <option value=" ">Space</option>
+              <option value=",">Comma</option>
+              <option value="	">Tab</option>
+            </select>
           </label>
 
           <div className="control-separator"></div>
@@ -159,7 +185,7 @@ export default function ReceivePanel({
 
         <div className="footer-right">
           <button onClick={handlePlotter} className="plotter-button" title="Open Plotter (Phase 7)">
-            📈 Plotter
+            Plotter
           </button>
           <button onClick={onExport} title="Save to file">
             Save

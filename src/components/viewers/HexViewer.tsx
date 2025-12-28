@@ -27,7 +27,7 @@ export default function HexViewer({
   totalBytes,
   autoScroll,
   initialOffset = 0,
-  onScrollChange = () => {},
+  onScrollChange = () => { },
 }: HexViewerProps) {
   // Data state
   const [rows, setRows] = useState<DisplayRow[]>([]);
@@ -72,7 +72,7 @@ export default function HexViewer({
       try {
         // Process requests until we catch up
         while (pendingStartRowRef.current !== null) {
-          const targetStartRow = pendingStartRowRef.current;
+          const targetStartRow: number = pendingStartRowRef.current;
 
           // Optimization: If we already fetched this row (or close enough) and not forced, skip
           // Check needs to be rigorous: if we are "close enough" but new data arrived (force), we must fetch.
@@ -82,14 +82,26 @@ export default function HexViewer({
           // We can apply the buffer logic: if abs(target - last) < BUFFER/2, we can maybe skip?
           // BUT: if we are in this loop, it means we entered because of a request.
           // Unless pendingStartRow remained same as lastFetchRow?
-          if (!force && Math.abs(targetStartRow - lastFetchRowRef.current) < BUFFER_ROWS / 2) {
-            // Close enough, no need to fetch again.
-            // Clear pending and break IF it's the latest.
-            // Only clear if pending === target (it hasn't changed since we started checks)
-            if (pendingStartRowRef.current === targetStartRow) {
-              pendingStartRowRef.current = null;
+          // Optimization: If we already fetched this row (or close enough) and not forced, skip
+          // EXCEPTION: If targetStartRow is 0, we MUST ensure we have the very first row.
+          const isAtTop = targetStartRow === 0;
+          const wasAtTop = lastFetchRowRef.current === 0;
+
+          if (!force) {
+            // If we are at 0, only skip if we were ALREADY at 0.
+            if (isAtTop && wasAtTop) {
+              if (pendingStartRowRef.current === targetStartRow) {
+                pendingStartRowRef.current = null;
+              }
+              continue;
             }
-            continue; // Check loop again (or break if null)
+            // If we are NOT at 0, use standard buffer logic
+            if (!isAtTop && Math.abs(targetStartRow - lastFetchRowRef.current) < BUFFER_ROWS / 2) {
+              if (pendingStartRowRef.current === targetStartRow) {
+                pendingStartRowRef.current = null;
+              }
+              continue;
+            }
           }
 
           // We are committing to fetch 'targetStartRow'.
@@ -150,6 +162,19 @@ export default function HexViewer({
 
     fetchRows(startRow, forceRefetch);
   }, [totalBytes, scrollTop, scrollHeight, fetchRows, effectiveTotalRows]);
+
+  // Handle Ctrl+A to warn user about partial selection
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        alert('To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Debug info and display position calculation
   const naturalHeight = effectiveTotalRows * ROW_HEIGHT;

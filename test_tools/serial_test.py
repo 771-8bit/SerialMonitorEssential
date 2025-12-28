@@ -369,9 +369,9 @@ Examples:
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['stress', 'slow', 'fast', 'plotter'],
+        choices=['stress', 'slow', 'fast', 'plotter', 'demo'],
         default='stress',
-        help='Test mode: stress (fast binary), slow (1 line/sec), fast (1 line/0.1ms), plotter (CSV 10Hz)'
+        help='Test mode: stress (fast binary), slow (1 line/sec), fast (1 line/0.1ms), plotter (CSV 10Hz), demo (various patterns)'
     )
     parser.add_argument(
         '--duration',

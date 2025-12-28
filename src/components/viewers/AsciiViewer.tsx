@@ -22,6 +22,7 @@ interface AsciiViewerProps {
   lineWrap?: boolean;
   initialOffset?: number;
   onScrollChange?: (byteOffset: number) => void;
+  timestampSeparator?: string;
 }
 
 export default function AsciiViewer({
@@ -30,7 +31,8 @@ export default function AsciiViewer({
   showTimestamp = false,
   lineWrap = false,
   initialOffset = 0,
-  onScrollChange = () => {},
+  onScrollChange = () => { },
+  timestampSeparator = ' ',
 }: AsciiViewerProps) {
   // Data state
   const [lines, setLines] = useState<AsciiLine[]>([]);
@@ -42,10 +44,6 @@ export default function AsciiViewer({
   const lastFetchLineRef = useRef(-Infinity);
   const lastTotalBytesRef = useRef(0);
 
-  // Ref for timestamp column to sync scroll
-  const timestampColumnRef = useRef<HTMLDivElement>(null);
-  const isSyncingScrollRef = useRef(false);
-
   // Track total lines from backend for proper scroll calculation
   const totalLinesRef = useRef(0);
 
@@ -56,13 +54,13 @@ export default function AsciiViewer({
   const effectiveTotalLines =
     totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
 
-  // Byte-based scroll (Text column is main scroll)
+  // Byte-based scroll
   const {
     containerRef,
     scrollTop,
     scrollHeight,
     visibleRows,
-    handleScroll: baseHandleScroll,
+    handleScroll,
     getByteOffset,
     scrollTo,
   } = useByteScroll({
@@ -115,7 +113,12 @@ export default function AsciiViewer({
   const fetchLines = useCallback(
     async (startLine: number, force: boolean = false) => {
       if (fetchingRef.current) return;
-      if (!force && Math.abs(startLine - lastFetchLineRef.current) < BUFFER_ROWS / 2) return;
+      // Optimization: Skip if we are close to the last fetched line.
+      // EXCEPTION: If startLine is 0, we MUST ensure we have the very first line.
+      // If we are at 0, and last fetch was NOT 0 (e.g. 10), we must fetch.
+      // If last fetch was 0, we can skip.
+      if (!force && startLine !== 0 && Math.abs(startLine - lastFetchLineRef.current) < BUFFER_ROWS / 2) return;
+      if (!force && startLine === 0 && lastFetchLineRef.current === 0) return;
 
       fetchingRef.current = true;
       lastFetchLineRef.current = startLine;
@@ -167,84 +170,109 @@ export default function AsciiViewer({
     fetchLines(startLine, forceRefetch);
   }, [totalBytes, scrollTop, getByteOffset, fetchLines, effectiveTotalLines]);
 
-  // Handle scroll from Text column (main scroll) - sync to timestamp
-  const handleScroll = useCallback(
-    (e: React.UIEvent<HTMLDivElement>) => {
-      baseHandleScroll(e);
-
-      // Sync timestamp column
-      if (!isSyncingScrollRef.current && showTimestamp && timestampColumnRef.current) {
-        isSyncingScrollRef.current = true;
-        timestampColumnRef.current.scrollTop = e.currentTarget.scrollTop;
-        isSyncingScrollRef.current = false;
+  // Handle Ctrl+A to warn user about partial selection
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        e.preventDefault();
+        alert(
+          'To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)'
+        );
       }
-    },
-    [baseHandleScroll, showTimestamp]
-  );
+    };
 
-  // Handle scroll from Timestamp column - sync back to text
-  const handleTimestampScroll = useCallback(
-    (e: React.UIEvent<HTMLDivElement>) => {
-      if (!isSyncingScrollRef.current && containerRef.current) {
-        isSyncingScrollRef.current = true;
-        containerRef.current.scrollTop = e.currentTarget.scrollTop;
-        isSyncingScrollRef.current = false;
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Handle Copy to restore Real ASCII control codes
+  const handleCopy = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    const selection = window.getSelection();
+    if (!selection) return;
+    let text = selection.toString();
+
+    if (text) {
+      e.preventDefault();
+
+      // 1. Remove browser-inserted newlines (display artifacts)
+      text = text.replace(/[\r\n]+/g, '');
+
+      // 2. Replace Unicode Control Pictures back to ASCII
+      // 0x2401-0x241F -> 0x01-0x1F (Skip 0x2400 NULL to prevent truncation)
+      // 0x2421 -> 0x7F
+      let restoredText = text.replace(/[\u2401-\u241F\u2421]/g, (char) => {
+        const code = char.charCodeAt(0);
+        if (code === 0x2421) return '\x7F'; // DEL
+        return String.fromCharCode(code - 0x2400); // 0x01-0x1F
+      });
+
+      // 3. Insert Separator between Timestamp and Data if separators are enabled
+      // Timestamp format: [HH:MM:SS.mmm]
+      // We look for the closing bracket ']' followed directly by the next character,
+      // and insert the separator.
+      // Note: If text implies valid newlines, this global replace works per occurrence.
+      if (showTimestamp && timestampSeparator) {
+        // Regex: Matches timestamp pattern HH:MM:SS.d (1 digit ms from backend)
+        // Also handling --:--:--.0 fallback
+        // The backend formats millis as (ms % 1000) / 100, so it's always 1 digit.
+        // We match this pattern and insert the separator.
+        restoredText = restoredText.replace(/(\d{2}:\d{2}:\d{2}\.\d|--:--:--\.0)/g, `$1${timestampSeparator}`);
       }
-    },
-    [containerRef]
-  );
+
+      // Use Clipboard API with Blob to bypass OS/Browser CRLF normalization
+      // Standard e.clipboardData.setData('text/plain') forces \r\n on Windows.
+      if (
+        navigator.clipboard &&
+        navigator.clipboard.write &&
+        typeof ClipboardItem !== 'undefined'
+      ) {
+        const blob = new Blob([restoredText], { type: 'text/plain' });
+        const item = new ClipboardItem({ 'text/plain': blob });
+        navigator.clipboard.write([item]).catch((err) => {
+          console.error('Clipboard write failed:', err);
+          // Fallback if async write fails (though preventDefault already called)
+          // We can't really fallback here effectively because preventDefault is done.
+          // But failure here is rare in a focused window context.
+        });
+      } else {
+        // Fallback for environments without ClipboardItem support
+        e.clipboardData.setData('text/plain', restoredText);
+      }
+    }
+  }, [timestampSeparator, showTimestamp]);
 
   // Calculate display position
-  // Adjust top position to account for the buffer offset (we fetched starting at 'startLine' which is < 'targetLine')
-  // We want the line corresponding to 'startLine' to appear at 'startLine * Height', not 'scrollTop'.
-  // displayTop = scrollTop - (targetLine - startLine) * ROW_HEIGHT
   const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
   const targetLine = Math.floor(scrollRatio * effectiveTotalLines);
   const displayTop = scrollTop - (targetLine - currentStartLine) * ROW_HEIGHT;
-
   const naturalLineHeight = totalLines * ROW_HEIGHT;
   const isScaled = asciiScrollHeight < naturalLineHeight;
 
+  // Render combined rows for consistent selection
   return (
-    <div className={`ascii-viewer ${lineWrap ? 'line-wrap' : ''}`}>
-      <div className="ascii-content-wrapper">
-        {/* Timestamp column (synced, not main scroll) */}
-        {showTimestamp && (
-          <div
-            className="ascii-timestamp-column"
-            ref={timestampColumnRef}
-            onScroll={handleTimestampScroll}
-          >
-            <div style={{ height: asciiScrollHeight, position: 'relative' }}>
-              <div style={{ position: 'absolute', top: displayTop, width: '100%' }}>
-                {lines.map((line) => (
-                  <div
-                    key={`ts-${line.offset}`}
-                    className="ascii-timestamp-row"
-                    style={{ height: ROW_HEIGHT }}
-                  >
+    <div
+      className={`ascii-viewer ${lineWrap ? 'line-wrap' : ''} ${showTimestamp ? 'with-timestamp' : ''}`}
+      onCopy={handleCopy}
+    >
+      <div className="ascii-scroll-container" ref={containerRef} onScroll={handleScroll}>
+        <div style={{ height: asciiScrollHeight, position: 'relative' }}>
+          <div style={{ position: 'absolute', top: displayTop, width: '100%' }}>
+            {lines.map((line) => (
+              <div
+                key={line.offset}
+                className="ascii-row"
+                style={{ height: lineWrap ? 'auto' : ROW_HEIGHT, minHeight: ROW_HEIGHT }}
+              >
+                {showTimestamp && (
+                  <span className="ascii-timestamp">
                     {line.timestamp || ''}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Text column (main scroll) */}
-        <div className="ascii-text-column" ref={containerRef} onScroll={handleScroll}>
-          <div style={{ height: asciiScrollHeight, position: 'relative' }}>
-            <div style={{ position: 'absolute', top: displayTop }}>
-              {lines.map((line) => (
-                <div
-                  key={line.offset}
-                  className="ascii-text-row"
-                  style={{ height: lineWrap ? 'auto' : ROW_HEIGHT, minHeight: ROW_HEIGHT }}
-                >
+                  </span>
+                )}
+                <span className="ascii-text">
                   {line.text}
-                </div>
-              ))}
-            </div>
+                </span>
+              </div>
+            ))}
           </div>
         </div>
       </div>

@@ -79,6 +79,8 @@ class VirtualSender:
                 self._send_plotter(duration, on_progress)
             elif mode == 'fast':
                 self._send_fast(duration, on_progress)
+            elif mode == 'demo':
+                self._send_demo(duration, on_progress)
             else:
                 return VirtualSendResult(
                     success=False,
@@ -115,6 +117,84 @@ class VirtualSender:
                 duration=duration,
                 error=str(e)
             )
+
+    def _send_demo(
+        self,
+        duration: float,
+        on_progress: Optional[Callable[[str], None]] = None
+    ):
+        """デモモード送信"""
+        start_time = time.time()
+        
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= duration:
+                break
+
+            # 1. 一般的なHello World (CRLF)
+            if on_progress: on_progress("Demo: Standard Hello World (CRLF)")
+            for i in range(5):
+                data = f"[{i+1}] Hello World standard CRLF mode\r\n".encode('utf-8')
+                self.ser.write(data)
+                self.generator.update_checksum(data)
+                time.sleep(0.1)
+                
+            time.sleep(0.5)
+            if time.time() - start_time >= duration: break
+
+            # 2. 改行コードCRのみ
+            if on_progress: on_progress("Demo: CR only line endings")
+            for i in range(5):
+                data = f"[{i+1}] Hello World CR only mode\r".encode('utf-8')
+                self.ser.write(data)
+                self.generator.update_checksum(data)
+                time.sleep(0.1)
+
+            time.sleep(0.5)
+            if time.time() - start_time >= duration: break
+
+            # 3. 改行コードLFのみ
+            if on_progress: on_progress("Demo: LF only line endings")
+            for i in range(5):
+                data = f"[{i+1}] Hello World LF only mode\n".encode('utf-8')
+                self.ser.write(data)
+                self.generator.update_checksum(data)
+                time.sleep(0.1)
+
+            time.sleep(0.5)
+            if time.time() - start_time >= duration: break
+
+            # 4. Linewrapが効くようなデータ (Long line)
+            if on_progress: on_progress("Demo: Long lines for wrapping test")
+            long_line = "This is a very long line that should wrap around the screen. " * 5 + "\r\n"
+            data = long_line.encode('utf-8')
+            self.ser.write(data)
+            self.generator.update_checksum(data)
+            
+            time.sleep(0.5)
+            if time.time() - start_time >= duration: break
+
+            # 5. 0x00~0xffまでの全データ
+            if on_progress: on_progress("Demo: Binary 0x00-0xFF")
+            all_bytes = bytes(range(256))
+            self.ser.write(all_bytes)
+            self.generator.update_checksum(all_bytes)
+            # Add a newline for separation visually
+            self.ser.write(b"\r\n")
+            
+            time.sleep(0.5)
+            if time.time() - start_time >= duration: break
+
+            # 6. 高速なデータ (Burst)
+            if on_progress: on_progress("Demo: High speed burst (0.5s)")
+            burst_start = time.time()
+            while time.time() - burst_start < 0.5:
+                data = self.generator.generate_stress_chunk()
+                self.ser.write(data)
+                time.sleep(0.001) # Minimal sleep to allow processing
+            
+            # End of cycle pause
+            time.sleep(1.0)
 
     def _send_stress(
         self,

@@ -11,62 +11,108 @@
   flex-direction: column;
 }
 
-.ascii-content-wrapper {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-}
-
-/* Fixed timestamp column - only vertical scroll */
-.ascii-timestamp-column {
-  width: 90px;
-  flex-shrink: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  background-color: #1e1e1e;
-  border-right: 1px solid #3c3c3c;
-}
-
-/* Hide scrollbar for timestamp column - scrolls sync with text */
-.ascii-timestamp-column::-webkit-scrollbar {
-  display: none;
-}
-
-.ascii-timestamp-row {
-  padding: 0 8px 0 12px;
-  color: #6a9955;
-  display: flex;
-  align-items: center;
-}
-
-/* Scrollable text column - both vertical and horizontal scroll */
-.ascii-text-column {
+.ascii-scroll-container {
   flex: 1;
   overflow: auto;
-  min-width: 0;
+  min-height: 0;
+  /* Ensure container is relative for absolute children if needed, though rows are in absolute wrapper */
 }
 
-.ascii-text-row {
-  padding: 0 12px;
-  color: #d4d4d4;
-  display: flex;
-  align-items: center;
+/* Rows containing Timestamp + Text */
+/* Rows containing Timestamp + Text */
+.ascii-row {
+  display: block;
+  /* Use block to behave like a standard text line */
+  width: 100%;
+  padding: 0;
+  white-space: pre;
+  /* Ensure content stays on one line by default */
 }
 
-.ascii-text-row:hover {
+.ascii-row:hover {
   background-color: #2a2d2e;
 }
 
-/* Line wrap mode */
-.ascii-viewer.line-wrap .ascii-text-row {
-  white-space: pre-wrap;
-  word-break: break-all;
-  height: auto !important;
-  min-height: 20px;
+/* Sticky Timestamp - using span for inline copy behavior check */
+.ascii-timestamp {
+  position: sticky;
+  left: 0;
+  width: 90px;
+  flex-shrink: 0;
+  background-color: #1e1e1e;
+  /* Match bg to cover text scrolling under it */
+  border-right: 1px solid #3c3c3c;
+  padding: 0 8px 0 12px;
+  color: #6a9955;
+  z-index: 10;
+  /* Ensure on top */
+  height: 100%;
+  /* Fill row height */
+  display: inline-block;
+  /* Inline-block allows sticky and dimensions */
+  vertical-align: top;
+  line-height: 20px;
+  /* Explicit line-height to match row */
+  user-select: text;
+  box-sizing: border-box;
+  /* Ensure padding inside width */
 }
 
-.ascii-viewer:not(.line-wrap) .ascii-text-row {
+/* Timestamp Separator */
+.ascii-separator {
   white-space: pre;
+  user-select: text;
+  color: #6a9955;
+  /* Match timestamp color or use neutral */
+}
+
+/* Text Content */
+.ascii-text {
+  padding: 0 12px;
+  color: #d4d4d4;
+  white-space: pre;
+  user-select: text;
+  display: inline;
+  /* True inline to flow naturally with timestamp */
+  line-height: 20px;
+}
+
+/* Line wrap mode */
+.ascii-viewer.line-wrap .ascii-row {
+  height: auto !important;
+  white-space: pre-wrap;
+  /* Allow wrapping on row level */
+}
+
+/* Fix for Timestamp Overlap: Flex Layout */
+.ascii-viewer.line-wrap.with-timestamp .ascii-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 0;
+  text-indent: 0;
+}
+
+.ascii-viewer.line-wrap.with-timestamp .ascii-timestamp {
+  position: static;
+  /* Flex item placement is sufficient, sticky not needed for wrap mode without horiz scroll */
+  flex: 0 0 90px;
+  height: auto;
+  border-right: 1px solid #3c3c3c;
+}
+
+.ascii-viewer.line-wrap.with-timestamp .ascii-text {
+  flex: 1;
+  min-width: 0;
+  display: block;
+  /* Behave as block in flex */
+  padding-left: 12px;
+  /* Maintain the padding that was originally on .ascii-text or similar? Original has 0 12px */
+}
+
+.ascii-viewer.line-wrap .ascii-text {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .ascii-footer {
