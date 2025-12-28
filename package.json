@@ -21,7 +21,8 @@
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "uplot": "^1.6.32"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",

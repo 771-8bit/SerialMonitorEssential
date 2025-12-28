@@ -240,16 +240,15 @@ pub enum ChannelValue {
 
 ## プロッタウィンドウ設計
 
-### ウィンドウ構成
+### ウィンドウ構成 (Docking System)
 
-プロッタは**メインウィンドウとは独立した別ウィンドウ**として開く。
+メインウィンドウ内のパネルとしての表示と、独立したウィンドウとしての表示を切り替え可能にする（ドッキング/アンドッキング）。
 
-| 項目 | 仕様 |
+| 状態 | 動作 |
 |------|------|
-| **起動方法** | メインウィンドウの「Plotter」ボタン |
-| **ウィンドウサイズ** | 800 x 600 (可変) |
-| **複数ウィンドウ** | 複数のプロッタウィンドウを開くことが可能 |
-| **データ連携** | メインウィンドウと同一のシリアルセッションを参照 |
+| **ドッキング (Docked)** | メインウィンドウのタブまたは分割ペインとして表示。 |
+| **フロート (Float)** | 「ポップアウト」ボタンで独立したウィンドウ (`WebviewWindow`) に分離。メイン側はプレースホルダー表示。 |
+| **再ドッキング** | フロートウィンドウを閉じるか「ポップイン」ボタンでメインウィンドウに戻る。 |
 
 ### 表示モード切替
 
@@ -259,13 +258,13 @@ pub enum ChannelValue {
 | **State Timeline Only** | ステートタイムラインのみ表示 |
 | **Split View** | 上下または左右に両方を表示 |
 
-### データソース設定
+### データソース・描画設定
 
 | 項目 | 説明 |
 |------|------|
 | **チャンネル選択** | 表示するチャンネルを選択（チェックボックス） |
 | **Line/State振り分け** | 各チャンネルをLine ChartかState Timelineに振り分け |
-| **自動検出** | データ型から自動的に振り分け（推奨） |
+| **間引きモード** | `Average` (平均) / `MinMax` (最大最小) / `LTTB` (特徴維持) を選択可能 |
 
 ---
 
@@ -298,6 +297,33 @@ pub struct StateChange {
     pub start_ms: u64,
     pub end_ms: Option<u64>,  // None means ongoing
     pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlotterConfig {
+    /// 保持するポイント数
+    pub max_points: usize,  // デフォルト: 10000
+    
+    /// チャンネルタイプ設定
+    pub channel_types: HashMap<String, ChannelType>,
+
+    /// 間引きモード
+    pub aggregation_mode: AggregationMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AggregationMode {
+    Average,
+    MinMax,
+    LTTB,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChannelType {
+    Line,
+    State,
+    Auto,
 }
 ```
 
@@ -373,8 +399,8 @@ pub struct StateChange {
     *   [ ] 状態名がバー内に表示される
     *   [ ] 時間軸が同期している
 
-### 7-6. プロッタウィンドウ統合 (Frontend)
-*   **作業内容:** 別ウィンドウとしてプロッタを起動する仕組み。
+### 7-6. プロッタウィンドウ統合 (基本)
+*   **作業内容:** 別ウィンドウとしてプロッタを起動する基本的な仕組み（ドッキングなし）。
 *   **中間確認:**
     *   [ ] 「Plotter」ボタンで新ウィンドウが開く
     *   [ ] メインウィンドウと同期してデータが表示される
@@ -388,6 +414,7 @@ pub struct StateChange {
     *   [ ] Line/Stateの振り分けを変更できる
     *   [ ] 表示時間幅を変更できる
     *   [ ] Y軸レンジを変更できる
+    *   [ ] 間引きモードを変更できる (Average/MinMax/LTTB)
 
 ### 7-8. パフォーマンスチューニング
 *   **作業内容:** 高速受信時 (12Mbps) の描画負荷対策。
@@ -395,6 +422,14 @@ pub struct StateChange {
     *   [ ] 12Mbpsデータ受信中でもUIがフリーズしない
     *   [ ] 描画がデータの流れに追従する
     *   [ ] メモリ使用量が一定範囲で安定する
+
+### 7-9. ドッキングシステム実装 (Frontend)
+*   **作業内容:** メインウィンドウへの埋め込みと切り離しロジックの実装。
+*   **中間確認:**
+    *   [ ] 「ポップアウト」でウィンドウが分離する
+    *   [ ] 「ポップイン」でメインウィンドウに戻る
+    *   [ ] ドッキング中もリアルタイム描画が継続する
+    *   [ ] 状態（設定・データ）が維持されたまま遷移する
 
 ---
 

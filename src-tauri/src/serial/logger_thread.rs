@@ -188,6 +188,7 @@ pub fn process_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn test_process_buffer_no_flush() {
