@@ -31,7 +31,7 @@ export default function AsciiViewer({
   showTimestamp = false,
   lineWrap = false,
   initialOffset = 0,
-  onScrollChange = () => { },
+  onScrollChange = () => {},
   timestampSeparator = ' ',
 }: AsciiViewerProps) {
   // Data state
@@ -117,7 +117,12 @@ export default function AsciiViewer({
       // EXCEPTION: If startLine is 0, we MUST ensure we have the very first line.
       // If we are at 0, and last fetch was NOT 0 (e.g. 10), we must fetch.
       // If last fetch was 0, we can skip.
-      if (!force && startLine !== 0 && Math.abs(startLine - lastFetchLineRef.current) < BUFFER_ROWS / 2) return;
+      if (
+        !force &&
+        startLine !== 0 &&
+        Math.abs(startLine - lastFetchLineRef.current) < BUFFER_ROWS / 2
+      )
+        return;
       if (!force && startLine === 0 && lastFetchLineRef.current === 0) return;
 
       fetchingRef.current = true;
@@ -186,60 +191,66 @@ export default function AsciiViewer({
   }, []);
 
   // Handle Copy to restore Real ASCII control codes
-  const handleCopy = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
-    const selection = window.getSelection();
-    if (!selection) return;
-    let text = selection.toString();
+  const handleCopy = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
+      const selection = window.getSelection();
+      if (!selection) return;
+      let text = selection.toString();
 
-    if (text) {
-      e.preventDefault();
+      if (text) {
+        e.preventDefault();
 
-      // 1. Remove browser-inserted newlines (display artifacts)
-      text = text.replace(/[\r\n]+/g, '');
+        // 1. Remove browser-inserted newlines (display artifacts)
+        text = text.replace(/[\r\n]+/g, '');
 
-      // 2. Replace Unicode Control Pictures back to ASCII
-      // 0x2401-0x241F -> 0x01-0x1F (Skip 0x2400 NULL to prevent truncation)
-      // 0x2421 -> 0x7F
-      let restoredText = text.replace(/[\u2401-\u241F\u2421]/g, (char) => {
-        const code = char.charCodeAt(0);
-        if (code === 0x2421) return '\x7F'; // DEL
-        return String.fromCharCode(code - 0x2400); // 0x01-0x1F
-      });
-
-      // 3. Insert Separator between Timestamp and Data if separators are enabled
-      // Timestamp format: [HH:MM:SS.mmm]
-      // We look for the closing bracket ']' followed directly by the next character,
-      // and insert the separator.
-      // Note: If text implies valid newlines, this global replace works per occurrence.
-      if (showTimestamp && timestampSeparator) {
-        // Regex: Matches timestamp pattern HH:MM:SS.d (1 digit ms from backend)
-        // Also handling --:--:--.0 fallback
-        // The backend formats millis as (ms % 1000) / 100, so it's always 1 digit.
-        // We match this pattern and insert the separator.
-        restoredText = restoredText.replace(/(\d{2}:\d{2}:\d{2}\.\d|--:--:--\.0)/g, `$1${timestampSeparator}`);
-      }
-
-      // Use Clipboard API with Blob to bypass OS/Browser CRLF normalization
-      // Standard e.clipboardData.setData('text/plain') forces \r\n on Windows.
-      if (
-        navigator.clipboard &&
-        navigator.clipboard.write &&
-        typeof ClipboardItem !== 'undefined'
-      ) {
-        const blob = new Blob([restoredText], { type: 'text/plain' });
-        const item = new ClipboardItem({ 'text/plain': blob });
-        navigator.clipboard.write([item]).catch((err) => {
-          console.error('Clipboard write failed:', err);
-          // Fallback if async write fails (though preventDefault already called)
-          // We can't really fallback here effectively because preventDefault is done.
-          // But failure here is rare in a focused window context.
+        // 2. Replace Unicode Control Pictures back to ASCII
+        // 0x2401-0x241F -> 0x01-0x1F (Skip 0x2400 NULL to prevent truncation)
+        // 0x2421 -> 0x7F
+        let restoredText = text.replace(/[\u2401-\u241F\u2421]/g, (char) => {
+          const code = char.charCodeAt(0);
+          if (code === 0x2421) return '\x7F'; // DEL
+          return String.fromCharCode(code - 0x2400); // 0x01-0x1F
         });
-      } else {
-        // Fallback for environments without ClipboardItem support
-        e.clipboardData.setData('text/plain', restoredText);
+
+        // 3. Insert Separator between Timestamp and Data if separators are enabled
+        // Timestamp format: [HH:MM:SS.mmm]
+        // We look for the closing bracket ']' followed directly by the next character,
+        // and insert the separator.
+        // Note: If text implies valid newlines, this global replace works per occurrence.
+        if (showTimestamp && timestampSeparator) {
+          // Regex: Matches timestamp pattern HH:MM:SS.d (1 digit ms from backend)
+          // Also handling --:--:--.0 fallback
+          // The backend formats millis as (ms % 1000) / 100, so it's always 1 digit.
+          // We match this pattern and insert the separator.
+          restoredText = restoredText.replace(
+            /(\d{2}:\d{2}:\d{2}\.\d|--:--:--\.0)/g,
+            `$1${timestampSeparator}`
+          );
+        }
+
+        // Use Clipboard API with Blob to bypass OS/Browser CRLF normalization
+        // Standard e.clipboardData.setData('text/plain') forces \r\n on Windows.
+        if (
+          navigator.clipboard &&
+          navigator.clipboard.write &&
+          typeof ClipboardItem !== 'undefined'
+        ) {
+          const blob = new Blob([restoredText], { type: 'text/plain' });
+          const item = new ClipboardItem({ 'text/plain': blob });
+          navigator.clipboard.write([item]).catch((err) => {
+            console.error('Clipboard write failed:', err);
+            // Fallback if async write fails (though preventDefault already called)
+            // We can't really fallback here effectively because preventDefault is done.
+            // But failure here is rare in a focused window context.
+          });
+        } else {
+          // Fallback for environments without ClipboardItem support
+          e.clipboardData.setData('text/plain', restoredText);
+        }
       }
-    }
-  }, [timestampSeparator, showTimestamp]);
+    },
+    [timestampSeparator, showTimestamp]
+  );
 
   // Calculate display position
   const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
@@ -263,14 +274,8 @@ export default function AsciiViewer({
                 className="ascii-row"
                 style={{ height: lineWrap ? 'auto' : ROW_HEIGHT, minHeight: ROW_HEIGHT }}
               >
-                {showTimestamp && (
-                  <span className="ascii-timestamp">
-                    {line.timestamp || ''}
-                  </span>
-                )}
-                <span className="ascii-text">
-                  {line.text}
-                </span>
+                {showTimestamp && <span className="ascii-timestamp">{line.timestamp || ''}</span>}
+                <span className="ascii-text">{line.text}</span>
               </div>
             ))}
           </div>

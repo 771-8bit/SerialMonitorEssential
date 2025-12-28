@@ -27,7 +27,7 @@ export default function HexViewer({
   totalBytes,
   autoScroll,
   initialOffset = 0,
-  onScrollChange = () => { },
+  onScrollChange = () => {},
 }: HexViewerProps) {
   // Data state
   const [rows, setRows] = useState<DisplayRow[]>([]);
@@ -168,7 +168,9 @@ export default function HexViewer({
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
         e.preventDefault();
-        alert('To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)');
+        alert(
+          'To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)'
+        );
       }
     };
 

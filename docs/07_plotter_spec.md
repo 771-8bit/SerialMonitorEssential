@@ -16,7 +16,15 @@
 ### アーキテクチャ概要
 
 ```text
-[受信バッファ] → [行パーサー] → [データパーサー] → [プロットデータストア]
+[受信スレッド]
+     ↓ (Raw Bytes)
+[メインデータストア (RingBuffer)]
+     ↓ (通知/ポーリング)
+[プロッタ解析スレッド (Backend)]  <-- ここで数値/状態にパース
+     ↓ (Parsed Values)
+[プロッタデータストア (Backend)]
+     ↓ (Events / Commands)
+[プロッタウィンドウ (Frontend)]   <-- 描画のみ担当
 ```
 
 ---
@@ -263,6 +271,8 @@ pub enum ChannelValue {
 
 ## バックエンド実装
 
+## バックエンド実装
+
 ### データストア設計
 
 ```rust
@@ -272,92 +282,50 @@ pub struct PlotterDataStore {
     channels: HashMap<String, usize>,
     
     /// ライン用データバッファ（リングバッファ）
-    line_data: Vec<RingBuffer<(u64, f64)>>,  // (timestamp_ms, value)
+    /// 高速アクセスのため、各チャンネルごとに独立したバッファを持つ
+    line_data: HashMap<usize, RingBuffer<(u64, f64)>>,
     
     /// ステート用データ（状態変化リスト）
-    state_data: Vec<Vec<StateChange>>,
+    state_data: HashMap<usize, Vec<StateChange>>,
     
     /// 設定
     config: PlotterConfig,
 }
 
 /// 状態変化
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateChange {
     pub start_ms: u64,
-    pub end_ms: Option<u64>,  // O ongoing
+    pub end_ms: Option<u64>,  // None means ongoing
     pub state: String,
-}
-
-/// プロッタ設定
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlotterConfig {
-    /// 保持するポイント数
-    pub max_points: usize,  // デフォルト: 10000
-    
-    /// チャンネルタイプ設定
-    pub channel_types: HashMap<String, ChannelType>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChannelType {
-    Line,
-    State,
-    Auto,
 }
 ```
 
-### Tauri Commands
+### 解析スレッド (Parser Thread)
+*   **役割:** メインの `DataStore` から新しいデータを読み出し、行ごとにパースして `PlotterDataStore` に格納する。
+*   **同期:** メインストアの更新通知を受け取るか、定期的にポーリングを行う。
+*   **負荷分散:** 受信スレッド（Worker）とは独立して動作し、メインの通信を阻害しない。
 
-| コマンド | 引数 | 説明 |
-|----------|------|------|
-| `get_plotter_data` | `start_ms`, `end_ms`, `channels` | 指定範囲のプロットデータを取得 |
-| `get_plotter_channels` | - | 利用可能なチャンネル一覧を取得 |
-| `set_plotter_config` | `config` | プロッタ設定を更新 |
-| `export_plotter_data` | `path`, `format` | データをCSV/JSONでエクスポート |
-
-### Tauri Events
-
-| イベント | ペイロード | 説明 |
-|----------|-----------|------|
-| `plotter-update` | `{ channels: [...], timestamp: u64 }` | 新規データ通知（60fps間引き） |
-| `plotter-channel-added` | `{ name: string, type: string }` | 新チャンネル検出通知 |
+### Tauri Commands & Events
+*   `open_plotter_window`: 新しいプロッタウィンドウを生成する (`WindowBuilder`)。
+*   `get_plotter_data`: フロントエンドからの要求に応じてデータを返す。
+*   `plotter-update`: 高速な更新通知（バイナリイベント推奨）。
 
 ---
 
 ## フロントエンド実装
 
 ### 技術選定
+*   **ラインチャート:** [uPlot](https://github.com/leeoniya/uPlot) - 圧倒的なパフォーマンスのため採用。
+*   **ウィンドウ管理:** Tauriのマルチウィンドウ機能を利用。
 
-| 要素 | 選定 | 理由 |
-|------|------|------|
-| **ラインチャート** | [uPlot](https://github.com/leeoniya/uPlot) | 軽量・高速・リアルタイム向け |
-| **ステートタイムライン** | カスタム実装 (Canvas/SVG) | 特化したUI要件のため |
-| **状態管理** | React + useState/useEffect | シンプルな状態管理 |
-
-### コンポーネント構成
-
-```
-src/
-├── plotter/
-│   ├── PlotterWindow.tsx       # メインウィンドウ
-│   ├── LineChart.tsx           # uPlotラッパー
-│   ├── StateTimeline.tsx       # ステートタイムライン
-│   ├── ChannelSelector.tsx     # チャンネル選択UI
-│   ├── PlotterControls.tsx     # 再生/停止/設定
-│   └── hooks/
-│       ├── usePlotterData.ts   # データ取得フック
-│       └── usePlotterConfig.ts # 設定管理フック
-```
+### ウィンドウ構成
+*   メインウィンドウとは別の `WebviewWindow` として生成。
+*   `label` をユニークにすることで複数同時起動をサポート。
 
 ### パフォーマンス最適化
-
-| 最適化 | 説明 |
-|--------|------|
-| **Web Workers** | データパースをワーカースレッドで実行 |
-| **canvas描画** | DOM更新を最小化しcanvasで直接描画 |
-| **requestAnimationFrame** | 描画を60fpsにスロットリング |
-| **TypedArray** | データ格納にFloat64Arrayを使用 |
+*   **Rust側パース:** 文字列処理はすべてRustで行い、フロントエンドへは数値配列のみを渡す。
+*   **バイナリ転送:** 大量のデータポイント転送にはJSONではなくバイナリ形式（またはTauriの高速なIPC）を検討する。
 
 ---
 

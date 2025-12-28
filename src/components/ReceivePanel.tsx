@@ -162,7 +162,7 @@ export default function ReceivePanel({
                 fontSize: '11px',
                 outline: 'none',
                 cursor: 'pointer',
-                opacity: (!showTimestamp || viewMode === 'hex') ? 0.5 : 1
+                opacity: !showTimestamp || viewMode === 'hex' ? 0.5 : 1,
               }}
             >
               <option value=" ">Space</option>
