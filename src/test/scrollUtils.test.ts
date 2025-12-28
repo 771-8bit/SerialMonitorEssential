@@ -43,6 +43,14 @@ describe('scrollUtils', () => {
       expect(calculateScale(100_000_000)).toBe(0.08);
     });
 
+    it('handles 1GB of data', () => {
+      const bytes = 1024 * 1024 * 1024; // 1GB
+      const scale = calculateScale(bytes);
+      // 1GB / 16 = 67,108,864 rows * 20px = 1,342,177,280 px
+      // scale = 10,000,000 / 1,342,177,280 ≈ 0.00745
+      expect(scale).toBeCloseTo(0.00745, 4);
+    });
+
     it('handles zero', () => {
       expect(calculateScale(0)).toBe(1);
     });

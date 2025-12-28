@@ -59,6 +59,7 @@ export function useByteScroll({
   const anchorPositionRef = useRef(0);
   const prevScrollHeightRef = useRef(0);
   const prevTotalBytesRef = useRef(0);
+  const trailingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const lastProgrammaticScrollTopRef = useRef<number | null>(null);
 
@@ -66,32 +67,43 @@ export function useByteScroll({
   const scrollHeight = calculateScrollHeight(totalBytes, totalRows);
 
   // Helper: Calculate logical anchor position from scroll top
-  const getLogicalPosition = useCallback((currentScrollTop: number) => {
-    if (scrollHeight <= 0) return 0;
-    const ratio = currentScrollTop / scrollHeight;
-    if (totalRows !== undefined) {
-      // Anchor on Row Index
-      return ratio * totalRows;
-    } else {
-      // Anchor on Byte Offset
-      return ratio * totalBytes;
-    }
-  }, [scrollHeight, totalRows, totalBytes]);
+  const getLogicalPosition = useCallback(
+    (currentScrollTop: number) => {
+      if (scrollHeight <= 0) return 0;
+      const ratio = currentScrollTop / scrollHeight;
+      if (totalRows !== undefined) {
+        // Anchor on Row Index
+        return ratio * totalRows;
+      } else {
+        // Anchor on Byte Offset
+        return ratio * totalBytes;
+      }
+    },
+    [scrollHeight, totalRows, totalBytes]
+  );
 
   // Helper: Calculate scroll top from logical anchor position
-  const getScrollTopFromAnchor = useCallback((anchor: number, currentTotalRows?: number, currentTotalBytes?: number, currentScrollHeight?: number) => {
-    const tRows = currentTotalRows ?? totalRows;
-    const tBytes = currentTotalBytes ?? totalBytes;
-    const sHeight = currentScrollHeight ?? scrollHeight;
+  const getScrollTopFromAnchor = useCallback(
+    (
+      anchor: number,
+      currentTotalRows?: number,
+      currentTotalBytes?: number,
+      currentScrollHeight?: number
+    ) => {
+      const tRows = currentTotalRows ?? totalRows;
+      const tBytes = currentTotalBytes ?? totalBytes;
+      const sHeight = currentScrollHeight ?? scrollHeight;
 
-    if (tRows !== undefined && tRows > 0) {
-      return (anchor / tRows) * sHeight;
-    }
-    if (tBytes !== undefined && tBytes > 0) {
-      return (anchor / tBytes) * sHeight;
-    }
-    return 0;
-  }, [totalRows, totalBytes, scrollHeight]);
+      if (tRows !== undefined && tRows > 0) {
+        return (anchor / tRows) * sHeight;
+      }
+      if (tBytes !== undefined && tBytes > 0) {
+        return (anchor / tBytes) * sHeight;
+      }
+      return 0;
+    },
+    [totalRows, totalBytes, scrollHeight]
+  );
 
   // Update visible rows based on container height
   useEffect(() => {
@@ -114,12 +126,16 @@ export function useByteScroll({
       // Only re-anchor if we have a valid previous state and something changed
       if (prevTotalBytesRef.current > 0 && (bytesChanged || heightChanged)) {
         // Recalculate scrollTop for the SAME logical position in the NEW coordinate system
-        const newScrollTop = getScrollTopFromAnchor(anchorPositionRef.current, totalRows, totalBytes, scrollHeight);
+        const newScrollTop = getScrollTopFromAnchor(
+          anchorPositionRef.current,
+          totalRows,
+          totalBytes,
+          scrollHeight
+        );
 
         // If the position needs adjustment
         if (Math.abs(containerRef.current.scrollTop - newScrollTop) > 1) {
           containerRef.current.scrollTop = newScrollTop;
-          // eslint-disable-next-line react-hooks/set-state-in-effect
           setScrollTop(newScrollTop);
 
           // Mark as programmatic to ignore header feedback
@@ -166,12 +182,21 @@ export function useByteScroll({
   }, [autoScroll, initialOffset, totalBytes, scrollHeight, totalRows]);
 
   // Auto-scroll: keep at bottom when new data arrives
-  useEffect(() => {
-    // Only auto-scroll if enabled AND data GREW
-    const hasNewData = totalBytes > lastTotalBytesRef.current;
+  const lastScrollHeightRef = useRef(0);
 
-    if (autoScroll && totalBytes > 0 && containerRef.current && hasNewData) {
+  useEffect(() => {
+    // Check if data grew OR if the view revealed more content (e.g. backend confirmed more rows)
+    const hasNewData = totalBytes > lastTotalBytesRef.current;
+    const hasRevealedContent = scrollHeight > lastScrollHeightRef.current;
+
+    if (
+      autoScroll &&
+      totalBytes > 0 &&
+      containerRef.current &&
+      (hasNewData || hasRevealedContent)
+    ) {
       lastTotalBytesRef.current = totalBytes;
+      lastScrollHeightRef.current = scrollHeight;
 
       isAutoScrollingRef.current = true;
 
@@ -190,10 +215,10 @@ export function useByteScroll({
         isAutoScrollingRef.current = false;
       });
     }
-    // Update tracker if not autoscrolling
-    if (!autoScroll) {
-      lastTotalBytesRef.current = totalBytes;
-    }
+    // Update tracker if not autoscrolling or if conditions met
+    // (We always want to track the latest known size to detect Next Growth)
+    lastTotalBytesRef.current = totalBytes;
+    lastScrollHeightRef.current = scrollHeight;
   }, [autoScroll, totalBytes, scrollHeight, getLogicalPosition]);
 
   // Hook to capture anchor when AutoScroll stops (Manual Stop or Toggle Off)
@@ -230,6 +255,20 @@ export function useByteScroll({
       // Report byte offset to parent (Always Bytes for sync)
       const byteOffset = scrollTopToByteOffset(newScrollTop, scrollHeight, totalBytes);
       onScrollChange(clampByteOffset(byteOffset, totalBytes));
+
+      // Clear any pending trailing update
+      if (trailingRef.current) {
+        clearTimeout(trailingRef.current);
+      }
+
+      // Schedule trailing update to ensure we capture the final rest position
+      trailingRef.current = setTimeout(() => {
+        if (containerRef.current) {
+          const finalScrollTop = containerRef.current.scrollTop;
+          anchorPositionRef.current = getLogicalPosition(finalScrollTop);
+          trailingRef.current = null;
+        }
+      }, THROTTLE_MS + 10);
     },
     [scrollHeight, totalBytes, onScrollChange, getLogicalPosition]
   );
@@ -240,46 +279,48 @@ export function useByteScroll({
   }, [scrollTop, scrollHeight, totalBytes]);
 
   // Programmatic scroll helper
-  const scrollTo = useCallback((newScrollTop: number, newByteOffset?: number) => {
-    if (containerRef.current) {
-      containerRef.current.scrollTop = newScrollTop;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setScrollTop(newScrollTop);
-      lastProgrammaticScrollTopRef.current = newScrollTop;
+  const scrollTo = useCallback(
+    (newScrollTop: number, newByteOffset?: number) => {
+      if (containerRef.current) {
+        containerRef.current.scrollTop = newScrollTop;
+        setScrollTop(newScrollTop);
+        lastProgrammaticScrollTopRef.current = newScrollTop;
 
-      if (newByteOffset !== undefined) {
-        // Forced anchor update (e.g. exact line mapping)
-        // If we are in Row Mode (Ascii), anchor is usually Row Index.
-        // If we are passed a Byte Offset, we might want to store that?
-        // But our anchor logic expects "Logical Position".
-        // If caller passes Byte Offset, and we are in Row Mode, we should probably calculate Row Index?
-        // Or does the caller pass the Anchor Value directly?
-        // Let's assume caller passes the BYTE OFFSET (source of truth).
-        // We need to convert it to Logical Anchor if needed.
-        // But wait, if we are setting scrollTop to match a line, 
-        // we probably already know the line index.
-        // Let's genericize: pass anchorValue?
-        // No, let's keep it simple. The conflict "visual vs byte" is exactly what we are solving.
-        // If we set scrollTop to Line 50, and byteOffset to 5000.
-        // We want next scroll to start from 5000.
-        //getLogicalPosition(newScrollTop) -> Row 50.
-        // So updating anchor to getLogicalPosition(newScrollTop) is correct for continuity.
-        // The passed 'newByteOffset' is for the PARENT update.
-        // But we can just use the prop 'initialOffset' logic for that?
+        if (newByteOffset !== undefined) {
+          // Forced anchor update (e.g. exact line mapping)
+          // If we are in Row Mode (Ascii), anchor is usually Row Index.
+          // If we are passed a Byte Offset, we might want to store that?
+          // But our anchor logic expects "Logical Position".
+          // If caller passes Byte Offset, and we are in Row Mode, we should probably calculate Row Index?
+          // Or does the caller pass the Anchor Value directly?
+          // Let's assume caller passes the BYTE OFFSET (source of truth).
+          // We need to convert it to Logical Anchor if needed.
+          // But wait, if we are setting scrollTop to match a line,
+          // we probably already know the line index.
+          // Let's genericize: pass anchorValue?
+          // No, let's keep it simple. The conflict "visual vs byte" is exactly what we are solving.
+          // If we set scrollTop to Line 50, and byteOffset to 5000.
+          // We want next scroll to start from 5000.
+          //getLogicalPosition(newScrollTop) -> Row 50.
+          // So updating anchor to getLogicalPosition(newScrollTop) is correct for continuity.
+          // The passed 'newByteOffset' is for the PARENT update.
+          // But we can just use the prop 'initialOffset' logic for that?
 
-        // Actually, simply updating anchorPositionRef to getLogicalPosition(newScrollTop)
-        // is enough to keep the VIEW stable at that new position.
-        // If we want to correct the "Drift" on switch back, we need to ensure 'onScrollChange' sends the exact byte.
-        // But 'onScrollChange' is driven by handleScroll.
-        // If we suppress handleScroll, onScrollChange isn't called.
-        // So we should call onScrollChange(newByteOffset) here!
-        anchorPositionRef.current = getLogicalPosition(newScrollTop);
-        onScrollChange(clampByteOffset(newByteOffset, totalBytes));
-        // Also update prevRef to this exact value?
-        // No, prevRef is for diffing.
+          // Actually, simply updating anchorPositionRef to getLogicalPosition(newScrollTop)
+          // is enough to keep the VIEW stable at that new position.
+          // If we want to correct the "Drift" on switch back, we need to ensure 'onScrollChange' sends the exact byte.
+          // But 'onScrollChange' is driven by handleScroll.
+          // If we suppress handleScroll, onScrollChange isn't called.
+          // So we should call onScrollChange(newByteOffset) here!
+          anchorPositionRef.current = getLogicalPosition(newScrollTop);
+          onScrollChange(clampByteOffset(newByteOffset, totalBytes));
+          // Also update prevRef to this exact value?
+          // No, prevRef is for diffing.
+        }
       }
-    }
-  }, [onScrollChange, totalBytes, getLogicalPosition]);
+    },
+    [onScrollChange, totalBytes, getLogicalPosition]
+  );
 
   return {
     containerRef,

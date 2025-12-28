@@ -30,7 +30,7 @@ export default function AsciiViewer({
   showTimestamp = false,
   lineWrap = false,
   initialOffset = 0,
-  onScrollChange = () => { },
+  onScrollChange = () => {},
 }: AsciiViewerProps) {
   // Data state
   const [lines, setLines] = useState<AsciiLine[]>([]);
@@ -79,8 +79,14 @@ export default function AsciiViewer({
 
   // Initialize scroll position using exact line mapping from backend
   useEffect(() => {
-    // Only run if we have an initial offset (e.g. switched from Hex), haven't set it yet, and data exists
-    if (!initialLineSet && totalBytes > 0) {
+    // Only run if we have an initial offset (e.g. switched from Hex), haven't set it yet, and data exists.
+    // CRITICAL FIX: We MUST wait until effectiveTotalLines > 1 (meaning we have actual line count or at least a valid estimation based on data)
+    // to avoid clamping the scroll position to an incorrectly small scrollHeight.
+    // If totalLinesRef.current is 0, effectiveTotalLines is a raw estimation.
+    // Ideally we wait for totalLinesRef.current > 0 if totalBytes is large.
+    const hasValidLineCount = totalLinesRef.current > 0 || totalBytes < 1000;
+
+    if (!initialLineSet && totalBytes > 0 && hasValidLineCount) {
       if (initialOffset > 0) {
         invoke<{ line_index: number }>('get_line_index', { offset: initialOffset })
           .then((res) => {
@@ -95,7 +101,7 @@ export default function AsciiViewer({
             setInitialLineSet(true);
           })
           .catch((err) => {
-            console.error("Failed to get line index:", err);
+            console.error('Failed to get line index:', err);
             setInitialLineSet(true); // Fallback to default behavior
           });
       } else {
@@ -103,7 +109,7 @@ export default function AsciiViewer({
         setInitialLineSet(true);
       }
     }
-  }, [initialOffset, totalBytes, scrollTo, initialLineSet]);
+  }, [initialOffset, totalBytes, scrollTo, initialLineSet, effectiveTotalLines]);
 
   // Fetch lines from backend
   const fetchLines = useCallback(
@@ -159,7 +165,7 @@ export default function AsciiViewer({
     lastTotalBytesRef.current = totalBytes;
 
     fetchLines(startLine, forceRefetch);
-  }, [totalBytes, scrollTop, getByteOffset, fetchLines]);
+  }, [totalBytes, scrollTop, getByteOffset, fetchLines, effectiveTotalLines]);
 
   // Handle scroll from Text column (main scroll) - sync to timestamp
   const handleScroll = useCallback(

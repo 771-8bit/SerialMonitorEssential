@@ -651,10 +651,9 @@ mod tests {
         let _ = fs::remove_dir_all(&store.temp_dir);
     }
 
-    /// 【問題を示すテスト】
     /// archived_indexにデータがあり、finished_listにもデータがある場合、
-    /// 現在の実装ではfinished_listを先に検索するため、
-    /// archived_indexのデータを正しく取得できない可能性がある
+    /// 両方から正しい順序でデータを取得できることを確認
+    /// (archived → finished の順で連続して取得するケース)
     #[test]
     fn test_get_data_archived_then_finished() {
         let store = create_test_data_store();
@@ -687,9 +686,8 @@ mod tests {
         }
 
         // --- archived_indexのデータ(offset 0-100)を取得 ---
-        // 現在の実装: finished_listを先に検索するが、
-        // offset 0のデータはfinished_listにないのでスキップされ、
-        // 次にarchived_indexを検索して取得できるはず
+        // finished_listを先に検索するが、offset 0のデータはfinished_listにないので
+        // スキップされ、次にarchived_indexを検索して正しく取得されるはず
         let result = store.get_data(0, 100).unwrap();
         assert_eq!(result.len(), 100);
         assert_eq!(result, archived_data, "Should get data from archived_index");
