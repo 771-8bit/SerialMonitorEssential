@@ -1,7 +1,11 @@
 import { useRef, useEffect, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import { stateTimelinePlugin, calculateStateTimelineHeight, type StateRow } from './stateTimelinePlugin';
+import {
+  stateTimelinePlugin,
+  calculateStateTimelineHeight,
+  type StateRow,
+} from './stateTimelinePlugin';
 import './LineChart.css';
 
 // Channel colors (16 max)
@@ -38,7 +42,12 @@ interface LineChartProps {
 // Re-export StateRow type for use by PlotterWindow
 export type { StateRow };
 
-export default function LineChart({ data, isPaused = false, stateRows = [], onTimeRangeChange }: LineChartProps) {
+export default function LineChart({
+  data,
+  isPaused = false,
+  stateRows = [],
+  onTimeRangeChange,
+}: LineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
   const channelsRef = useRef<string[]>([]);
@@ -265,14 +274,17 @@ export default function LineChart({ data, isPaused = false, stateRows = [], onTi
             },
           ],
         },
-        plugins: stateRows.length > 0 ? [
-          stateTimelinePlugin({
-            getRows: () => stateRowsRef.current,
-            rowHeight: 24,
-            rowGap: 2,
-            showLabel: true,
-          }),
-        ] : [],
+        plugins:
+          stateRows.length > 0
+            ? [
+                stateTimelinePlugin({
+                  getRows: () => stateRowsRef.current,
+                  rowHeight: 24,
+                  rowGap: 2,
+                  showLabel: true,
+                }),
+              ]
+            : [],
       };
 
       // Update stateRowsRef before chart creation (plugin uses this reference)

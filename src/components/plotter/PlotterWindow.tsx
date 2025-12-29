@@ -143,11 +143,7 @@ export default function PlotterWindow() {
           <>
             {/* Line Chart (with integrated State Timeline) */}
             <div className="chart-area">
-              <LineChart
-                data={data!.line_data}
-                isPaused={!isRunning}
-                stateRows={stateRows}
-              />
+              <LineChart data={data!.line_data} isPaused={!isRunning} stateRows={stateRows} />
             </div>
 
             {/* Channel legend */}
