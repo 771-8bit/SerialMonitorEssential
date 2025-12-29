@@ -227,13 +227,13 @@ export default function LineChart({
         plugins:
           stateRowCount > 0
             ? [
-              stateTimelinePlugin({
-                getRows: () => stateRowsRef.current,
-                rowHeight: 24,
-                rowGap: 2,
-                showLabel: true,
-              }),
-            ]
+                stateTimelinePlugin({
+                  getRows: () => stateRowsRef.current,
+                  rowHeight: 24,
+                  rowGap: 2,
+                  showLabel: true,
+                }),
+              ]
             : [],
       };
     },

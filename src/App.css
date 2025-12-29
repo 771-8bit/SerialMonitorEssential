@@ -152,8 +152,6 @@ button:disabled {
   cursor: not-allowed;
 }
 
-
-
 .connect-button {
   min-width: 80px;
 }
@@ -167,8 +165,6 @@ button:disabled {
 .connect-button.connected:hover {
   background-color: #388e3c;
 }
-
-
 
 .baud-input {
   width: 100px;
@@ -247,10 +243,6 @@ button:disabled {
   min-height: 0;
   gap: 6px;
 }
-
-
-
-
 
 /* HexViewer Component Styles Override (if any direct styles were used, but we use HexViewer.css mostly) */
 /* We might need to override styles inside HexViewer.css too if they were light-mode specific */

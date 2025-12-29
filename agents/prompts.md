@@ -1,21 +1,19 @@
 # よく使うプロンプト集
 ## Continuous
 npm run lint
+npm run lint:css-unused
 npm run type-check
 npm run format
+cd src-tauri
+cargo fmt
+cargo clippy
+cargo test
+cargo check
 このエラーを修正してください
 
 npm run test:coverage
 カバレッジレポートを見て，カバレッジが100%に近くテストの追加が簡単そうなところからテストを追加してください．テストを追加する中で，問題が起きた場合はテストが間違っているのかプロダクトコードが違うのか慎重に判断してください．意図的なdeadcodeであればそれを明記してください．
 
-cd src-tauri
-cargo clippy
-このエラーを修正してください
-
-cd src-tauri
-cargo fmt
-
-cd src-tauri
 cargo llvm-cov --lib
 カバレッジレポートを見て，カバレッジが100%に近くテストの追加が簡単そうなところからテストを追加してください．テストを追加する中で，問題が起きた場合はテストが間違っているのかプロダクトコードが違うのか慎重に判断してください．意図的なdeadcodeであればそれを明記してください．
 
