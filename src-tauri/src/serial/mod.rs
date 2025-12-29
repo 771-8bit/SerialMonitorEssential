@@ -1,5 +1,5 @@
 mod chunk;
-mod data_store;
+pub mod data_store;
 mod logger_thread;
 pub mod port;
 mod ui_notifier;
@@ -346,7 +346,16 @@ pub fn get_ascii_lines(
         // Phase 1 optimization: Batch fetch all lines data at once instead of per-line
         let first_offset = line_offsets[0].0;
         let last_end = line_offsets.last().unwrap().1;
-        let batch_length = (last_end - first_offset).min(1024 * 1024) as u32; // Cap at 1MB
+        // Use saturating_sub to prevent overflow when data changes during fetch
+        let batch_length = last_end.saturating_sub(first_offset).min(1024 * 1024) as u32; // Cap at 1MB
+
+        // Early return if batch_length is 0 (race condition: data changed)
+        if batch_length == 0 {
+            return Ok(AsciiLinesPayload {
+                lines: vec![],
+                total_lines,
+            });
+        }
 
         // Single batch fetch
         let batch_data = match data_store.get_data(first_offset, batch_length) {

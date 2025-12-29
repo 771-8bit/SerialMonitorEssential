@@ -81,6 +81,8 @@ class VirtualSender:
                 self._send_fast(duration, on_progress)
             elif mode == 'demo':
                 self._send_demo(duration, on_progress)
+            elif mode == 'plotter_fast':
+                self._send_plotter_fast(duration, on_progress)
             else:
                 return VirtualSendResult(
                     success=False,
@@ -304,4 +306,37 @@ class VirtualSender:
 
                 # 1秒ごとに進捗表示
                 if line_count % 100 == 0 and on_progress:
+                    on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
+
+    def _send_plotter_fast(
+        self,
+        duration: float,
+        on_progress: Optional[Callable[[str], None]] = None
+    ):
+        """高速プロッタテスト送信（1kHz CSV）"""
+        # ヘッダー送信
+        header = self.generator.generate_plotter_header()
+        self.ser.write(header)
+        
+        if on_progress:
+            on_progress("Sent header: time,sin,cos,random (1kHz mode)")
+
+        start_time = time.time()
+        last_send = -0.001
+        line_count = 0
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= duration:
+                break
+
+            # 1msごと（1kHz）
+            if elapsed - last_send >= 0.001:
+                last_send = elapsed
+                data = self.generator.generate_plotter_fast_line(elapsed)
+                self.ser.write(data)
+                line_count += 1
+
+                # 1秒ごとに進捗表示
+                if line_count % 1000 == 0 and on_progress:
                     on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")

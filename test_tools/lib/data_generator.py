@@ -184,3 +184,57 @@ class DataGenerator:
                 yield self.generate_plotter_line(elapsed), elapsed
             
             time.sleep(0.01)
+
+    def generate_plotter_fast_line(self, elapsed_sec: float) -> bytes:
+        """
+        高速プロッタテスト用CSV行生成 (1kHz対応)
+        
+        フォーマット: time,sin,cos,random\r\n
+        - sin: 周期0.5秒、振幅100 (高速変化)
+        - cos: 周期0.3秒、振幅80 (高速変化)
+        - random: ランダムウォーク ±150
+        """
+        # Ch1: Sin波 (周期0.5秒、振幅100) - 高速変化
+        ch1 = 100.0 * math.sin(2.0 * math.pi * elapsed_sec / 0.5)
+        
+        # Ch2: Cos波 (周期0.3秒、振幅80) - 高速変化
+        ch2 = 80.0 * math.cos(2.0 * math.pi * elapsed_sec / 0.3)
+        
+        # Ch3: ランダムウォーク
+        self.random_walk += (random.random() * 2 - 1) * 2.0
+        self.random_walk = max(-150.0, min(150.0, self.random_walk))
+        
+        line = f"{elapsed_sec:.3f},{ch1:.2f},{ch2:.2f},{self.random_walk:.2f}\r\n"
+        data = line.encode('utf-8')
+        self.update_checksum(data)
+        return data
+
+    def plotter_fast_generator(self, duration: float) -> Iterator[tuple[bytes, float]]:
+        """
+        高速プロッタテスト用データジェネレータ (1kHz)
+        
+        Args:
+            duration: テスト時間（秒）
+        
+        Yields:
+            tuple[bytes, float]: (データ, 経過秒数)
+        """
+        import time
+        
+        # ヘッダー送信
+        yield self.generate_plotter_header(), 0.0
+        
+        start_time = time.time()
+        last_send = -0.001
+        
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed >= duration:
+                break
+            
+            # 1msごと（1kHz）
+            if elapsed - last_send >= 0.001:
+                last_send = elapsed
+                yield self.generate_plotter_fast_line(elapsed), elapsed
+            
+            time.sleep(0.0001)  # 0.1ms sleep for timing precision

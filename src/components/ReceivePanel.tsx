@@ -52,9 +52,14 @@ export default function ReceivePanel({
     onCopy(viewMode);
   }, [onCopy, viewMode]);
 
-  const handlePlotter = useCallback(() => {
-    // Phase 7で実装予定
-    alert('Plotter will be available in Phase 7');
+  const handlePlotter = useCallback(async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_plotter_window');
+    } catch (e) {
+      console.error('Failed to open plotter:', e);
+      alert('Failed to open plotter: ' + e);
+    }
   }, []);
 
   return (
