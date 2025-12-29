@@ -469,20 +469,13 @@ type StateTimelinePluginOpts = {
 
 #### 7-5. ステートタイムライン実装 (Frontend)
 *   **作業内容:** 状態変化をタイムラインとして可視化。LineChartと時間軸を同期表示。
-*   **現在の実装:** 分離コンポーネント（`StateTimeline.tsx`）でCanvasベース描画。LineChartから時間範囲をコールバックで受け取り同期。
+*   **現在の実装:** uPlotカスタムプラグイン（`stateTimelinePlugin.ts`）でCanvas矩形描画。LineChartと同一のuPlotインスタンス内で描画するため、時間軸は自動的に同期。
 *   **中間確認:**
-    *   [x] StateTimelineコンポーネントが動作する
+    *   [x] StateTimelineプラグインがLineChartに統合されている
     *   [x] 状態がカラーバーで表示される
     *   [x] 複数チャンネルが行として表示される
     *   [x] 状態名がバー内に表示される（幅が十分な場合）
     *   [x] LineChartと時間軸が同期（ズーム/パン連動）
-
-> [!NOTE]
-> **将来の改善計画:** uPlotカスタムプラグインへの移行
-> 
-> 現在は分離コンポーネントで実装しているが、uPlotの`timeline-discrete`デモを参考に、
-> プラグインベースの実装に移行することで、よりネイティブな統合が可能になる。
-> 参考: https://leeoniya.github.io/uPlot/demos/timeline-discrete.html
 
 ---
 

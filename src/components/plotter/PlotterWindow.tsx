@@ -1,8 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import LineChart from './LineChart';
-import StateTimeline from './StateTimeline';
-import type { StateRow, StateSegment } from './StateTimeline';
+import LineChart, { type StateRow } from './LineChart';
 import './PlotterWindow.css';
 
 // Types matching Rust PlotterDataPayload
@@ -32,7 +30,6 @@ export default function PlotterWindow() {
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(true);
   const [threadStarted, setThreadStarted] = useState(false);
-  const [timeRange, setTimeRange] = useState<{ min: number; max: number } | null>(null);
 
   // Start plotter thread on mount
   useEffect(() => {
@@ -105,6 +102,22 @@ export default function PlotterWindow() {
   const hasLineData =
     data && Object.keys(data.line_data).some((key) => data.line_data[key].length > 0);
 
+  // Build state rows from state_data (sorted alphabetically)
+  const stateRows: StateRow[] = useMemo(() => {
+    if (!data) return [];
+    return Object.entries(data.state_data)
+      .filter(([, changes]) => changes.length > 0)
+      .map(([channel, changes]) => ({
+        channel,
+        segments: changes.map((c) => ({
+          start_ms: c.start_ms,
+          end_ms: c.end_ms ?? Date.now(),
+          state: c.state,
+        })),
+      }))
+      .sort((a, b) => a.channel.localeCompare(b.channel));
+  }, [data]);
+
   return (
     <div className="plotter-window">
       {/* Header */}
@@ -128,44 +141,14 @@ export default function PlotterWindow() {
       <div className="plotter-content">
         {hasLineData ? (
           <>
-            {/* Line Chart */}
+            {/* Line Chart (with integrated State Timeline) */}
             <div className="chart-area">
               <LineChart
                 data={data!.line_data}
                 isPaused={!isRunning}
-                onTimeRangeChange={(min, max) => setTimeRange({ min, max })}
+                stateRows={stateRows}
               />
             </div>
-
-            {/* State Timeline (below chart) */}
-            {(() => {
-              // Build state rows from state_data (sorted alphabetically)
-              const stateRows: StateRow[] = Object.entries(data!.state_data)
-                .filter(([, changes]) => changes.length > 0)
-                .map(([channel, changes]) => ({
-                  channel,
-                  segments: changes.map(c => ({
-                    start_ms: c.start_ms,
-                    end_ms: c.end_ms ?? Date.now(),
-                    state: c.state,
-                  })) as StateSegment[],
-                }))
-                .sort((a, b) => a.channel.localeCompare(b.channel));
-
-              if (stateRows.length === 0) return null;
-
-              // Use timeRange from LineChart if available, otherwise use data range
-              const timeMin = timeRange?.min ?? data!.start_ms / 1000;
-              const timeMax = timeRange?.max ?? data!.end_ms / 1000;
-
-              return (
-                <StateTimeline
-                  rows={stateRows}
-                  timeMin={timeMin}
-                  timeMax={timeMax}
-                />
-              );
-            })()}
 
             {/* Channel legend */}
             <div className="channel-legend">
@@ -190,13 +173,10 @@ export default function PlotterWindow() {
             </p>
             <ul className="format-list">
               <li>
-                <strong>CSV Format:</strong> <code>10,20,30</code>
+                <strong>CSV Format:</strong> <code>25.5,60,RUNNING</code>
               </li>
               <li>
-                <strong>Labeled values:</strong> <code>temp:25.5,humidity:60</code>
-              </li>
-              <li>
-                <strong>State (CSV/Labeled):</strong> <code>RUNNING</code> or <code>state:RUNNING</code>
+                <strong>Labeled values:</strong> <code>temp:25.5,humidity:60,state:RUNNING</code>
               </li>
             </ul>
           </div>

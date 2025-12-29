@@ -117,22 +117,34 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
 
                 if (xMin === undefined || xMax === undefined) return;
 
+                // Calculate X-axis height (axis labels, ticks, gap)
+                // Access the X-axis configuration to get the actual size
+                const xAxis = u.axes[0];
+                // The axis size includes labels, ticks, and gap
+                // Default axis size is around 30px, but we account for actual configuration
+                const axisSize = (xAxis as { _size?: number })._size ?? 30;
+                const axisGap = xAxis.gap ?? 5;
+                const xAxisHeight = axisSize + axisGap;
+
+                // Start drawing below the X-axis
+                const stateAreaTop = plotBottom + xAxisHeight;
+
                 // Convert ms to seconds for uPlot scale
                 const xMinMs = xMin * 1000;
                 const xMaxMs = xMax * 1000;
 
                 ctx.save();
 
-                // Clip to plot area (extended for state rows)
+                // Clip to state timeline area (below X-axis)
                 const totalStateHeight = rows.length * (rowHeight + rowGap);
                 ctx.beginPath();
-                ctx.rect(plotLeft, plotBottom, plotWidth, totalStateHeight);
+                ctx.rect(plotLeft, stateAreaTop, plotWidth, totalStateHeight);
                 ctx.clip();
 
                 // Draw each state row (bars only, clipped to plot area)
                 for (let r = 0; r < rows.length; r++) {
                     const row = rows[r];
-                    const y0 = plotBottom + r * (rowHeight + rowGap) + rowGap / 2;
+                    const y0 = stateAreaTop + r * (rowHeight + rowGap) + rowGap / 2;
 
                     // Draw channel label background
                     ctx.fillStyle = '#252526';
@@ -187,7 +199,7 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
                 ctx.save();
                 for (let r = 0; r < rows.length; r++) {
                     const row = rows[r];
-                    const y0 = plotBottom + r * (rowHeight + rowGap) + rowGap / 2;
+                    const y0 = stateAreaTop + r * (rowHeight + rowGap) + rowGap / 2;
 
                     ctx.fillStyle = '#9cdcfe';
                     ctx.font = '11px sans-serif';

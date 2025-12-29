@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
+import { stateTimelinePlugin, calculateStateTimelineHeight, type StateRow } from './stateTimelinePlugin';
 import './LineChart.css';
 
 // Channel colors (16 max)
@@ -28,14 +29,20 @@ interface LineChartProps {
   data: Record<string, [number, number][]>;
   // Whether the chart is paused
   isPaused?: boolean;
+  // State timeline rows to display below the chart
+  stateRows?: StateRow[];
   // Callback when visible time range changes (in seconds)
   onTimeRangeChange?: (min: number, max: number) => void;
 }
 
-export default function LineChart({ data, isPaused = false, onTimeRangeChange }: LineChartProps) {
+// Re-export StateRow type for use by PlotterWindow
+export type { StateRow };
+
+export default function LineChart({ data, isPaused = false, stateRows = [], onTimeRangeChange }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
   const channelsRef = useRef<string[]>([]);
+  const stateRowsRef = useRef<StateRow[]>([]);
   const isZoomedRef = useRef(false);
   const manualYScaleRef = useRef<{ min: number; max: number } | null>(null);
   const manualXRangeRef = useRef<number | null>(null);
@@ -104,7 +111,12 @@ export default function LineChart({ data, isPaused = false, onTimeRangeChange }:
       channels.length !== channelsRef.current.length ||
       channels.some((ch, i) => ch !== channelsRef.current[i]);
 
-    if (channelsChanged || !chartRef.current) {
+    // Check if state rows changed (need to recreate chart for plugin update)
+    const stateRowsChanged =
+      stateRows.length !== stateRowsRef.current.length ||
+      stateRows.some((row, i) => row.channel !== stateRowsRef.current[i]?.channel);
+
+    if (channelsChanged || stateRowsChanged || !chartRef.current) {
       // Need to recreate chart
       if (chartRef.current) {
         chartRef.current.destroy();
@@ -120,10 +132,14 @@ export default function LineChart({ data, isPaused = false, onTimeRangeChange }:
         })),
       ];
 
+      // Calculate extra padding for state timeline rows
+      const stateTimelineHeight = calculateStateTimelineHeight(stateRows.length);
+
       const opts: uPlot.Options = {
         width: containerRef.current.clientWidth,
         height: containerRef.current.clientHeight,
         series,
+        padding: [null, null, stateTimelineHeight, null], // Add bottom padding for state rows
         scales: {
           x: {
             time: false,
@@ -249,7 +265,18 @@ export default function LineChart({ data, isPaused = false, onTimeRangeChange }:
             },
           ],
         },
+        plugins: stateRows.length > 0 ? [
+          stateTimelinePlugin({
+            getRows: () => stateRowsRef.current,
+            rowHeight: 24,
+            rowGap: 2,
+            showLabel: true,
+          }),
+        ] : [],
       };
+
+      // Update stateRowsRef before chart creation (plugin uses this reference)
+      stateRowsRef.current = stateRows;
 
       chartRef.current = new uPlot(opts, chartData, containerRef.current);
       channelsRef.current = channels;
@@ -258,6 +285,9 @@ export default function LineChart({ data, isPaused = false, onTimeRangeChange }:
       const chart = chartRef.current;
       const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
       const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
+
+      // Update stateRowsRef so plugin can access latest state data
+      stateRowsRef.current = stateRows;
 
       chart.setData(chartData);
 
@@ -303,7 +333,7 @@ export default function LineChart({ data, isPaused = false, onTimeRangeChange }:
         }
       }
     }
-  }, [buildChartData]);
+  }, [buildChartData, stateRows]);
 
   // Handle resize
   useEffect(() => {
