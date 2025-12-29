@@ -1,11 +1,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import {
-  stateTimelinePlugin,
-  calculateStateTimelineHeight,
-  type StateRow,
-} from './stateTimelinePlugin';
+import { stateTimelinePlugin, calculateStateTimelineHeight, StateRow } from './stateTimelinePlugin';
 import './LineChart.css';
 
 // Channel colors (16 max)
@@ -39,8 +35,21 @@ interface LineChartProps {
   onTimeRangeChange?: (min: number, max: number) => void;
 }
 
-// Re-export StateRow type for use by PlotterWindow
-export type { StateRow };
+/** Calculate Y-axis range from chart data */
+function calculateYRange(chartData: uPlot.AlignedData): { yMin: number; yMax: number } {
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (let i = 1; i < chartData.length; i++) {
+    const yData = chartData[i] as (number | null)[];
+    for (const v of yData) {
+      if (v !== null) {
+        yMin = Math.min(yMin, v);
+        yMax = Math.max(yMax, v);
+      }
+    }
+  }
+  return { yMin, yMax };
+}
 
 export default function LineChart({
   data,
@@ -64,13 +73,11 @@ export default function LineChart({
 
   // Build uPlot data format: [timestamps, ...values]
   const buildChartData = useCallback(() => {
-    // Sort channels alphabetically to maintain stable color order
     const channels = Object.keys(data).sort();
     if (channels.length === 0) {
       return { data: [[]] as uPlot.AlignedData, channels: [] };
     }
 
-    // Collect all unique timestamps and sort
     const timestampSet = new Set<number>();
     for (const channel of channels) {
       const points = data[channel];
@@ -84,8 +91,7 @@ export default function LineChart({
       return { data: [[]] as uPlot.AlignedData, channels: [] };
     }
 
-    // Build value arrays for each channel
-    const chartData: (number | null)[][] = [timestamps.map((t) => t / 1000)]; // Convert ms to seconds
+    const chartData: (number | null)[][] = [timestamps.map((t) => t / 1000)];
 
     for (const channel of channels) {
       const points = data[channel];
@@ -93,7 +99,6 @@ export default function LineChart({
       for (const [t, v] of points) {
         valueMap.set(t, v);
       }
-
       const values = timestamps.map((t) => valueMap.get(t) ?? null);
       chartData.push(values);
     }
@@ -101,38 +106,76 @@ export default function LineChart({
     return { data: chartData as uPlot.AlignedData, channels };
   }, [data]);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
+  // Setup event handlers for the chart
+  const setupEventHandlers = useCallback((u: uPlot) => {
+    // Double-click to reset zoom
+    u.over.addEventListener('dblclick', () => {
+      isZoomedRef.current = false;
+      manualYScaleRef.current = null;
+      manualXRangeRef.current = null;
+      const chartData = u.data;
+      if (chartData && chartData[0] && chartData[0].length > 0) {
+        const xData = chartData[0] as number[];
+        const xMin = Math.min(...xData);
+        const xMax = Math.max(...xData);
+        u.setScale('x', { min: xMin, max: xMax });
 
-    const { data: chartData, channels } = buildChartData();
-
-    // If no data or no channels, destroy chart
-    if (channels.length === 0 || chartData[0].length === 0) {
-      if (chartRef.current) {
-        chartRef.current.destroy();
-        chartRef.current = null;
+        const { yMin, yMax } = calculateYRange(chartData);
+        if (yMin !== Infinity && yMax !== -Infinity) {
+          const padding = (yMax - yMin) * 0.1;
+          u.setScale('y', { min: yMin - padding, max: yMax + padding });
+        }
       }
-      return;
-    }
+    });
 
-    // Check if channels changed
-    const channelsChanged =
-      channels.length !== channelsRef.current.length ||
-      channels.some((ch, i) => ch !== channelsRef.current[i]);
+    // Wheel zoom
+    u.over.addEventListener('wheel', (e) => {
+      e.preventDefault();
 
-    // Check if state rows changed (need to recreate chart for plugin update)
-    const stateRowsChanged =
-      stateRows.length !== stateRowsRef.current.length ||
-      stateRows.some((row, i) => row.channel !== stateRowsRef.current[i]?.channel);
+      const factor = e.deltaY > 0 ? 1.1 : 0.9;
+      const rect = u.over.getBoundingClientRect();
+      const xPos = e.clientX - rect.left;
+      const yPos = e.clientY - rect.top;
 
-    if (channelsChanged || stateRowsChanged || !chartRef.current) {
-      // Need to recreate chart
-      if (chartRef.current) {
-        chartRef.current.destroy();
+      const xScale = u.scales.x;
+      const yScale = u.scales.y;
+
+      if (
+        xScale.min === undefined ||
+        xScale.max === undefined ||
+        yScale.min === undefined ||
+        yScale.max === undefined
+      )
+        return;
+
+      const xVal = u.posToVal(xPos, 'x');
+      const yVal = u.posToVal(yPos, 'y');
+
+      if (e.shiftKey) {
+        const xRange = xScale.max - xScale.min;
+        const newRange = xRange * factor;
+        const ratio = (xVal - xScale.min) / xRange;
+        const newMin = xVal - newRange * ratio;
+        const newMax = xVal + newRange * (1 - ratio);
+        u.setScale('x', { min: newMin, max: newMax });
+        manualXRangeRef.current = newRange;
+      } else {
+        const yRange = yScale.max - yScale.min;
+        const newRange = yRange * factor;
+        const ratio = (yVal - yScale.min) / yRange;
+        const newMin = yVal - newRange * ratio;
+        const newMax = yVal + newRange * (1 - ratio);
+        u.setScale('y', { min: newMin, max: newMax });
+        manualYScaleRef.current = { min: newMin, max: newMax };
       }
+    });
+  }, []);
 
+  // Build chart options
+  const buildChartOptions = useCallback(
+    (channels: string[], stateRowCount: number, width: number, height: number): uPlot.Options => {
       const series: uPlot.Series[] = [
-        { label: 'Time' }, // X axis
+        { label: 'Time' },
         ...channels.map((ch, i) => ({
           label: ch,
           stroke: COLORS[i % COLORS.length],
@@ -141,51 +184,30 @@ export default function LineChart({
         })),
       ];
 
-      // Calculate extra padding for state timeline rows
-      const stateTimelineHeight = calculateStateTimelineHeight(stateRows.length);
+      const stateTimelineHeight = calculateStateTimelineHeight(stateRowCount);
 
-      const opts: uPlot.Options = {
-        width: containerRef.current.clientWidth,
-        height: containerRef.current.clientHeight,
+      return {
+        width,
+        height,
         series,
-        padding: [null, null, stateTimelineHeight, null], // Add bottom padding for state rows
+        padding: [null, null, stateTimelineHeight, null],
         scales: {
-          x: {
-            time: false,
-            auto: false,
-          },
-          y: {
-            auto: false,
-          },
+          x: { time: false, auto: false },
+          y: { auto: false },
         },
         axes: [
-          {
-            stroke: '#888',
-            grid: { stroke: '#333' },
-            ticks: { stroke: '#444' },
-          },
-          {
-            stroke: '#888',
-            grid: { stroke: '#333' },
-            ticks: { stroke: '#444' },
-          },
+          { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
+          { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
         ],
-        legend: {
-          show: true,
-        },
+        legend: { show: true },
         cursor: {
           show: true,
           points: { show: true },
-          drag: {
-            x: true,
-            y: true,
-            setScale: true,
-          },
+          drag: { x: true, y: true, setScale: true },
         },
         hooks: {
           setScale: [
             (u, key) => {
-              // Notify parent of X scale changes
               if (key === 'x' && onTimeRangeChangeRef.current) {
                 const xMin = u.scales.x.min;
                 const xMax = u.scales.x.max;
@@ -200,82 +222,10 @@ export default function LineChart({
               isZoomedRef.current = true;
             },
           ],
-          init: [
-            (u) => {
-              u.over.addEventListener('dblclick', () => {
-                isZoomedRef.current = false;
-                manualYScaleRef.current = null;
-                manualXRangeRef.current = null;
-                const data = u.data;
-                if (data && data[0] && data[0].length > 0) {
-                  const xData = data[0] as number[];
-                  const xMin = Math.min(...xData);
-                  const xMax = Math.max(...xData);
-                  u.setScale('x', { min: xMin, max: xMax });
-
-                  let yMin = Infinity;
-                  let yMax = -Infinity;
-                  for (let i = 1; i < data.length; i++) {
-                    const yData = data[i] as (number | null)[];
-                    for (const v of yData) {
-                      if (v !== null) {
-                        yMin = Math.min(yMin, v);
-                        yMax = Math.max(yMax, v);
-                      }
-                    }
-                  }
-                  if (yMin !== Infinity && yMax !== -Infinity) {
-                    const padding = (yMax - yMin) * 0.1;
-                    u.setScale('y', { min: yMin - padding, max: yMax + padding });
-                  }
-                }
-              });
-
-              u.over.addEventListener('wheel', (e) => {
-                e.preventDefault();
-
-                const factor = e.deltaY > 0 ? 1.1 : 0.9;
-                const rect = u.over.getBoundingClientRect();
-                const xPos = e.clientX - rect.left;
-                const yPos = e.clientY - rect.top;
-
-                const xScale = u.scales.x;
-                const yScale = u.scales.y;
-
-                if (
-                  xScale.min === undefined ||
-                  xScale.max === undefined ||
-                  yScale.min === undefined ||
-                  yScale.max === undefined
-                )
-                  return;
-
-                const xVal = u.posToVal(xPos, 'x');
-                const yVal = u.posToVal(yPos, 'y');
-
-                if (e.shiftKey) {
-                  const xRange = xScale.max - xScale.min;
-                  const newRange = xRange * factor;
-                  const ratio = (xVal - xScale.min) / xRange;
-                  const newMin = xVal - newRange * ratio;
-                  const newMax = xVal + newRange * (1 - ratio);
-                  u.setScale('x', { min: newMin, max: newMax });
-                  manualXRangeRef.current = newRange;
-                } else {
-                  const yRange = yScale.max - yScale.min;
-                  const newRange = yRange * factor;
-                  const ratio = (yVal - yScale.min) / yRange;
-                  const newMin = yVal - newRange * ratio;
-                  const newMax = yVal + newRange * (1 - ratio);
-                  u.setScale('y', { min: newMin, max: newMax });
-                  manualYScaleRef.current = { min: newMin, max: newMax };
-                }
-              });
-            },
-          ],
+          init: [(u) => setupEventHandlers(u)],
         },
         plugins:
-          stateRows.length > 0
+          stateRowCount > 0
             ? [
                 stateTimelinePlugin({
                   getRows: () => stateRowsRef.current,
@@ -286,66 +236,99 @@ export default function LineChart({
               ]
             : [],
       };
+    },
+    [setupEventHandlers]
+  );
 
-      // Update stateRowsRef before chart creation (plugin uses this reference)
+  // Update chart scales based on current data and zoom state
+  const updateChartScales = useCallback((chart: uPlot, chartData: uPlot.AlignedData) => {
+    const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
+    const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
+
+    chart.setData(chartData);
+
+    if (isZoomedRef.current) {
+      if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
+        chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
+      }
+      if (prevYScale.min !== undefined && prevYScale.max !== undefined) {
+        chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
+      }
+    } else {
+      if (chartData[0] && chartData[0].length > 0) {
+        const xData = chartData[0] as number[];
+        const xMin = Math.min(...xData);
+        const xMax = Math.max(...xData);
+
+        if (manualXRangeRef.current !== null) {
+          const range = manualXRangeRef.current;
+          chart.setScale('x', { min: xMax - range, max: xMax });
+        } else {
+          chart.setScale('x', { min: xMin, max: xMax });
+        }
+
+        const { yMin, yMax } = calculateYRange(chartData);
+        if (yMin !== Infinity && yMax !== -Infinity) {
+          if (manualYScaleRef.current) {
+            chart.setScale('y', manualYScaleRef.current);
+          } else {
+            const padding = (yMax - yMin) * 0.1 || 1;
+            chart.setScale('y', { min: yMin - padding, max: yMax + padding });
+          }
+        }
+      }
+    }
+  }, []);
+
+  // Main chart effect
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const { data: chartData, channels } = buildChartData();
+
+    // If no data or no channels, destroy chart
+    if (channels.length === 0 || chartData[0].length === 0) {
+      if (chartRef.current) {
+        chartRef.current.destroy();
+        chartRef.current = null;
+      }
+      return;
+    }
+
+    // Check if chart needs to be recreated
+    const channelsChanged =
+      channels.length !== channelsRef.current.length ||
+      channels.some((ch, i) => ch !== channelsRef.current[i]);
+
+    const stateRowsChanged =
+      stateRows.length !== stateRowsRef.current.length ||
+      stateRows.some((row, i) => row.channel !== stateRowsRef.current[i]?.channel);
+
+    const needsRecreate = channelsChanged || stateRowsChanged || !chartRef.current;
+
+    if (needsRecreate) {
+      // Need to recreate chart
+      if (chartRef.current) {
+        chartRef.current.destroy();
+      }
+
       stateRowsRef.current = stateRows;
+
+      const opts = buildChartOptions(
+        channels,
+        stateRows.length,
+        containerRef.current.clientWidth,
+        containerRef.current.clientHeight
+      );
 
       chartRef.current = new uPlot(opts, chartData, containerRef.current);
       channelsRef.current = channels;
     } else {
       // Just update data
-      const chart = chartRef.current;
-      const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
-      const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
-
-      // Update stateRowsRef so plugin can access latest state data
       stateRowsRef.current = stateRows;
-
-      chart.setData(chartData);
-
-      if (isZoomedRef.current) {
-        if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
-          chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
-        }
-        if (prevYScale.min !== undefined && prevYScale.max !== undefined) {
-          chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
-        }
-      } else {
-        if (chartData[0] && chartData[0].length > 0) {
-          const xData = chartData[0] as number[];
-          const xMin = Math.min(...xData);
-          const xMax = Math.max(...xData);
-
-          if (manualXRangeRef.current !== null) {
-            const range = manualXRangeRef.current;
-            chart.setScale('x', { min: xMax - range, max: xMax });
-          } else {
-            chart.setScale('x', { min: xMin, max: xMax });
-          }
-
-          let yMin = Infinity;
-          let yMax = -Infinity;
-          for (let i = 1; i < chartData.length; i++) {
-            const yData = chartData[i] as (number | null)[];
-            for (const v of yData) {
-              if (v !== null) {
-                yMin = Math.min(yMin, v);
-                yMax = Math.max(yMax, v);
-              }
-            }
-          }
-          if (yMin !== Infinity && yMax !== -Infinity) {
-            if (manualYScaleRef.current) {
-              chart.setScale('y', manualYScaleRef.current);
-            } else {
-              const padding = (yMax - yMin) * 0.1 || 1;
-              chart.setScale('y', { min: yMin - padding, max: yMax + padding });
-            }
-          }
-        }
-      }
+      updateChartScales(chartRef.current!, chartData);
     }
-  }, [buildChartData, stateRows]);
+  }, [buildChartData, stateRows, buildChartOptions, updateChartScales]);
 
   // Handle resize
   useEffect(() => {

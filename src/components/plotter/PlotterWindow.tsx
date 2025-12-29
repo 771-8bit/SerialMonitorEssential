@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import LineChart, { type StateRow } from './LineChart';
+import LineChart from './LineChart';
+import { StateRow } from './stateTimelinePlugin';
 import './PlotterWindow.css';
 
 // Types matching Rust PlotterDataPayload

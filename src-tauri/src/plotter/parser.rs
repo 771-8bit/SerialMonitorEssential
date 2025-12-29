@@ -58,6 +58,7 @@ impl PlotterParser {
     }
 
     /// Reset parser state (for new session)
+    #[allow(dead_code)] // Used in tests
     pub fn reset(&mut self) {
         self.separator = None;
         self.labels.clear();

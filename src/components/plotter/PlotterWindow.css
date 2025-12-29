@@ -116,69 +116,6 @@
   font-size: 10px;
 }
 
-/* State preview */
-.state-preview {
-  padding: 8px 12px;
-  background: #252526;
-  border-radius: 4px;
-}
-
-.state-preview h2 {
-  margin: 0 0 8px 0;
-  font-size: 12px;
-  color: #888;
-  font-weight: 500;
-}
-
-/* Channel list */
-.channel-list {
-  margin-bottom: 16px;
-}
-
-.channel-list h2 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  color: #888;
-  font-weight: 500;
-}
-
-.channel-items {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.channel-item {
-  display: grid;
-  grid-template-columns: 100px 60px 100px auto;
-  gap: 12px;
-  padding: 8px 12px;
-  background: #2d2d2d;
-  border-radius: 4px;
-  font-size: 13px;
-  align-items: center;
-}
-
-.channel-name {
-  font-weight: 600;
-  color: #4ec9b0;
-}
-
-.channel-type {
-  color: #888;
-  font-size: 11px;
-}
-
-.channel-value {
-  font-family: 'JetBrains Mono', 'Consolas', monospace;
-  color: #ce9178;
-}
-
-.channel-count {
-  color: #666;
-  font-size: 11px;
-}
-
 /* Time info */
 .time-info {
   margin-bottom: 16px;
@@ -187,45 +124,6 @@
   border-radius: 4px;
   font-size: 12px;
   color: #888;
-}
-
-/* Data preview */
-.data-preview {
-  margin-top: 16px;
-}
-
-.data-preview h2 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  color: #888;
-  font-weight: 500;
-}
-
-.data-table {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 16px;
-}
-
-.data-row {
-  display: flex;
-  gap: 8px;
-  padding: 6px 12px;
-  background: #252526;
-  border-radius: 4px;
-  font-family: 'JetBrains Mono', 'Consolas', monospace;
-  font-size: 12px;
-}
-
-.data-channel {
-  color: #4ec9b0;
-  min-width: 100px;
-}
-
-.data-values {
-  color: #9cdcfe;
-  word-break: break-all;
 }
 
 /* No data state */

@@ -66,16 +66,6 @@ impl Default for PlotterConfig {
     }
 }
 
-/// Data point for a numeric channel
-#[allow(dead_code)] // Reserved for future use
-#[derive(Debug, Clone, Serialize)]
-pub struct NumericDataPoint {
-    /// Timestamp in milliseconds
-    pub timestamp_ms: u64,
-    /// Value
-    pub value: f64,
-}
-
 /// Channel information for frontend
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelInfo {
