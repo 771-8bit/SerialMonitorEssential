@@ -61,7 +61,7 @@ class VirtualSender:
         テストデータを送信
         
         Args:
-            mode: テストモード ('stress', 'slow', 'fast', 'plotter')
+            mode: テストモード ('stress', 'slow', 'fast', 'plot:csv', 'plot:label')
             duration: テスト時間（秒）
             on_progress: 進捗コールバック関数
         
@@ -75,14 +75,14 @@ class VirtualSender:
                 self._send_stress(duration, on_progress)
             elif mode == 'slow':
                 self._send_slow(duration, on_progress)
-            elif mode == 'plotter':
+            elif mode == 'plot:csv':
                 self._send_plotter(duration, on_progress)
             elif mode == 'fast':
                 self._send_fast(duration, on_progress)
             elif mode == 'demo':
                 self._send_demo(duration, on_progress)
-            elif mode == 'plotter_fast':
-                self._send_plotter_fast(duration, on_progress)
+            elif mode == 'plot:label':
+                self._send_plotter_label(duration, on_progress)
             else:
                 return VirtualSendResult(
                     success=False,
@@ -252,33 +252,60 @@ class VirtualSender:
         duration: float,
         on_progress: Optional[Callable[[str], None]] = None
     ):
-        """プロッタテスト送信（10Hz CSV）"""
-        # ヘッダー送信
-        header = self.generator.generate_plotter_header()
+        """プロッタテスト送信（10Hz CSV形式、数値+State統合）"""
+        import math
+        import random
+        
+        # ヘッダー送信（State列を追加）
+        header = b"time,sin,cos,random,motor,pump\r\n"
         self.ser.write(header)
+        self.generator.update_checksum(header)
         
         if on_progress:
-            on_progress("Sent header: time,sin,cos,random")
+            on_progress("Sent header: time,sin,cos,random,motor,pump")
 
         start_time = time.time()
         last_send = -0.1
         line_count = 0
+        motor_state = "OFF"
+        pump_state = "OFF"
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= duration:
                 break
 
-            # 100msごと（10Hz）
+            # 100msごと（10Hz）全データを1行で送信
             if elapsed - last_send >= 0.1:
                 last_send = elapsed
-                data = self.generator.generate_plotter_line(elapsed)
+                
+                # Toggle motor state every 3 seconds
+                if int(elapsed) % 6 < 3:
+                    motor_state = "ON"
+                else:
+                    motor_state = "OFF"
+                
+                # Toggle pump state every 5 seconds
+                if int(elapsed) % 10 < 5:
+                    pump_state = "ON"
+                else:
+                    pump_state = "OFF"
+                
+                # 数値データ生成
+                sin_val = math.sin(elapsed * 2 * math.pi / 10) * 50 + 50
+                cos_val = math.cos(elapsed * 2 * math.pi / 10) * 50 + 50
+                rand_val = random.uniform(0, 100)
+                
+                # 全データを1行で送信（数値 + State）
+                line = f"{elapsed:.2f},{sin_val:.2f},{cos_val:.2f},{rand_val:.2f},{motor_state},{pump_state}\r\n"
+                data = line.encode('utf-8')
                 self.ser.write(data)
+                self.generator.update_checksum(data)
                 line_count += 1
 
-                # 10秒ごとに進捗表示
-                if line_count % 100 == 0 and on_progress:
-                    on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
+            # 10秒ごとに進捗表示
+            if line_count % 100 == 0 and line_count > 0 and on_progress:
+                on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
 
             time.sleep(0.01)
 
@@ -308,35 +335,59 @@ class VirtualSender:
                 if line_count % 100 == 0 and on_progress:
                     on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
 
-    def _send_plotter_fast(
+    def _send_plotter_label(
         self,
         duration: float,
         on_progress: Optional[Callable[[str], None]] = None
     ):
-        """高速プロッタテスト送信（1kHz CSV）"""
-        # ヘッダー送信
-        header = self.generator.generate_plotter_header()
-        self.ser.write(header)
+        """ラベル形式プロッタテスト送信（10Hz Labeled形式、数値+State統合）"""
+        import math
+        import random
         
         if on_progress:
-            on_progress("Sent header: time,sin,cos,random (1kHz mode)")
+            on_progress("Sending labeled format: time:X,sin:Y,cos:Z,random:W,motor:STATE,pump:STATE")
 
         start_time = time.time()
-        last_send = -0.001
+        last_send = -0.1
         line_count = 0
+        motor_state = "OFF"
+        pump_state = "OFF"
 
         while True:
             elapsed = time.time() - start_time
             if elapsed >= duration:
                 break
 
-            # 1msごと（1kHz）
-            if elapsed - last_send >= 0.001:
+            # 100msごと（10Hz）全データを1行で送信
+            if elapsed - last_send >= 0.1:
                 last_send = elapsed
-                data = self.generator.generate_plotter_fast_line(elapsed)
+                
+                # Toggle motor state every 3 seconds
+                if int(elapsed) % 6 < 3:
+                    motor_state = "ON"
+                else:
+                    motor_state = "OFF"
+                
+                # Toggle pump state every 5 seconds
+                if int(elapsed) % 10 < 5:
+                    pump_state = "ON"
+                else:
+                    pump_state = "OFF"
+                
+                # 数値データ生成
+                sin_val = math.sin(elapsed * 2 * math.pi / 10) * 50 + 50
+                cos_val = math.cos(elapsed * 2 * math.pi / 10) * 50 + 50
+                rand_val = random.uniform(0, 100)
+                
+                # 全データを1行で送信（数値 + State）
+                line = f"time:{elapsed:.2f},sin:{sin_val:.2f},cos:{cos_val:.2f},random:{rand_val:.2f},motor:{motor_state},pump:{pump_state}\r\n"
+                data = line.encode('utf-8')
                 self.ser.write(data)
+                self.generator.update_checksum(data)
                 line_count += 1
 
-                # 1秒ごとに進捗表示
-                if line_count % 1000 == 0 and on_progress:
-                    on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
+            # 10秒ごとに進捗表示
+            if line_count % 100 == 0 and line_count > 0 and on_progress:
+                on_progress(f"[{int(elapsed):3d}s] Lines: {line_count}, Bytes: {self.generator.total_bytes:,}")
+
+            time.sleep(0.01)

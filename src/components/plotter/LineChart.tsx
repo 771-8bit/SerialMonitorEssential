@@ -26,19 +26,25 @@ const COLORS = [
 interface LineChartProps {
   // Data: { channelName: [[timestamps], [values]] }
   data: Record<string, [number, number][]>;
-  // Time range in seconds (for display width)
-  timeRange?: number;
   // Whether the chart is paused
   isPaused?: boolean;
+  // Callback when visible time range changes (in seconds)
+  onTimeRangeChange?: (min: number, max: number) => void;
 }
 
-export default function LineChart({ data, isPaused = false }: LineChartProps) {
+export default function LineChart({ data, isPaused = false, onTimeRangeChange }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
   const channelsRef = useRef<string[]>([]);
-  const isZoomedRef = useRef(false); // Track if user has drag-zoomed (frozen view)
-  const manualYScaleRef = useRef<{ min: number; max: number } | null>(null); // Track wheel zoom Y scale
-  const manualXRangeRef = useRef<number | null>(null); // Track wheel zoom X range (width in seconds)
+  const isZoomedRef = useRef(false);
+  const manualYScaleRef = useRef<{ min: number; max: number } | null>(null);
+  const manualXRangeRef = useRef<number | null>(null);
+  const onTimeRangeChangeRef = useRef(onTimeRangeChange);
+
+  // Keep ref up to date
+  useEffect(() => {
+    onTimeRangeChangeRef.current = onTimeRangeChange;
+  }, [onTimeRangeChange]);
 
   // Build uPlot data format: [timestamps, ...values]
   const buildChartData = useCallback(() => {
@@ -79,7 +85,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
     return { data: chartData as uPlot.AlignedData, channels };
   }, [data]);
 
-  // Create or update chart
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -121,11 +126,11 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
         series,
         scales: {
           x: {
-            time: false, // We're using seconds, not Unix timestamps
-            auto: false, // Manual scale control for zoom persistence
+            time: false,
+            auto: false,
           },
           y: {
-            auto: false, // Manual scale control for zoom persistence
+            auto: false,
           },
         },
         axes: [
@@ -147,21 +152,32 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
           show: true,
           points: { show: true },
           drag: {
-            x: true, // Enable drag to select X range
-            y: true, // Enable drag to select Y range
-            setScale: true, // Apply zoom on drag release
+            x: true,
+            y: true,
+            setScale: true,
           },
         },
         hooks: {
+          setScale: [
+            (u, key) => {
+              // Notify parent of X scale changes
+              if (key === 'x' && onTimeRangeChangeRef.current) {
+                const xMin = u.scales.x.min;
+                const xMax = u.scales.x.max;
+                if (xMin !== undefined && xMax !== undefined) {
+                  onTimeRangeChangeRef.current(xMin, xMax);
+                }
+              }
+            },
+          ],
           setSelect: [
             () => {
-              isZoomedRef.current = true; // Mark as zoomed when user selects range
+              isZoomedRef.current = true;
             },
           ],
           init: [
             (u) => {
               u.over.addEventListener('dblclick', () => {
-                // Reset zoom flag and manual scales
                 isZoomedRef.current = false;
                 manualYScaleRef.current = null;
                 manualXRangeRef.current = null;
@@ -172,7 +188,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
                   const xMax = Math.max(...xData);
                   u.setScale('x', { min: xMin, max: xMax });
 
-                  // Find Y range from all series
                   let yMin = Infinity;
                   let yMax = -Infinity;
                   for (let i = 1; i < data.length; i++) {
@@ -191,7 +206,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
                 }
               });
 
-              // Add wheel zoom
               u.over.addEventListener('wheel', (e) => {
                 e.preventDefault();
 
@@ -200,11 +214,9 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
                 const xPos = e.clientX - rect.left;
                 const yPos = e.clientY - rect.top;
 
-                // Get current scales
                 const xScale = u.scales.x;
                 const yScale = u.scales.y;
 
-                // Check if scales are properly initialized (handle 0 as valid value)
                 if (
                   xScale.min === undefined ||
                   xScale.max === undefined ||
@@ -213,29 +225,24 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
                 )
                   return;
 
-                // Calculate cursor position in data space
                 const xVal = u.posToVal(xPos, 'x');
                 const yVal = u.posToVal(yPos, 'y');
 
                 if (e.shiftKey) {
-                  // Zoom X axis
                   const xRange = xScale.max - xScale.min;
                   const newRange = xRange * factor;
                   const ratio = (xVal - xScale.min) / xRange;
                   const newMin = xVal - newRange * ratio;
                   const newMax = xVal + newRange * (1 - ratio);
                   u.setScale('x', { min: newMin, max: newMax });
-                  // Save X range width for sliding window behavior
                   manualXRangeRef.current = newRange;
                 } else {
-                  // Zoom Y axis
                   const yRange = yScale.max - yScale.min;
                   const newRange = yRange * factor;
                   const ratio = (yVal - yScale.min) / yRange;
                   const newMin = yVal - newRange * ratio;
                   const newMax = yVal + newRange * (1 - ratio);
                   u.setScale('y', { min: newMin, max: newMax });
-                  // Save manual Y scale for data updates (but keep showing new data)
                   manualYScaleRef.current = { min: newMin, max: newMax };
                 }
               });
@@ -247,7 +254,7 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
       chartRef.current = new uPlot(opts, chartData, containerRef.current);
       channelsRef.current = channels;
     } else {
-      // Just update data, preserving zoom if user has zoomed
+      // Just update data
       const chart = chartRef.current;
       const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
       const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
@@ -255,7 +262,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
       chart.setData(chartData);
 
       if (isZoomedRef.current) {
-        // Restore previous zoom level
         if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
           chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
         }
@@ -263,16 +269,13 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
           chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
         }
       } else {
-        // Auto-scale to new data range
         if (chartData[0] && chartData[0].length > 0) {
           const xData = chartData[0] as number[];
           const xMin = Math.min(...xData);
           const xMax = Math.max(...xData);
 
-          // Use manual X range if set (sliding window follows new data)
           if (manualXRangeRef.current !== null) {
             const range = manualXRangeRef.current;
-            // Slide window to latest data
             chart.setScale('x', { min: xMax - range, max: xMax });
           } else {
             chart.setScale('x', { min: xMin, max: xMax });
@@ -290,7 +293,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
             }
           }
           if (yMin !== Infinity && yMax !== -Infinity) {
-            // Use manual Y scale if set by wheel zoom, otherwise auto-scale
             if (manualYScaleRef.current) {
               chart.setScale('y', manualYScaleRef.current);
             } else {
@@ -301,10 +303,6 @@ export default function LineChart({ data, isPaused = false }: LineChartProps) {
         }
       }
     }
-
-    return () => {
-      // Cleanup on unmount
-    };
   }, [buildChartData]);
 
   // Handle resize

@@ -1,0 +1,9 @@
+.state-timeline {
+    width: 100%;
+    background: #1e1e1e;
+    margin-top: 8px;
+}
+
+.state-timeline canvas {
+    display: block;
+}
