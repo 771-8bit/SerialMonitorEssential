@@ -59,12 +59,7 @@
 }
 
 /* Timestamp Separator */
-.ascii-separator {
-  white-space: pre;
-  user-select: text;
-  color: #6a9955;
-  /* Match timestamp color or use neutral */
-}
+
 
 /* Text Content */
 .ascii-text {

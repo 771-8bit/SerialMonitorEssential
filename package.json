@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"*.{json,js,ts}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{json,js,ts}\"",
+    "lint:css-unused": "node scripts/check-unused-css.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -39,6 +40,7 @@
     "eslint-plugin-react-refresh": "^0.4.26",
     "jsdom": "^27.3.0",
     "prettier": "^3.7.4",
+    "purgecss": "^7.0.2",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.50.1",
     "vite": "^7.0.4",
