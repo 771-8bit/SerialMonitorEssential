@@ -355,9 +355,72 @@ pub enum ChannelType {
 *   **負荷分散:** 受信スレッド（Worker）とは独立して動作し、メインの通信を阻害しない。
 
 ### Tauri Commands & Events
-*   `open_plotter_window`: 新しいプロッタウィンドウを生成する (`WindowBuilder`)。
-*   `get_plotter_data`: フロントエンドからの要求に応じてデータを返す。
-*   `plotter-update`: 高速な更新通知（バイナリイベント推奨）。
+
+| コマンド | 説明 |
+|----------|------|
+| `open_plotter_window` | 新しいプロッタウィンドウを生成 |
+| `get_plotter_data_ranged` | 動的集約APIでデータを取得（推奨） |
+| `start_plotter_thread` | プロッタ解析スレッドを開始 |
+| `stop_plotter_thread` | プロッタ解析スレッドを停止 |
+
+### 動的集約 API
+
+大量のデータを効率的に転送するため、表示範囲のみを抽出し動的に集約するAPIを提供する。
+
+#### リクエスト構造
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct PlotterDataRequest {
+    /// 表示開始時刻（ms）、None = 全データの開始
+    pub time_min_ms: Option<u64>,
+    /// 表示終了時刻（ms）、None = リアルタイム追従
+    pub time_max_ms: Option<u64>,
+    /// 描画領域の幅（ピクセル）
+    pub pixel_width: u32,
+    /// リアルタイム追従モードか
+    pub is_realtime: bool,
+}
+```
+
+#### レスポンス構造
+
+```rust
+#[derive(Debug, Serialize)]
+pub enum AggregatedPoint {
+    /// Average/None モード用の単一値
+    Single { ts: u64, value: f64 },
+    /// MinMax モード用（波形ピーク保持）
+    MinMax { ts: u64, min: f64, max: f64 },
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotterRangedPayload {
+    pub channels: Vec<ChannelInfo>,
+    pub line_data: HashMap<String, Vec<AggregatedPoint>>,
+    pub state_data: HashMap<String, Vec<StateChange>>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub is_aggregated: bool,
+}
+```
+
+#### 集約ロジック
+
+| 条件 | 動作 |
+|------|------|
+| データ数 ≤ target_points × threshold | 集約なし（Single点として返却） |
+| データ数 > target_points × threshold | バケット集約（Average/MinMax） |
+
+- **target_points**: `min(pixel_width, 4000)` でキャップ
+- **threshold**: デフォルト2（Average/MinMax）、10（LTTB）
+
+#### キャッシュ管理
+
+集約結果をキャッシュし、以下の条件で無効化：
+- **リアルタイムモード**: 時間スパンが変化
+- **フリーズモード**: 時間範囲が変化
+- **共通**: ピクセル幅が20%以上変化
 
 ---
 
@@ -396,7 +459,7 @@ type StateTimelinePluginOpts = {
 
 ### パフォーマンス最適化
 *   **Rust側パース:** 文字列処理はすべてRustで行い、フロントエンドへは数値配列のみを渡す。
-*   **時間範囲フィルタリング:** `get_plotter_data(time_min, time_max)`で表示範囲のセグメントのみ返す。
+*   **時間範囲フィルタリング:** `get_plotter_data_ranged` で表示範囲のみ抽出・集約して返す。
 *   **セグメント数制御:** 同一state連続はBackendでマージ済み。
 
 ---
@@ -440,7 +503,7 @@ type StateTimelinePluginOpts = {
 *   **作業内容:** フロントエンドとの通信APIを実装。
 *   **中間確認:**
     *   [x] `open_plotter_window` でウィンドウ表示
-    *   [x] `get_plotter_data` でデータ取得（ポーリング）
+    *   [x] `get_plotter_data_ranged` でデータ取得（動的集約対応）
     *   [x] `start_plotter_thread` / `stop_plotter_thread` でデータフロー制御
 
 #### 7-6. プロッタウィンドウ統合 (基本)
@@ -491,10 +554,15 @@ type StateTimelinePluginOpts = {
 
 #### 7-8. パフォーマンスチューニング
 *   **作業内容:** 高速受信時 (12Mbps) の描画負荷対策。
+*   **実装済み機能:**
+    *   [x] 動的集約API (`get_plotter_data_ranged`) 実装
+    *   [x] ピクセル幅に応じた自動データ削減 (Average/MinMax)
+    *   [x] キャッシュ機構による再計算回避
+    *   [x] フロントエンドからの表示範囲通知 (デバウンス済み)
 *   **中間確認:**
-    *   [ ] 12Mbpsデータ受信中でもUIがフリーズしない
-    *   [ ] 描画がデータの流れに追従する
-    *   [ ] メモリ使用量が一定範囲で安定する
+    *   [x] 12Mbpsデータ受信中でもUIがフリーズしない
+    *   [x] 描画がデータの流れに追従する
+    *   [x] メモリ使用量が一定範囲で安定する
 
 #### 7-9. ドッキングシステム実装 (Frontend)
 *   **作業内容:** メインウィンドウへの埋め込みと切り離しロジックの実装。

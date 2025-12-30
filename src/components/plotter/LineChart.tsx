@@ -65,11 +65,27 @@ export default function LineChart({
   const manualYScaleRef = useRef<{ min: number; max: number } | null>(null);
   const manualXRangeRef = useRef<number | null>(null);
   const onTimeRangeChangeRef = useRef(onTimeRangeChange);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounce delay in ms for time range change notifications
+  const DEBOUNCE_DELAY_MS = 200;
 
   // Keep ref up to date
   useEffect(() => {
     onTimeRangeChangeRef.current = onTimeRangeChange;
   }, [onTimeRangeChange]);
+
+  // Debounced time range change handler
+  const debouncedTimeRangeChange = useCallback((min: number, max: number) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      if (onTimeRangeChangeRef.current) {
+        onTimeRangeChangeRef.current(min, max);
+      }
+    }, DEBOUNCE_DELAY_MS);
+  }, []);
 
   // Build uPlot data format: [timestamps, ...values]
   const buildChartData = useCallback(() => {
@@ -208,11 +224,11 @@ export default function LineChart({
         hooks: {
           setScale: [
             (u, key) => {
-              if (key === 'x' && onTimeRangeChangeRef.current) {
+              if (key === 'x') {
                 const xMin = u.scales.x.min;
                 const xMax = u.scales.x.max;
                 if (xMin !== undefined && xMax !== undefined) {
-                  onTimeRangeChangeRef.current(xMin, xMax);
+                  debouncedTimeRangeChange(xMin, xMax);
                 }
               }
             },
@@ -237,7 +253,7 @@ export default function LineChart({
             : [],
       };
     },
-    [setupEventHandlers]
+    [setupEventHandlers, debouncedTimeRangeChange]
   );
 
   // Update chart scales based on current data and zoom state
@@ -354,6 +370,10 @@ export default function LineChart({
       if (chartRef.current) {
         chartRef.current.destroy();
         chartRef.current = null;
+      }
+      // Clear debounce timer
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
       }
     };
   }, []);

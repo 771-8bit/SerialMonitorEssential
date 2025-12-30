@@ -2,7 +2,7 @@
 mod plotter;
 mod serial;
 
-use plotter::{PlotterDataStore, PlotterThread};
+use plotter::{PlotterDataRequest, PlotterDataStore, PlotterRangedPayload, PlotterThread};
 use serial::SerialState;
 use std::sync::Mutex;
 
@@ -44,7 +44,7 @@ pub fn run() {
             serial::write_dtr,
             serial::write_rts,
             open_plotter_window,
-            get_plotter_data,
+            get_plotter_data_ranged,
             set_plotter_enabled,
             start_plotter_thread,
             stop_plotter_thread
@@ -88,12 +88,13 @@ async fn open_plotter_window(
     Ok(PLOTTER_LABEL.to_string())
 }
 
-/// Get plotter data for frontend
+/// Get ranged plotter data with dynamic aggregation
 #[tauri::command]
-fn get_plotter_data(
+fn get_plotter_data_ranged(
     plotter_state: tauri::State<'_, PlotterState>,
-) -> Result<plotter::PlotterDataPayload, String> {
-    Ok(plotter_state.data_store.get_data_payload())
+    request: PlotterDataRequest,
+) -> Result<PlotterRangedPayload, String> {
+    Ok(plotter_state.data_store.get_ranged_data(&request))
 }
 
 /// Enable or disable plotter data collection

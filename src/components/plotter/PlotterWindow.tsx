@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import LineChart from './LineChart';
 import { StateRow } from './stateTimelinePlugin';
 import './PlotterWindow.css';
 
-// Types matching Rust PlotterDataPayload
+// Types matching Rust PlotterRangedPayload
 interface ChannelInfo {
   name: string;
   channel_type: 'Line' | 'State' | 'Auto';
@@ -18,19 +18,57 @@ interface StateChange {
   state: string;
 }
 
-interface PlotterDataPayload {
+// Aggregated point for dynamic aggregation
+interface AggregatedPoint {
+  type: 'Single' | 'MinMax';
+  ts: number;
+  value?: number;
+  min?: number;
+  max?: number;
+}
+
+interface PlotterRangedPayload {
   channels: ChannelInfo[];
-  line_data: Record<string, [number, number][]>;
+  line_data: Record<string, AggregatedPoint[]>;
   state_data: Record<string, StateChange[]>;
   start_ms: number;
   end_ms: number;
+  is_aggregated: boolean;
+}
+
+interface PlotterDataRequest {
+  time_min_ms: number | null;
+  time_max_ms: number | null;
+  pixel_width: number;
+  is_realtime: boolean;
+}
+
+// Convert aggregated points to simple [timestamp, value] format for LineChart
+function convertAggregatedToSimple(
+  data: Record<string, AggregatedPoint[]>
+): Record<string, [number, number][]> {
+  const result: Record<string, [number, number][]> = {};
+  for (const [channel, points] of Object.entries(data)) {
+    result[channel] = points.map((p) => {
+      if (p.type === 'MinMax') {
+        // For MinMax, use average of min/max for display
+        const avg = ((p.min ?? 0) + (p.max ?? 0)) / 2;
+        return [p.ts, avg];
+      }
+      return [p.ts, p.value ?? 0];
+    });
+  }
+  return result;
 }
 
 export default function PlotterWindow() {
-  const [data, setData] = useState<PlotterDataPayload | null>(null);
+  const [data, setData] = useState<PlotterRangedPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(true);
   const [threadStarted, setThreadStarted] = useState(false);
+
+  // Ref for chart container to get pixel width
+  const chartContainerRef = useRef<HTMLDivElement>(null);
 
   // Start plotter thread on mount
   useEffect(() => {
@@ -52,10 +90,21 @@ export default function PlotterWindow() {
     };
   }, []);
 
-  // Fetch plotter data
+  // Fetch plotter data using new ranged API
   const fetchData = useCallback(async () => {
+    // Get pixel width from chart container
+    const pixelWidth = chartContainerRef.current?.clientWidth ?? 800;
+
+    // Build request - always use null for realtime mode
+    const request: PlotterDataRequest = {
+      time_min_ms: null,
+      time_max_ms: null,
+      pixel_width: pixelWidth,
+      is_realtime: true,
+    };
+
     try {
-      const payload = await invoke<PlotterDataPayload>('get_plotter_data');
+      const payload = await invoke<PlotterRangedPayload>('get_plotter_data_ranged', { request });
       setData(payload);
       setError(null);
     } catch (e) {
@@ -98,6 +147,12 @@ export default function PlotterWindow() {
       return `${seconds}.${Math.floor((ms % 1000) / 100)}s`;
     }
   };
+
+  // Convert aggregated line data to simple format for LineChart
+  const simpleLineData = useMemo(() => {
+    if (!data) return {};
+    return convertAggregatedToSimple(data.line_data);
+  }, [data]);
 
   // Check if we have line data to display
   const hasLineData =
@@ -143,8 +198,8 @@ export default function PlotterWindow() {
         {hasLineData ? (
           <>
             {/* Line Chart (with integrated State Timeline) */}
-            <div className="chart-area">
-              <LineChart data={data!.line_data} isPaused={!isRunning} stateRows={stateRows} />
+            <div className="chart-area" ref={chartContainerRef}>
+              <LineChart data={simpleLineData} isPaused={!isRunning} stateRows={stateRows} />
             </div>
 
             {/* Channel legend */}

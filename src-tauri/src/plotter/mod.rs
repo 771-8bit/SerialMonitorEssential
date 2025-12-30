@@ -6,6 +6,6 @@ mod data_store;
 mod parser;
 mod thread;
 
-pub use data_store::{PlotterDataPayload, PlotterDataStore};
+pub use data_store::{PlotterDataRequest, PlotterDataStore, PlotterRangedPayload};
 pub use parser::PlotterParser;
 pub use thread::PlotterThread;
