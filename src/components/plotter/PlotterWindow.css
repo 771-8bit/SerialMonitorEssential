@@ -99,16 +99,28 @@
   display: flex;
   gap: 8px;
   align-items: center;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition:
+    opacity 0.2s,
+    background 0.2s;
+}
+
+.legend-item:hover {
+  background: #3c3c3c;
+}
+
+.legend-item.hidden {
+  opacity: 0.4;
 }
 
 .legend-name {
-  color: #4ec9b0;
   font-weight: 500;
 }
 
 .legend-value {
   font-family: 'JetBrains Mono', 'Consolas', monospace;
-  color: #ce9178;
 }
 
 .legend-count {
@@ -174,6 +186,32 @@
   content: '';
 }
 
-.version {
-  color: #666;
+/* Aggregation mode dropdown */
+.aggregation-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.aggregation-label {
+  color: #888;
+}
+
+.aggregation-select {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.aggregation-select:hover {
+  border-color: #555;
+}
+
+.aggregation-select:focus {
+  outline: none;
+  border-color: #3b82f6;
 }

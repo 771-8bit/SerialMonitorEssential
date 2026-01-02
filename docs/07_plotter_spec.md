@@ -136,9 +136,10 @@ pub enum ChannelValue {
 
 | 手法 | 説明 |
 |------|------|
-| **LTTB (Largest Triangle Three Buckets)** | 波形の特徴を維持したダウンサンプリング |
-| **Min-Max** | 各バケット内の最小・最大を描画 |
-| **平均値** | 各バケットの平均を描画 |
+| **LTTB (Largest Triangle Three Buckets)** | 波形の特徴を維持したダウンサンプリング。各バケットから最も特徴的なポイントを選択 |
+| **Average (平均 + Min/Max バンド)** | 各バケットの min/max を帯として描画し、中央線として平均値を表示 |
+
+**モード切替:** データ受信中でも LTTB ↔ Average を即座に切替可能。内部で全統計値（min/max/avg）を保持するため、データの再構築は不要。
 
 ### UI レイアウト
 
@@ -284,75 +285,101 @@ pub enum ChannelValue {
 |------|------|
 | **チャンネル選択** | 表示するチャンネルを選択（チェックボックス） |
 | **Line/State振り分け** | 各チャンネルをLine ChartかState Timelineに振り分け |
-| **間引きモード** | `Average` (平均) / `MinMax` (最大最小) / `LTTB` (特徴維持) を選択可能 |
+| **間引きモード** | `Average` (平均+min/maxバンド) / `LTTB` (特徴維持) を選択可能 |
 
 ---
-
-## バックエンド実装
 
 ## バックエンド実装
 
 ### データストア設計
 
 ```rust
-/// プロッタ用のデータストア
-pub struct PlotterDataStore {
-    /// チャンネル定義（ラベル → インデックス）
-    channels: HashMap<String, usize>,
+/// プロッタ用のデータ集約ストア
+/// メモリ制限付きでデータを保持し、表示時に動的集約を行う
+pub struct PlotterAggregator {
+    /// 3バッファ設計：
+    /// - history: 確定済み履歴（AggregatedBucket形式）
+    /// - buffer: 中間バッファ（AggregatedBucket形式）
+    /// - raw_buffer: 未集約の生データ
     
-    /// ライン用データバッファ（リングバッファ）
-    /// 高速アクセスのため、各チャンネルごとに独立したバッファを持つ
-    line_data: HashMap<usize, RingBuffer<(u64, f64)>>,
+    history: HashMap<String, Vec<AggregatedBucket>>,
+    buffer: HashMap<String, Vec<AggregatedBucket>>,
+    raw_buffer: HashMap<String, VecDeque<(u64, f64)>>,
+    
+    /// 現在の集約レベル（1 = 未圧縮、レベルアップごとに2倍）
+    current_level: usize,
     
     /// ステート用データ（状態変化リスト）
-    state_data: HashMap<usize, Vec<StateChange>>,
+    state_data: HashMap<String, Vec<StateChange>>,
     
     /// 設定
     config: PlotterConfig,
 }
 
-/// 状態変化
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StateChange {
-    pub start_ms: u64,
-    pub end_ms: Option<u64>,  // None means ongoing
-    pub state: String,
+/// モード非依存の集約バケット
+/// 全統計値を保持することで、表示時に LTTB/Average を即座に切替可能
+#[derive(Debug, Clone)]
+struct AggregatedBucket {
+    ts: u64,      // タイムスタンプ（バケット開始時刻）
+    min: f64,     // 最小値
+    max: f64,     // 最大値
+    avg: f64,     // 平均値
+    count: usize, // 生ポイント数（加重平均計算用）
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlotterConfig {
-    /// 保持するポイント数
-    /// フルスクリーン表示時に十分なデータ密度を確保するため10000を推奨
-    /// 全データから間引いて表示するため、メモリ使用量は制限される
-    pub max_points: usize,  // デフォルト: 10000
-    
-    /// チャンネルタイプ設定
-    pub channel_types: HashMap<String, ChannelType>,
-
-    /// 間引きモード
-    pub aggregation_mode: AggregationMode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AggregationMode {
-    Average,
-    MinMax,
-    LTTB,
-    None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChannelType {
-    Line,
-    State,
-    Auto,
+impl AggregatedBucket {
+    /// 集約モードに応じてAggregatedPointに変換
+    fn to_point(&self, mode: &AggregationMode) -> AggregatedPoint {
+        match mode {
+            AggregationMode::Lttb => AggregatedPoint::Single {
+                ts: self.ts,
+                value: self.avg,  // LTTBは平均値を使用
+            },
+            AggregationMode::Average => AggregatedPoint::MinMax {
+                ts: self.ts,
+                min: self.min,
+                max: self.max,
+            },
+        }
+    }
 }
 ```
 
+**3バッファ設計のフロー:**
+```text
+1. 新データ → raw_buffer に追加
+
+2. raw_buffer が bucket_size に達したら:
+   ┌─────────────────────────────────────────┐
+   │  raw_buffer から bucket_size 個を取出   │
+   │  ↓                                      │
+   │  AggregatedBucket に集約（min/max/avg）  │
+   │  ↓                                      │
+   │  buffer に追加                           │
+   └─────────────────────────────────────────┘
+
+3. history + buffer が max_points を超えたら:
+   ┌─────────────────────────────────────────┐
+   │  history + buffer を結合・再集約         │
+   │  ↓                                      │
+   │  新しい history として保存               │
+   │  ↓                                      │
+   │  current_level *= 2                      │
+   └─────────────────────────────────────────┘
+```
+
+**設計の特徴:**
+- **モード非依存ストレージ**: min/max/avg/count を全て保持
+- **即座のモード切替**: `to_point(mode)` で表示時に変換
+- **精度維持**: 加重平均で再集約時も精度を保持
+- **バッチ処理対応**: 高速データ受信に対応（1000行/秒以上）
+
 ### 解析スレッド (Parser Thread)
-*   **役割:** メインの `DataStore` から新しいデータを読み出し、行ごとにパースして `PlotterDataStore` に格納する。
-*   **同期:** イベント駆動方式を採用。メインストアへの通知機構を追加し、新規データ到着時にイベントを発火する。
-*   **負荷分散:** 受信スレッド（Worker）とは独立して動作し、メインの通信を阻害しない。
+
+*   **役割:** メインの `DataStore` から新しいデータを読み出し、行ごとにパースして `PlotterAggregator` に格納する。
+*   **バッチ処理:** 全データを一括読み込み・一括追加でロック取得オーバーヘッドを最小化。
+*   **負荷分散:** 受信スレッドとは独立して動作し、メインの通信を阻害しない。
+
 
 ### Tauri Commands & Events
 
@@ -547,10 +574,8 @@ type StateTimelinePluginOpts = {
 #### 7-7. 設定UI実装 (Frontend)
 *   **作業内容:** チャンネル選択、表示設定等のUI。
 *   **中間確認:**
-    *   [ ] チャンネル選択UIが表示される
-    *   [ ] 表示時間幅を変更できる
-    *   [ ] Y軸レンジを変更できる
-    *   [ ] 間引きモードを変更できる (Average/MinMax/LTTB)
+    *   [x] チャンネル選択UIが表示される（凡例クリックで表示/非表示トグル）
+    *   [x] 間引きモードを変更できる (Average/MinMax/LTTB)
 
 #### 7-8. パフォーマンスチューニング
 *   **作業内容:** 高速受信時 (12Mbps) の描画負荷対策。

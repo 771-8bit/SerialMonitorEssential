@@ -29,6 +29,35 @@ def find_process(process_name="tauri-appserial-monitor-essential"):
     return None
 
 
+def get_process_role(proc, is_main=False):
+    """プロセスの役割を特定する"""
+    if is_main:
+        return "Backend (Main)"
+    
+    try:
+        name = proc.name()
+        cmdline = proc.cmdline()
+        cmdline_str = " ".join(cmdline).lower()
+        
+        if "msedgewebview2" in name.lower():
+            if "--type=renderer" in cmdline_str:
+                return "Frontend (Renderer)"
+            elif "--type=gpu-process" in cmdline_str:
+                return "Frontend (GPU)"
+            elif "--type=utility" in cmdline_str:
+                return "WebView Utility"
+            elif "--type=crashpad-handler" in cmdline_str:
+                return "Crash Handler"
+            elif "--extension-process" in cmdline_str:
+                return "Extension"
+            else:
+                return "WebView Process"
+        
+        return "Child Process"
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return "Unknown"
+
+
 def format_mb(bytes_value):
     """バイトをMBに変換してフォーマット"""
     return round(bytes_value / (1024 * 1024), 2)
@@ -58,9 +87,15 @@ def main():
     )
     parser.add_argument(
         '--output',
+        '--o',
         type=str,
         default=None,
         help='Output CSV file (default: memory_log_YYYYMMDD_HHMMSS.csv)'
+    )
+    parser.add_argument(
+        '--detailed',
+        action='store_true',
+        help='Show detailed memory usage per process'
     )
     
     args = parser.parse_args()
@@ -105,7 +140,7 @@ def main():
     # CSV準備
     csv_file = open(output_file, 'w', newline='')
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(['Timestamp', 'WorkingSet(MB)', 'PrivateBytes(MB)', 'VirtualMemory(MB)'])
+    csv_writer.writerow(['Timestamp', 'Total_WorkingSet(MB)', 'Total_PrivateBytes(MB)', 'Total_VirtualMemory(MB)', 'Process_Count'])
     
     start_time = datetime.now()
     end_time = start_time + timedelta(minutes=args.duration)
@@ -117,22 +152,59 @@ def main():
     try:
         while datetime.now() < end_time:
             try:
-                # メモリ情報取得
-                mem_info = proc.memory_info()
-                ws = format_mb(mem_info.rss)  # Working Set (Resident Set Size)
-                pb = format_mb(mem_info.private)  # Private Bytes
-                vm = format_mb(mem_info.vms)  # Virtual Memory
+                # メモリ情報取得 (子プロセス含む)
+                children = proc.children(recursive=True)
+                
+                total_rss = proc.memory_info().rss
+                try:
+                    total_private = proc.memory_info().private
+                except AttributeError:
+                    # Windowsではprivateが取得できない場合があるためrss等で代用等はせず、0またはrssを使う等の判断が必要だが
+                    # psutilのバージョンによってはprivateが無い場合もある。
+                    # しかしWindows環境前提で前のコードでprivate使っていたのでそのまま行く。
+                    # 万が一取得できない場合は0にするなど安全策をとる。
+                    total_private = getattr(proc.memory_info(), 'private', 0)
+                
+                total_vms = proc.memory_info().vms
+                
+                child_count = 0
+                details = []
+                
+                # Main process details
+                rss_mb = format_mb(proc.memory_info().rss)
+                details.append(f"  [{get_process_role(proc, is_main=True)}] PID: {proc.pid}, WS: {rss_mb} MB")
+
+                for child in children:
+                    try:
+                        mem = child.memory_info()
+                        total_rss += mem.rss
+                        total_private += getattr(mem, 'private', 0)
+                        total_vms += mem.vms
+                        child_count += 1
+                        
+                        role = get_process_role(child)
+                        details.append(f"  [{role}] PID: {child.pid}, WS: {format_mb(mem.rss)} MB")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                ws = format_mb(total_rss)  # Working Set
+                pb = format_mb(total_private)  # Private Bytes
+                vm = format_mb(total_vms)  # Virtual Memory
                 
                 # CSV書き込み
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                csv_writer.writerow([current_time, ws, pb, vm])
+                csv_writer.writerow([current_time, ws, pb, vm, child_count + 1])
                 csv_file.flush()
                 
                 # コンソール出力
                 elapsed = (datetime.now() - start_time).total_seconds() / 60
                 elapsed_min = int(elapsed)
                 elapsed_sec = int((elapsed % 1) * 60)
-                print(f"[{elapsed_min:02d}:{elapsed_sec:02d}] WS: {ws} MB, Private: {pb} MB, Virtual: {vm} MB")
+                print(f"[{elapsed_min:02d}:{elapsed_sec:02d}] Total WS: {ws} MB, Private: {pb} MB (Procs: {child_count + 1})")
+                
+                if args.detailed:
+                    print("\n".join(details))
+                    print("-" * 40)
                 
                 # 統計用に保存
                 ws_values.append(ws)

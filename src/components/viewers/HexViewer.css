@@ -20,16 +20,6 @@
   min-height: 0;
 }
 
-.hex-header {
-  display: flex;
-  padding: 8px 8px;
-  background-color: #2d2d2d;
-  border-bottom: 1px solid #3c3c3c;
-  color: #808080;
-  font-weight: 600;
-  user-select: none;
-}
-
 .hex-row {
   display: flex;
   padding: 0 8px;

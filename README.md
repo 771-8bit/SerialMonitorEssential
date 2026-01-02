@@ -36,6 +36,9 @@ npm install
 # 開発モードで起動
 npm run tauri dev
 
+# デバッグログあり
+RUST_LOG=debug npm run tauri dev
+
 # ビルド
 npm run tauri build
 ```

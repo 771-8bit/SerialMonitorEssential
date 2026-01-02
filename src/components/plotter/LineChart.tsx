@@ -3,36 +3,23 @@ import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { stateTimelinePlugin, calculateStateTimelineHeight, StateRow } from './stateTimelinePlugin';
 import './LineChart.css';
+import { COLORS } from './chartColors';
 
-// Channel colors (16 max)
-const COLORS = [
-  '#3b82f6',
-  '#ef4444',
-  '#22c55e',
-  '#f59e0b',
-  '#8b5cf6',
-  '#ec4899',
-  '#06b6d4',
-  '#84cc16',
-  '#f97316',
-  '#6366f1',
-  '#14b8a6',
-  '#eab308',
-  '#a855f7',
-  '#f43f5e',
-  '#0ea5e9',
-  '#10b981',
-];
+import type { MinMaxBandData } from './PlotterWindow';
 
 interface LineChartProps {
   // Data: { channelName: [[timestamps], [values]] }
   data: Record<string, [number, number][]>;
+  // MinMax band data for channels (optional, for MinMax aggregation mode)
+  bandData?: Record<string, MinMaxBandData>;
   // Whether the chart is paused
   isPaused?: boolean;
   // State timeline rows to display below the chart
   stateRows?: StateRow[];
   // Callback when visible time range changes (in seconds)
   onTimeRangeChange?: (min: number, max: number) => void;
+  // Channels to hide from the chart
+  hiddenChannels?: Set<string>;
 }
 
 /** Calculate Y-axis range from chart data */
@@ -53,9 +40,11 @@ function calculateYRange(chartData: uPlot.AlignedData): { yMin: number; yMax: nu
 
 export default function LineChart({
   data,
+  bandData = {},
   isPaused = false,
   stateRows = [],
   onTimeRangeChange,
+  hiddenChannels = new Set(),
 }: LineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
@@ -87,15 +76,100 @@ export default function LineChart({
     }, DEBOUNCE_DELAY_MS);
   }, []);
 
+  // Ref for band data (updated each render, used by plugin)
+  const bandDataRef = useRef<Record<string, MinMaxBandData>>(bandData);
+  useEffect(() => {
+    bandDataRef.current = bandData;
+  }, [bandData]);
+
+  // MinMax band drawing plugin - draws filled areas for min/max ranges
+  const minMaxBandPlugin = useCallback(
+    (getChannels: () => string[], getAllChannels: () => string[]): uPlot.Plugin => {
+      return {
+        hooks: {
+          draw: (u: uPlot) => {
+            const ctx = u.ctx;
+            const bands = bandDataRef.current;
+            const channels = getChannels();
+            const allChannels = getAllChannels();
+
+            if (!bands || Object.keys(bands).length === 0) return;
+
+            ctx.save();
+
+            // Clip to plot area
+            const plotLeft = u.bbox.left;
+            const plotTop = u.bbox.top;
+            const plotWidth = u.bbox.width;
+            const plotHeight = u.bbox.height;
+            ctx.beginPath();
+            ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
+            ctx.clip();
+
+            // Draw bands for each channel with band data
+            for (const channel of channels) {
+              const band = bands[channel];
+              if (!band || band.timestamps.length === 0) continue;
+
+              // Get channel color with transparency
+              const colorIndex = allChannels.indexOf(channel);
+              const color = COLORS[colorIndex % COLORS.length];
+              // Convert hex to rgba with 0.2 alpha
+              const r = parseInt(color.slice(1, 3), 16);
+              const g = parseInt(color.slice(3, 5), 16);
+              const b = parseInt(color.slice(5, 7), 16);
+              ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.25)`;
+
+              // Draw filled area between min and max
+              ctx.beginPath();
+
+              // Forward path (min values, left to right)
+              let started = false;
+              for (let i = 0; i < band.timestamps.length; i++) {
+                const x = u.valToPos(band.timestamps[i] / 1000, 'x', true);
+                const y = u.valToPos(band.min[i], 'y', true);
+                if (!isFinite(x) || !isFinite(y)) continue;
+                if (!started) {
+                  ctx.moveTo(x, y);
+                  started = true;
+                } else {
+                  ctx.lineTo(x, y);
+                }
+              }
+
+              // Backward path (max values, right to left)
+              for (let i = band.timestamps.length - 1; i >= 0; i--) {
+                const x = u.valToPos(band.timestamps[i] / 1000, 'x', true);
+                const y = u.valToPos(band.max[i], 'y', true);
+                if (!isFinite(x) || !isFinite(y)) continue;
+                ctx.lineTo(x, y);
+              }
+
+              ctx.closePath();
+              ctx.fill();
+            }
+
+            ctx.restore();
+          },
+        },
+      };
+    },
+    []
+  );
+
   // Build uPlot data format: [timestamps, ...values]
   const buildChartData = useCallback(() => {
-    const channels = Object.keys(data).sort();
-    if (channels.length === 0) {
-      return { data: [[]] as uPlot.AlignedData, channels: [] };
+    // Get all channels sorted (for consistent color indexing)
+    const allChannels = Object.keys(data).sort();
+    // Filter out hidden channels for display
+    const visibleChannels = allChannels.filter((ch) => !hiddenChannels.has(ch));
+
+    if (visibleChannels.length === 0) {
+      return { data: [[]] as uPlot.AlignedData, channels: [], allChannels };
     }
 
     const timestampSet = new Set<number>();
-    for (const channel of channels) {
+    for (const channel of visibleChannels) {
       const points = data[channel];
       for (const [t] of points) {
         timestampSet.add(t);
@@ -104,12 +178,12 @@ export default function LineChart({
     const timestamps = Array.from(timestampSet).sort((a, b) => a - b);
 
     if (timestamps.length === 0) {
-      return { data: [[]] as uPlot.AlignedData, channels: [] };
+      return { data: [[]] as uPlot.AlignedData, channels: [], allChannels };
     }
 
     const chartData: (number | null)[][] = [timestamps.map((t) => t / 1000)];
 
-    for (const channel of channels) {
+    for (const channel of visibleChannels) {
       const points = data[channel];
       const valueMap = new Map<number, number>();
       for (const [t, v] of points) {
@@ -119,8 +193,8 @@ export default function LineChart({
       chartData.push(values);
     }
 
-    return { data: chartData as uPlot.AlignedData, channels };
-  }, [data]);
+    return { data: chartData as uPlot.AlignedData, channels: visibleChannels, allChannels };
+  }, [data, hiddenChannels]);
 
   // Setup event handlers for the chart
   const setupEventHandlers = useCallback((u: uPlot) => {
@@ -189,18 +263,51 @@ export default function LineChart({
 
   // Build chart options
   const buildChartOptions = useCallback(
-    (channels: string[], stateRowCount: number, width: number, height: number): uPlot.Options => {
+    (
+      channels: string[],
+      allChannels: string[],
+      stateRowCount: number,
+      width: number,
+      height: number
+    ): uPlot.Options => {
       const series: uPlot.Series[] = [
         { label: 'Time' },
-        ...channels.map((ch, i) => ({
-          label: ch,
-          stroke: COLORS[i % COLORS.length],
-          width: 2,
-          spanGaps: true,
-        })),
+        ...channels.map((ch) => {
+          // Use index in allChannels for consistent coloring
+          const colorIndex = allChannels.indexOf(ch);
+          return {
+            label: ch,
+            stroke: COLORS[colorIndex % COLORS.length],
+            width: 2,
+            spanGaps: true,
+          };
+        }),
       ];
 
       const stateTimelineHeight = calculateStateTimelineHeight(stateRowCount);
+
+      // Build plugins array
+      const plugins: uPlot.Plugin[] = [];
+
+      // Add MinMax band plugin (draws before lines, so bands are behind)
+      plugins.push(
+        minMaxBandPlugin(
+          () => channelsRef.current,
+          () => Object.keys(data).sort()
+        )
+      );
+
+      // Add state timeline plugin if needed
+      if (stateRowCount > 0) {
+        plugins.push(
+          stateTimelinePlugin({
+            getRows: () => stateRowsRef.current,
+            rowHeight: 24,
+            rowGap: 2,
+            showLabel: true,
+          })
+        );
+      }
 
       return {
         width,
@@ -240,20 +347,10 @@ export default function LineChart({
           ],
           init: [(u) => setupEventHandlers(u)],
         },
-        plugins:
-          stateRowCount > 0
-            ? [
-                stateTimelinePlugin({
-                  getRows: () => stateRowsRef.current,
-                  rowHeight: 24,
-                  rowGap: 2,
-                  showLabel: true,
-                }),
-              ]
-            : [],
+        plugins,
       };
     },
-    [setupEventHandlers, debouncedTimeRangeChange]
+    [setupEventHandlers, debouncedTimeRangeChange, minMaxBandPlugin, data]
   );
 
   // Update chart scales based on current data and zoom state
@@ -300,7 +397,7 @@ export default function LineChart({
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const { data: chartData, channels } = buildChartData();
+    const { data: chartData, channels, allChannels } = buildChartData();
 
     // If no data or no channels, destroy chart
     if (channels.length === 0 || chartData[0].length === 0) {
@@ -332,6 +429,7 @@ export default function LineChart({
 
       const opts = buildChartOptions(
         channels,
+        allChannels,
         stateRows.length,
         containerRef.current.clientWidth,
         containerRef.current.clientHeight

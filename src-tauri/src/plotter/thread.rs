@@ -2,7 +2,8 @@
 //
 // Reads new data from the main DataStore and parses it into plotter data points.
 
-use crate::plotter::{PlotterDataStore, PlotterParser};
+use crate::plotter::parser::ParsedDataPoint;
+use crate::plotter::{PlotterAggregator, PlotterParser};
 use crate::serial::data_store::DataStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,13 +19,13 @@ pub struct PlotterThread {
 }
 
 impl PlotterThread {
-    /// Start a new plotter thread
-    pub fn start(data_store: Arc<DataStore>, plotter_store: PlotterDataStore) -> Self {
+    /// Start a new plotter thread with PlotterAggregator
+    pub fn start(data_store: Arc<DataStore>, aggregator: PlotterAggregator) -> Self {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
 
         let handle = thread::spawn(move || {
-            Self::run(data_store, plotter_store, stop_flag_clone);
+            Self::run(data_store, aggregator, stop_flag_clone);
         });
 
         Self {
@@ -42,17 +43,13 @@ impl PlotterThread {
     }
 
     /// Main thread loop
-    fn run(
-        data_store: Arc<DataStore>,
-        plotter_store: PlotterDataStore,
-        stop_flag: Arc<AtomicBool>,
-    ) {
+    fn run(data_store: Arc<DataStore>, aggregator: PlotterAggregator, stop_flag: Arc<AtomicBool>) {
         let mut parser = PlotterParser::new();
         let mut last_processed_offset: u64 = 0;
         let start_time = Instant::now();
 
-        // Buffer size for reading data
-        const READ_BUFFER_SIZE: u32 = 4096;
+        // Maximum buffer size for a single read (1MB) - safety limit
+        const MAX_READ_SIZE: u64 = 1024 * 1024;
 
         loop {
             if stop_flag.load(Ordering::SeqCst) {
@@ -63,8 +60,8 @@ impl PlotterThread {
             let total_bytes = data_store.total_bytes();
 
             if total_bytes > last_processed_offset {
-                let bytes_to_read =
-                    (total_bytes - last_processed_offset).min(READ_BUFFER_SIZE as u64) as u32;
+                // Read ALL available data at once (up to MAX_READ_SIZE for safety)
+                let bytes_to_read = (total_bytes - last_processed_offset).min(MAX_READ_SIZE) as u32;
 
                 // Read new data from data store
                 if let Ok(data) = data_store.get_data(last_processed_offset, bytes_to_read) {
@@ -72,14 +69,12 @@ impl PlotterThread {
                         // Calculate timestamp (ms since start)
                         let timestamp_ms = start_time.elapsed().as_millis() as u64;
 
-                        // Parse the data
-                        let data_points = parser.parse(&data, timestamp_ms);
+                        // Parse all the data at once
+                        let data_points: Vec<ParsedDataPoint> = parser.parse(&data, timestamp_ms);
 
-                        // Add to plotter store
-                        for point in data_points {
-                            for (channel, value) in point.channels {
-                                plotter_store.add_data_point(&channel, point.timestamp_ms, value);
-                            }
+                        // Add all points in a single batch
+                        if !data_points.is_empty() {
+                            aggregator.add_data_points_batch(data_points);
                         }
 
                         last_processed_offset += data.len() as u64;

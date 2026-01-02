@@ -2,13 +2,16 @@
 mod plotter;
 mod serial;
 
-use plotter::{PlotterDataRequest, PlotterDataStore, PlotterRangedPayload, PlotterThread};
+use plotter::{
+    AggregationMode, PlotterAggregator, PlotterDataRequest, PlotterRangedPayload, PlotterThread,
+};
 use serial::SerialState;
 use std::sync::Mutex;
 
 /// Plotter state accessible across the application
 pub struct PlotterState {
-    pub data_store: PlotterDataStore,
+    /// Data aggregator for plotter (stores all parsed data with lazy aggregation)
+    pub aggregator: PlotterAggregator,
     pub thread: Mutex<Option<PlotterThread>>,
 }
 
@@ -26,7 +29,7 @@ pub fn run() {
             data_store: Mutex::new(None),
         })
         .manage(PlotterState {
-            data_store: PlotterDataStore::new(),
+            aggregator: PlotterAggregator::new(),
             thread: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +49,7 @@ pub fn run() {
             open_plotter_window,
             get_plotter_data_ranged,
             set_plotter_enabled,
+            set_aggregation_mode,
             start_plotter_thread,
             stop_plotter_thread
         ])
@@ -71,8 +75,8 @@ async fn open_plotter_window(
         return Ok(PLOTTER_LABEL.to_string());
     }
 
-    // Enable plotter data store
-    plotter_state.data_store.set_enabled(true);
+    // Enable plotter aggregator
+    plotter_state.aggregator.set_enabled(true);
 
     // Create new window
     let _window =
@@ -94,7 +98,7 @@ fn get_plotter_data_ranged(
     plotter_state: tauri::State<'_, PlotterState>,
     request: PlotterDataRequest,
 ) -> Result<PlotterRangedPayload, String> {
-    Ok(plotter_state.data_store.get_ranged_data(&request))
+    Ok(plotter_state.aggregator.get_ranged_data(&request))
 }
 
 /// Enable or disable plotter data collection
@@ -103,7 +107,18 @@ fn set_plotter_enabled(
     plotter_state: tauri::State<'_, PlotterState>,
     enabled: bool,
 ) -> Result<(), String> {
-    plotter_state.data_store.set_enabled(enabled);
+    plotter_state.aggregator.set_enabled(enabled);
+    Ok(())
+}
+
+/// Set the aggregation mode for downsampling
+#[tauri::command]
+fn set_aggregation_mode(
+    plotter_state: tauri::State<'_, PlotterState>,
+    mode: AggregationMode,
+) -> Result<(), String> {
+    plotter_state.aggregator.set_aggregation_mode(mode);
+    log::info!("[set_aggregation_mode] Mode changed");
     Ok(())
 }
 
@@ -126,11 +141,11 @@ fn start_plotter_thread(
     }
 
     // Clear old data and enable
-    plotter_state.data_store.clear();
-    plotter_state.data_store.set_enabled(true);
+    plotter_state.aggregator.clear();
+    plotter_state.aggregator.set_enabled(true);
 
     // Start new plotter thread
-    let thread = PlotterThread::start(data_store.clone(), plotter_state.data_store.clone());
+    let thread = PlotterThread::start(data_store.clone(), plotter_state.aggregator.clone());
 
     {
         let mut thread_guard = plotter_state.thread.lock().map_err(|e| e.to_string())?;

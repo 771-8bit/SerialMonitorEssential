@@ -1,5 +1,6 @@
 # よく使うプロンプト集
 ## Continuous
+```
 npm run lint
 npm run lint:css-unused
 npm run type-check
@@ -9,6 +10,7 @@ cargo fmt
 cargo clippy
 cargo test
 cargo check
+```
 このエラーを修正してください
 
 npm run test:coverage
@@ -30,6 +32,12 @@ docsフォルダを読み，実際のコードと見比べ，記述を追記編�
 実装計画について，対応が完了しているドキュメントは削除してください．今後実装が必要なものの計画は残してください．
 実装計画ではなくリポジトリの説明をしているドキュメントは現在のコードに整合させてください．
 複数のドキュメントに同じ内容が記述されている場合は，一つにまとめてください．
+
+```
+npx license-checker --production --markdown | grep -v "\[tauri-appserial-monitor-essential@" > docs/THIRD_PARTY_NPM.md
+cd srt-tauri
+cargo about generate about.hbs > ../docs/THIRD_PARTY_RUST.md
+```
 
 ## 要件定義時
 この内容のAIコーディングエージェントへの実装指示書を書いてください．

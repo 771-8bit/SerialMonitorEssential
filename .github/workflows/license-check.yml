@@ -1,0 +1,82 @@
+name: License Check
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'package-lock.json'
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/about.toml'
+      - 'src-tauri/about.hbs'
+      - 'docs/THIRD_PARTY_*.md'
+      - '.github/workflows/license-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'package-lock.json'
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/about.toml'
+      - 'src-tauri/about.hbs'
+      - 'docs/THIRD_PARTY_*.md'
+
+jobs:
+  check-licenses:
+    name: Verify License Files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about
+        run: cargo install cargo-about
+
+      - name: Install npm dependencies
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
+
+      - name: Generate npm license file
+        run: npx license-checker --production --markdown > docs/THIRD_PARTY_NPM_GENERATED.md
+
+      - name: Generate Rust license file
+        run: |
+          cd src-tauri
+          cargo about generate about.hbs > ../docs/THIRD_PARTY_RUST_GENERATED.md
+
+      - name: Compare npm license file
+        run: |
+          if ! diff -q docs/THIRD_PARTY_NPM.md docs/THIRD_PARTY_NPM_GENERATED.md > /dev/null 2>&1; then
+            echo "::error::docs/THIRD_PARTY_NPM.md is outdated!"
+            echo ""
+            echo "Please run the following command and commit the changes:"
+            echo "  npx license-checker --production --markdown > docs/THIRD_PARTY_NPM.md"
+            echo ""
+            echo "Diff:"
+            diff docs/THIRD_PARTY_NPM.md docs/THIRD_PARTY_NPM_GENERATED.md || true
+            exit 1
+          fi
+          echo "✓ docs/THIRD_PARTY_NPM.md is up to date"
+
+      - name: Compare Rust license file
+        run: |
+          if ! diff -q docs/THIRD_PARTY_RUST.md docs/THIRD_PARTY_RUST_GENERATED.md > /dev/null 2>&1; then
+            echo "::error::docs/THIRD_PARTY_RUST.md is outdated!"
+            echo ""
+            echo "Please run the following commands and commit the changes:"
+            echo "  cd src-tauri"
+            echo "  cargo about generate about.hbs > ../docs/THIRD_PARTY_RUST.md"
+            echo ""
+            echo "Diff:"
+            diff docs/THIRD_PARTY_RUST.md docs/THIRD_PARTY_RUST_GENERATED.md || true
+            exit 1
+          fi
+          echo "✓ docs/THIRD_PARTY_RUST.md is up to date"
