@@ -8,6 +8,6 @@ mod parser;
 mod thread;
 
 pub use aggregator::PlotterAggregator;
-pub use data_store::{AggregationMode, PlotterDataRequest, PlotterRangedPayload};
+pub use data_store::{AggregationMode, PlotterChartPayload, PlotterDataRequest};
 pub use parser::PlotterParser;
 pub use thread::PlotterThread;

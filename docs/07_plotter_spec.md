@@ -61,6 +61,8 @@ pub struct ParsedDataPoint {
     pub timestamp_ms: u64,
     /// チャンネルデータ（ラベル → 値）
     pub channels: HashMap<String, ChannelValue>,
+    /// チャンネル順序（CSV列順を保持）
+    pub channel_order: Vec<String>,
 }
 
 /// チャンネル値（数値または状態）
@@ -320,7 +322,7 @@ pub struct PlotterAggregator {
 /// 全統計値を保持することで、表示時に LTTB/Average を即座に切替可能
 #[derive(Debug, Clone)]
 struct AggregatedBucket {
-    ts: u64,      // タイムスタンプ（バケット開始時刻）
+    ts: u64,      // タイムスタンプ（バケット内の先頭/末尾の平均）
     min: f64,     // 最小値
     max: f64,     // 最大値
     avg: f64,     // 平均値
@@ -386,13 +388,14 @@ impl AggregatedBucket {
 | コマンド | 説明 |
 |----------|------|
 | `open_plotter_window` | 新しいプロッタウィンドウを生成 |
-| `get_plotter_data_ranged` | 動的集約APIでデータを取得（推奨） |
+| `get_plotter_chart_data` | uPlot形式でデータを取得（推奨） |
 | `start_plotter_thread` | プロッタ解析スレッドを開始 |
 | `stop_plotter_thread` | プロッタ解析スレッドを停止 |
 
 ### 動的集約 API
 
 大量のデータを効率的に転送するため、表示範囲のみを抽出し動的に集約するAPIを提供する。
+フロントエンドでのデータ変換を不要にするため、uPlot形式で直接返却する。
 
 #### リクエスト構造
 
@@ -410,27 +413,50 @@ pub struct PlotterDataRequest {
 }
 ```
 
-#### レスポンス構造
+#### レスポンス構造（uPlot形式）
 
 ```rust
-#[derive(Debug, Serialize)]
-pub enum AggregatedPoint {
-    /// Average/None モード用の単一値
-    Single { ts: u64, value: f64 },
-    /// MinMax モード用（波形ピーク保持）
-    MinMax { ts: u64, min: f64, max: f64 },
+/// MinMaxバンドデータ（Averageモード用）
+#[derive(Debug, Clone, Serialize)]
+pub struct BandSeriesData {
+    /// 最小値（タイムスタンプと同じインデックス）
+    pub min: Vec<Option<f64>>,
+    /// 最大値（タイムスタンプと同じインデックス）
+    pub max: Vec<Option<f64>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct PlotterRangedPayload {
-    pub channels: Vec<ChannelInfo>,
-    pub line_data: HashMap<String, Vec<AggregatedPoint>>,
+/// uPlot形式のチャートペイロード
+#[derive(Debug, Clone, Serialize)]
+pub struct PlotterChartPayload {
+    /// uPlot aligned data: [timestamps, ch0_values, ch1_values, ...]
+    /// - aligned_data[0]: タイムスタンプ（秒、f64）
+    /// - aligned_data[1..]: channel_names順の値
+    /// Option<f64> は JSON null に直接シリアライズ
+    pub aligned_data: Vec<Vec<Option<f64>>>,
+
+    /// チャンネル名（aligned_data[1..]と対応）
+    pub channel_names: Vec<String>,
+
+    /// MinMaxバンドデータ（Averageモード時のみ）
+    pub band_data: Option<HashMap<String, BandSeriesData>>,
+
+    /// ステートタイムラインデータ
     pub state_data: HashMap<String, Vec<StateChange>>,
+
+    /// チャンネルメタデータ（凡例用）
+    pub channels: Vec<ChannelInfo>,
+
+    /// 実際のデータ範囲（ms）
     pub start_ms: u64,
     pub end_ms: u64,
-    pub is_aggregated: bool,
 }
 ```
+
+**設計ポイント:**
+- `aligned_data` はuPlotがそのまま使用可能な形式
+- `Option<f64>` は欠損データを表し、JSON `null` にシリアライズ
+- フロントエンドでのデータ変換が不要（メモリリーク対策）
+- `band_data` はAverageモード時のmin/max帯域描画用
 
 #### 集約ロジック
 
@@ -457,6 +483,30 @@ pub struct PlotterRangedPayload {
 *   **チャートライブラリ:** [uPlot](https://github.com/leeoniya/uPlot) - 圧倒的なパフォーマンスのため採用（インストール済み）。
 *   **ステートタイムライン:** uPlotカスタムプラグインで実装。uPlotは時間軸・ズーム/パン・カーソル同期のみ担当し、状態バーはプラグインの`hooks.draw`でCanvas矩形描画。
 *   **ウィンドウ管理:** Tauriのマルチウィンドウ機能を利用。
+
+### データフロー（最適化後）
+
+```text
+Backend (Rust)                    Frontend (TypeScript)
+┌──────────────────┐             ┌────────────────────────────────┐
+│ PlotterAggregator│             │ PlotterWindow                  │
+│                  │  IPC/Tauri  │   │                            │
+│ get_chart_data() ├────────────►│   ▼ setData(payload)           │
+│                  │             │   │                            │
+│ PlotterChart     │             │   │ ← 変換不要！直接渡す       │
+│ Payload          │             │   ▼                            │
+│ (uPlot形式)      │             │ LineChart                      │
+└──────────────────┘             │   │                            │
+                                 │   ▼ uPlot.setData(alignedData) │
+                                 │       └─ series.show で非表示  │
+                                 └────────────────────────────────┘
+```
+
+**最適化ポイント:**
+- バックエンドでuPlot形式に変換済み（`PlotterChartPayload`）
+- フロントエンドでの毎フレーム変換処理が不要
+- チャンネル非表示は `series.show` で制御（データフィルタリング不要）
+- メモリリーク防止（毎フレームのオブジェクト生成なし）
 
 ### ステートタイムラインプラグイン設計
 
@@ -530,7 +580,7 @@ type StateTimelinePluginOpts = {
 *   **作業内容:** フロントエンドとの通信APIを実装。
 *   **中間確認:**
     *   [x] `open_plotter_window` でウィンドウ表示
-    *   [x] `get_plotter_data_ranged` でデータ取得（動的集約対応）
+    *   [x] `get_plotter_chart_data` でデータ取得（uPlot形式、動的集約対応）
     *   [x] `start_plotter_thread` / `stop_plotter_thread` でデータフロー制御
 
 #### 7-6. プロッタウィンドウ統合 (基本)
@@ -580,14 +630,16 @@ type StateTimelinePluginOpts = {
 #### 7-8. パフォーマンスチューニング
 *   **作業内容:** 高速受信時 (12Mbps) の描画負荷対策。
 *   **実装済み機能:**
-    *   [x] 動的集約API (`get_plotter_data_ranged`) 実装
+    *   [x] 動的集約API (`get_plotter_chart_data`) 実装
     *   [x] ピクセル幅に応じた自動データ削減 (Average/MinMax)
     *   [x] キャッシュ機構による再計算回避
     *   [x] フロントエンドからの表示範囲通知 (デバウンス済み)
+    *   [x] バックエンドでuPlot形式に変換（フロントエンドの毎フレーム変換不要）
+    *   [x] series.show によるチャンネル非表示制御
 *   **中間確認:**
     *   [x] 12Mbpsデータ受信中でもUIがフリーズしない
     *   [x] 描画がデータの流れに追従する
-    *   [x] メモリ使用量が一定範囲で安定する
+    *   [x] メモリ使用量が一定範囲で安定する（~200MB、リーク無し）
 
 #### 7-9. ドッキングシステム実装 (Frontend)
 *   **作業内容:** メインウィンドウへの埋め込みと切り離しロジックの実装。
@@ -615,6 +667,99 @@ type StateTimelinePluginOpts = {
 ### ユーザビリティテスト
 *   [ ] **ズーム/パン:** 過去データの確認ができる
 *   [ ] **設定保持:** ウィンドウを閉じて再度開いても設定が維持される
+
+---
+
+## 変更履歴
+
+### 2026-01-03: フロントエンドメモリリーク修正
+
+#### 問題
+リアルタイムプロット中にフロントエンドのメモリ使用量が急激に増加する問題が発生。
+
+| 指標 | 測定値 |
+|------|--------|
+| 増加率 | +13.6 MB/秒 |
+| 50秒後 | 90MB → 769MB (+680MB) |
+| バックエンド | 安定 (~40MB) |
+
+#### 根本原因
+毎フレーム（60fps）で新規JavaScriptオブジェクトを大量生成していた：
+
+1. **PlotterWindow.tsx** の `convertAggregatedData()`:
+   - `HashMap`, `Array`, `Set` を毎フレーム新規作成
+   - バックエンドから受信した `AggregatedPoint[]` を uPlot形式に変換
+
+2. **LineChart.tsx** の `buildChartData()`:
+   - `Set`, `Map`, `Array` を毎フレーム新規作成
+   - タイムスタンプ統合、欠損値補完処理
+
+#### 検討した解決策
+
+| 案 | 概要 | 採否 |
+|----|------|------|
+| **A: バックエンド変換** | Rustでデータ変換、uPlot形式で返却 | ✅ 採用 |
+| B: オブジェクトプール | フロントエンドで配列を再利用 | ❌ 不採用 |
+
+**採用理由 (Option A):**
+- Rust側での変換はメモリ効率が高い
+- IPCオーバーヘッドはuPlot形式でも最小限
+- フロントエンドのコードが大幅に簡素化
+- `Option<f64>` → JSON `null` の直接シリアライズが可能
+
+**不採用理由 (Option B):**
+- GC問題の根本解決にならない
+- コードの複雑性が増す
+- uPlotの要求形式との整合性維持が困難
+
+#### 実装内容
+
+**バックエンド:**
+- `PlotterChartPayload` 構造体追加（uPlot aligned data形式）
+- `BandSeriesData` 構造体追加（min/maxバンド用）
+- `get_chart_data()` メソッド実装
+- `get_plotter_chart_data` Tauriコマンド追加
+
+**フロントエンド:**
+- `convertAggregatedData()` 関数削除
+- `buildChartData()` 関数削除
+- `alignedData` を直接uPlotに渡す
+- `hiddenChannels` を `series.show` で制御
+
+#### 結果
+
+| 指標 | 修正前 | 修正後 |
+|------|--------|--------|
+| 60秒時点メモリ | ~860MB（継続増加） | ~210MB（安定） |
+| 増加率 | +13.6 MB/秒 | 0 MB/秒 |
+| 長時間稼働 | メモリ枯渇 | 問題なし |
+
+---
+
+### 2026-01-03: プロッターリファクタリング
+
+#### 変更内容
+
+| 項目 | 変更 |
+|------|------|
+| 静的変数 | グローバル `CALL_COUNT` をインスタンスフィールド `debug_call_count` に移動 |
+| 未使用コード | テスト専用関数 `aggregate_data`/`lttb_downsample` と関連テスト3件を削除 |
+| タイムスタンプ | バケットのタイムスタンプを先頭ポイントから「先頭と末尾の平均」に変更 |
+| チャンネル順序 | CSVヘッダー順を保持するよう修正（`channel_order`フィールド追加） |
+
+#### チャンネル順序の修正
+
+**問題:** `ParsedDataPoint.channels` が `HashMap` のため、CSVヘッダーの列順序が失われていた。
+
+**解決:**
+1. `parser.rs`: `ParsedDataPoint` に `channel_order: Vec<String>` フィールドを追加
+2. `aggregator.rs`: `add_data_points_batch()` が HashMap ではなく `channel_order` 順でチャンネルを登録
+
+#### 検証結果
+
+- 40テスト全パス
+- Clippy警告なし
+- CSV `time,sin,cos,random,motor,pump` がヘッダー順で凡例表示
 
 ---
 

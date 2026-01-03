@@ -8,7 +8,7 @@ import './PlotterWindow.css';
 // Aggregation mode type matching Rust AggregationMode
 type AggregationMode = 'Average' | 'Lttb';
 
-// Types matching Rust PlotterRangedPayload
+// Types matching Rust PlotterChartPayload (new uPlot-ready format)
 interface ChannelInfo {
   name: string;
   channel_type: 'Line' | 'State' | 'Auto';
@@ -22,22 +22,27 @@ interface StateChange {
   state: string;
 }
 
-// Aggregated point for dynamic aggregation
-interface AggregatedPoint {
-  type: 'Single' | 'MinMax';
-  ts: number;
-  value?: number;
-  min?: number;
-  max?: number;
+// Band series data for min/max bands (same indices as aligned_data[0])
+export interface BandSeriesData {
+  min: (number | null)[];
+  max: (number | null)[];
 }
 
-interface PlotterRangedPayload {
-  channels: ChannelInfo[];
-  line_data: Record<string, AggregatedPoint[]>;
+// New payload format - uPlot ready, no transformation needed
+interface PlotterChartPayload {
+  // uPlot aligned data: [timestamps, ch0_values, ch1_values, ...]
+  aligned_data: (number | null)[][];
+  // Channel names in order (matches aligned_data columns starting at index 1)
+  channel_names: string[];
+  // MinMax band data (Average mode only)
+  band_data: Record<string, BandSeriesData> | null;
+  // State timeline data
   state_data: Record<string, StateChange[]>;
+  // Channel metadata for legend
+  channels: ChannelInfo[];
+  // Time range
   start_ms: number;
   end_ms: number;
-  is_aggregated: boolean;
 }
 
 interface PlotterDataRequest {
@@ -47,70 +52,13 @@ interface PlotterDataRequest {
   is_realtime: boolean;
 }
 
-// MinMax band data for a channel: arrays of [timestamp, min, max]
-export interface MinMaxBandData {
-  timestamps: number[];
-  min: number[];
-  max: number[];
-}
-
-// Convert aggregated points to formats for LineChart
-// Returns line data for all modes, plus band data for MinMax mode
-function convertAggregatedData(data: Record<string, AggregatedPoint[]>): {
-  lineData: Record<string, [number, number][]>;
-  bandData: Record<string, MinMaxBandData>;
-} {
-  const lineData: Record<string, [number, number][]> = {};
-  const bandData: Record<string, MinMaxBandData> = {};
-
-  for (const [channel, points] of Object.entries(data)) {
-    // Check if this channel has MinMax data
-    const hasMinMax = points.some((p) => p.type === 'MinMax');
-
-    if (hasMinMax) {
-      // For MinMax, use average for line and store band data
-      const timestamps: number[] = [];
-      const mins: number[] = [];
-      const maxs: number[] = [];
-      const linePoints: [number, number][] = [];
-
-      for (const p of points) {
-        if (p.type === 'MinMax') {
-          const min = p.min ?? 0;
-          const max = p.max ?? 0;
-          timestamps.push(p.ts);
-          mins.push(min);
-          maxs.push(max);
-          // Line shows midpoint for reference
-          linePoints.push([p.ts, (min + max) / 2]);
-        } else {
-          // Single point in MinMax mode - treat as both min and max
-          const value = p.value ?? 0;
-          timestamps.push(p.ts);
-          mins.push(value);
-          maxs.push(value);
-          linePoints.push([p.ts, value]);
-        }
-      }
-
-      bandData[channel] = { timestamps, min: mins, max: maxs };
-      lineData[channel] = linePoints;
-    } else {
-      // For Single points (Average/LTTB), just use the value
-      lineData[channel] = points.map((p) => [p.ts, p.value ?? 0]);
-    }
-  }
-
-  return { lineData, bandData };
-}
-
 export default function PlotterWindow() {
-  const [data, setData] = useState<PlotterRangedPayload | null>(null);
+  const [data, setData] = useState<PlotterChartPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(true);
   const [threadStarted, setThreadStarted] = useState(false);
 
-  // Hidden channels for legend toggle
+  // Hidden channels for legend toggle (controls series.show in LineChart)
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set());
 
   // Aggregation mode setting
@@ -143,7 +91,7 @@ export default function PlotterWindow() {
     };
   }, []);
 
-  // Fetch plotter data using new ranged API
+  // Fetch plotter data using new chart data API (uPlot-ready format)
   // forceUpdate: if true, always update state even if end_ms hasn't changed (for mode switch)
   const fetchData = useCallback(async (forceUpdate = false): Promise<boolean> => {
     // Get pixel width from chart container
@@ -158,7 +106,8 @@ export default function PlotterWindow() {
     };
 
     try {
-      const payload = await invoke<PlotterRangedPayload>('get_plotter_data_ranged', { request });
+      // Use new API that returns uPlot-ready data
+      const payload = await invoke<PlotterChartPayload>('get_plotter_chart_data', { request });
 
       // Update state if data has changed OR if forceUpdate is requested (e.g., mode switch)
       if (forceUpdate || payload.end_ms > lastEndMsRef.current) {
@@ -232,15 +181,8 @@ export default function PlotterWindow() {
     }
   };
 
-  // Convert aggregated line data to format for LineChart (with band data for MinMax)
-  const { lineData: simpleLineData, bandData } = useMemo(() => {
-    if (!data) return { lineData: {}, bandData: {} };
-    return convertAggregatedData(data.line_data);
-  }, [data]);
-
   // Check if we have line data to display
-  const hasLineData =
-    data && Object.keys(data.line_data).some((key) => data.line_data[key].length > 0);
+  const hasLineData = data && data.aligned_data.length > 1 && data.aligned_data[0].length > 0;
 
   // Build state rows from state_data (sorted alphabetically)
   const stateRows: StateRow[] = useMemo(() => {
@@ -284,8 +226,9 @@ export default function PlotterWindow() {
             {/* Line Chart (with integrated State Timeline) */}
             <div className="chart-area" ref={chartContainerRef}>
               <LineChart
-                data={simpleLineData}
-                bandData={bandData}
+                alignedData={data!.aligned_data}
+                channelNames={data!.channel_names}
+                bandData={data!.band_data}
                 isPaused={!isRunning}
                 stateRows={stateRows}
                 hiddenChannels={hiddenChannels}
@@ -294,45 +237,40 @@ export default function PlotterWindow() {
 
             {/* Channel legend */}
             <div className="channel-legend">
-              {(() => {
-                // Get sorted channels from simpleLineData keys (exactly matches LineChart.buildChartData)
-                const allChannelsSorted = Object.keys(simpleLineData).sort();
-
-                return data!.channels
-                  .filter((ch) => ch.channel_type === 'Line' || ch.channel_type === 'Auto')
-                  .map((channel) => {
-                    const isHidden = hiddenChannels.has(channel.name);
-                    // Use index in sorted allChannels for consistent color (matches LineChart)
-                    const colorIndex = allChannelsSorted.indexOf(channel.name);
-                    const color = COLORS[colorIndex % COLORS.length];
-                    return (
-                      <div
-                        key={channel.name}
-                        className={`legend-item ${isHidden ? 'hidden' : ''}`}
-                        onClick={() => {
-                          setHiddenChannels((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(channel.name)) {
-                              next.delete(channel.name);
-                            } else {
-                              next.add(channel.name);
-                            }
-                            return next;
-                          });
-                        }}
-                        title={isHidden ? 'Click to show' : 'Click to hide'}
-                      >
-                        <span className="legend-name" style={{ color }}>
-                          {channel.name}:
-                        </span>
-                        <span className="legend-value" style={{ color }}>
-                          {channel.latest_value ?? '--'}
-                        </span>
-                        <span className="legend-count">{channel.point_count} pts</span>
-                      </div>
-                    );
-                  });
-              })()}
+              {data!.channels
+                .filter((ch) => ch.channel_type === 'Line' || ch.channel_type === 'Auto')
+                .map((channel) => {
+                  const isHidden = hiddenChannels.has(channel.name);
+                  // Use index in sorted channel_names for consistent color (matches LineChart)
+                  const colorIndex = data!.channel_names.indexOf(channel.name);
+                  const color = colorIndex >= 0 ? COLORS[colorIndex % COLORS.length] : COLORS[0];
+                  return (
+                    <div
+                      key={channel.name}
+                      className={`legend-item ${isHidden ? 'hidden' : ''}`}
+                      onClick={() => {
+                        setHiddenChannels((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(channel.name)) {
+                            next.delete(channel.name);
+                          } else {
+                            next.add(channel.name);
+                          }
+                          return next;
+                        });
+                      }}
+                      title={isHidden ? 'Click to show' : 'Click to hide'}
+                    >
+                      <span className="legend-name" style={{ color }}>
+                        {channel.name}:
+                      </span>
+                      <span className="legend-value" style={{ color }}>
+                        {channel.latest_value ?? '--'}
+                      </span>
+                      <span className="legend-count">{channel.point_count} pts</span>
+                    </div>
+                  );
+                })}
             </div>
           </>
         ) : (

@@ -61,6 +61,30 @@ pub struct PlotterConfig {
     /// Aggregation trigger threshold (None = use mode's default)
     #[serde(default)]
     pub aggregation_threshold: Option<usize>,
+    /// Maximum target points for display aggregation (4K display cap)
+    /// This limits how many points are sent to the frontend for rendering.
+    #[serde(default = "default_max_target_points")]
+    pub max_target_points: u32,
+    /// Pixel width threshold change percentage for cache invalidation (0.0 - 1.0)
+    /// Cache is invalidated when pixel width changes by more than this percentage.
+    #[serde(default = "default_pixel_width_threshold")]
+    pub pixel_width_threshold_percent: f32,
+    /// Bucket size for aggregating raw data into buffer
+    /// Higher values mean more compression but less granularity.
+    #[serde(default = "default_bucket_size")]
+    pub bucket_size: usize,
+}
+
+fn default_max_target_points() -> u32 {
+    4000
+}
+
+fn default_pixel_width_threshold() -> f32 {
+    0.2
+}
+
+fn default_bucket_size() -> usize {
+    10
 }
 
 impl Default for PlotterConfig {
@@ -70,6 +94,9 @@ impl Default for PlotterConfig {
             channel_types: HashMap::new(),
             aggregation_mode: AggregationMode::Lttb,
             aggregation_threshold: None,
+            max_target_points: default_max_target_points(),
+            pixel_width_threshold_percent: default_pixel_width_threshold(),
+            bucket_size: default_bucket_size(),
         }
     }
 }
@@ -125,4 +152,54 @@ pub struct PlotterRangedPayload {
     pub end_ms: u64,
     /// Whether data was aggregated
     pub is_aggregated: bool,
+}
+
+/// MinMax band series data for a channel
+///
+/// Used for Average mode to show min/max range bands.
+/// Uses the same timestamp indices as `aligned_data[0]` in PlotterChartPayload.
+#[derive(Debug, Clone, Serialize)]
+pub struct BandSeriesData {
+    /// Minimum values (same length as timestamps)
+    pub min: Vec<Option<f64>>,
+    /// Maximum values (same length as timestamps)
+    pub max: Vec<Option<f64>>,
+}
+
+/// Chart data payload in uPlot-ready format
+///
+/// Pre-aligned data format that can be passed directly to uPlot without
+/// any per-frame transformation in the frontend. This eliminates the
+/// memory leak caused by repeated object creation.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlotterChartPayload {
+    /// uPlot aligned data: [timestamps, ch0_values, ch1_values, ...]
+    ///
+    /// - `aligned_data[0]`: timestamps in seconds (f64)
+    /// - `aligned_data[1..]`: channel values in `channel_names` order
+    ///
+    /// All channels are included; frontend uses `series.show` for hiding.
+    /// `Option<f64>` serializes to JSON `null` for uPlot compatibility.
+    pub aligned_data: Vec<Vec<Option<f64>>>,
+
+    /// Channel names in order (matches aligned_data columns starting at index 1)
+    pub channel_names: Vec<String>,
+
+    /// MinMax band data (Average mode only): channel_name -> BandSeriesData
+    ///
+    /// Uses the same timestamp indices as `aligned_data[0]`.
+    /// `None` for LTTB mode (no bands).
+    pub band_data: Option<HashMap<String, BandSeriesData>>,
+
+    /// State timeline data (unchanged from current format)
+    pub state_data: HashMap<String, Vec<StateChange>>,
+
+    /// Channel metadata for frontend legend
+    pub channels: Vec<ChannelInfo>,
+
+    /// Actual start timestamp of returned data (ms)
+    pub start_ms: u64,
+
+    /// Actual end timestamp of returned data (ms)
+    pub end_ms: u64,
 }

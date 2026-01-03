@@ -3,7 +3,7 @@ mod plotter;
 mod serial;
 
 use plotter::{
-    AggregationMode, PlotterAggregator, PlotterDataRequest, PlotterRangedPayload, PlotterThread,
+    AggregationMode, PlotterAggregator, PlotterChartPayload, PlotterDataRequest, PlotterThread,
 };
 use serial::SerialState;
 use std::sync::Mutex;
@@ -47,7 +47,7 @@ pub fn run() {
             serial::write_dtr,
             serial::write_rts,
             open_plotter_window,
-            get_plotter_data_ranged,
+            get_plotter_chart_data,
             set_plotter_enabled,
             set_aggregation_mode,
             start_plotter_thread,
@@ -92,13 +92,16 @@ async fn open_plotter_window(
     Ok(PLOTTER_LABEL.to_string())
 }
 
-/// Get ranged plotter data with dynamic aggregation
+/// Get plotter chart data in uPlot-ready format
+///
+/// This API returns data pre-aligned for direct uPlot consumption,
+/// eliminating the need for per-frame data transformation in the frontend.
 #[tauri::command]
-fn get_plotter_data_ranged(
+fn get_plotter_chart_data(
     plotter_state: tauri::State<'_, PlotterState>,
     request: PlotterDataRequest,
-) -> Result<PlotterRangedPayload, String> {
-    Ok(plotter_state.aggregator.get_ranged_data(&request))
+) -> Result<PlotterChartPayload, String> {
+    Ok(plotter_state.aggregator.get_chart_data(&request))
 }
 
 /// Enable or disable plotter data collection

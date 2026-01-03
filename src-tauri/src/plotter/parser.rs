@@ -17,6 +17,8 @@ pub struct ParsedDataPoint {
     pub timestamp_ms: u64,
     /// Channel data (label -> value)
     pub channels: HashMap<String, ChannelValue>,
+    /// Channel order (column order from left to right)
+    pub channel_order: Vec<String>,
 }
 
 /// Channel value - either numeric or state
@@ -147,11 +149,13 @@ impl PlotterParser {
 
         // Parse values
         let mut channels = HashMap::new();
+        let mut channel_order = Vec::new();
 
         for (i, part) in parts.iter().enumerate() {
             // Check for labeled value (label:value format)
             if let Some((label, value)) = self.parse_labeled_value(part) {
-                channels.insert(label, value);
+                channels.insert(label.clone(), value);
+                channel_order.push(label);
             } else {
                 // Auto-generate label
                 let label = if i < self.labels.len() {
@@ -161,7 +165,8 @@ impl PlotterParser {
                 };
 
                 if let Some(value) = self.parse_value(part) {
-                    channels.insert(label, value);
+                    channels.insert(label.clone(), value);
+                    channel_order.push(label);
                 }
             }
         }
@@ -173,6 +178,7 @@ impl PlotterParser {
         Some(ParsedDataPoint {
             timestamp_ms,
             channels,
+            channel_order,
         })
     }
 

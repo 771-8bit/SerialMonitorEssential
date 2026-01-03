@@ -5,28 +5,38 @@ import { stateTimelinePlugin, calculateStateTimelineHeight, StateRow } from './s
 import './LineChart.css';
 import { COLORS } from './chartColors';
 
-import type { MinMaxBandData } from './PlotterWindow';
+import type { BandSeriesData } from './PlotterWindow';
 
+// New props interface - accepts pre-aligned data from backend
 interface LineChartProps {
-  // Data: { channelName: [[timestamps], [values]] }
-  data: Record<string, [number, number][]>;
-  // MinMax band data for channels (optional, for MinMax aggregation mode)
-  bandData?: Record<string, MinMaxBandData>;
+  // uPlot aligned data: [timestamps, ch0_values, ch1_values, ...]
+  // Timestamps are in seconds, values are numbers or null
+  alignedData: (number | null)[][];
+  // Channel names in order (matches alignedData columns starting at index 1)
+  channelNames: string[];
+  // MinMax band data for channels (optional, for Average aggregation mode)
+  // Uses same indices as alignedData[0] (timestamps)
+  bandData?: Record<string, BandSeriesData> | null;
   // Whether the chart is paused
   isPaused?: boolean;
   // State timeline rows to display below the chart
   stateRows?: StateRow[];
   // Callback when visible time range changes (in seconds)
   onTimeRangeChange?: (min: number, max: number) => void;
-  // Channels to hide from the chart
+  // Channels to hide from the chart (uses series.show for efficient toggling)
   hiddenChannels?: Set<string>;
 }
 
-/** Calculate Y-axis range from chart data */
-function calculateYRange(chartData: uPlot.AlignedData): { yMin: number; yMax: number } {
+/** Calculate Y-axis range from chart data, respecting hidden series */
+function calculateYRange(
+  chartData: uPlot.AlignedData,
+  hiddenSeriesIndices: Set<number>
+): { yMin: number; yMax: number } {
   let yMin = Infinity;
   let yMax = -Infinity;
   for (let i = 1; i < chartData.length; i++) {
+    // Skip hidden series
+    if (hiddenSeriesIndices.has(i)) continue;
     const yData = chartData[i] as (number | null)[];
     for (const v of yData) {
       if (v !== null) {
@@ -39,8 +49,9 @@ function calculateYRange(chartData: uPlot.AlignedData): { yMin: number; yMax: nu
 }
 
 export default function LineChart({
-  data,
-  bandData = {},
+  alignedData,
+  channelNames,
+  bandData = null,
   isPaused = false,
   stateRows = [],
   onTimeRangeChange,
@@ -50,6 +61,7 @@ export default function LineChart({
   const chartRef = useRef<uPlot | null>(null);
   const channelsRef = useRef<string[]>([]);
   const stateRowsRef = useRef<StateRow[]>([]);
+  const hiddenChannelsRef = useRef<Set<string>>(hiddenChannels);
   const isZoomedRef = useRef(false);
   const manualYScaleRef = useRef<{ min: number; max: number } | null>(null);
   const manualXRangeRef = useRef<number | null>(null);
@@ -59,10 +71,14 @@ export default function LineChart({
   // Debounce delay in ms for time range change notifications
   const DEBOUNCE_DELAY_MS = 200;
 
-  // Keep ref up to date
+  // Keep refs up to date
   useEffect(() => {
     onTimeRangeChangeRef.current = onTimeRangeChange;
   }, [onTimeRangeChange]);
+
+  useEffect(() => {
+    hiddenChannelsRef.current = hiddenChannels;
+  }, [hiddenChannels]);
 
   // Debounced time range change handler
   const debouncedTimeRangeChange = useCallback((min: number, max: number) => {
@@ -77,21 +93,22 @@ export default function LineChart({
   }, []);
 
   // Ref for band data (updated each render, used by plugin)
-  const bandDataRef = useRef<Record<string, MinMaxBandData>>(bandData);
+  const bandDataRef = useRef<Record<string, BandSeriesData> | null>(bandData);
   useEffect(() => {
     bandDataRef.current = bandData;
   }, [bandData]);
 
   // MinMax band drawing plugin - draws filled areas for min/max ranges
+  // Updated to use new BandSeriesData format (same indices as timestamps)
   const minMaxBandPlugin = useCallback(
-    (getChannels: () => string[], getAllChannels: () => string[]): uPlot.Plugin => {
+    (getChannelNames: () => string[], getTimestamps: () => (number | null)[]): uPlot.Plugin => {
       return {
         hooks: {
           draw: (u: uPlot) => {
             const ctx = u.ctx;
             const bands = bandDataRef.current;
-            const channels = getChannels();
-            const allChannels = getAllChannels();
+            const channelNamesList = getChannelNames();
+            const timestamps = getTimestamps();
 
             if (!bands || Object.keys(bands).length === 0) return;
 
@@ -106,15 +123,18 @@ export default function LineChart({
             ctx.rect(plotLeft, plotTop, plotWidth, plotHeight);
             ctx.clip();
 
-            // Draw bands for each channel with band data
-            for (const channel of channels) {
+            // Draw bands for each channel with band data (if not hidden)
+            for (const channel of channelNamesList) {
+              // Skip hidden channels
+              if (hiddenChannelsRef.current.has(channel)) continue;
+
               const band = bands[channel];
-              if (!band || band.timestamps.length === 0) continue;
+              if (!band || band.min.length === 0) continue;
 
               // Get channel color with transparency
-              const colorIndex = allChannels.indexOf(channel);
+              const colorIndex = channelNamesList.indexOf(channel);
               const color = COLORS[colorIndex % COLORS.length];
-              // Convert hex to rgba with 0.2 alpha
+              // Convert hex to rgba with 0.25 alpha
               const r = parseInt(color.slice(1, 3), 16);
               const g = parseInt(color.slice(3, 5), 16);
               const b = parseInt(color.slice(5, 7), 16);
@@ -125,9 +145,12 @@ export default function LineChart({
 
               // Forward path (min values, left to right)
               let started = false;
-              for (let i = 0; i < band.timestamps.length; i++) {
-                const x = u.valToPos(band.timestamps[i] / 1000, 'x', true);
-                const y = u.valToPos(band.min[i], 'y', true);
+              for (let i = 0; i < timestamps.length; i++) {
+                const ts = timestamps[i];
+                const minVal = band.min[i];
+                if (ts === null || minVal === null) continue;
+                const x = u.valToPos(ts, 'x', true);
+                const y = u.valToPos(minVal, 'y', true);
                 if (!isFinite(x) || !isFinite(y)) continue;
                 if (!started) {
                   ctx.moveTo(x, y);
@@ -138,9 +161,12 @@ export default function LineChart({
               }
 
               // Backward path (max values, right to left)
-              for (let i = band.timestamps.length - 1; i >= 0; i--) {
-                const x = u.valToPos(band.timestamps[i] / 1000, 'x', true);
-                const y = u.valToPos(band.max[i], 'y', true);
+              for (let i = timestamps.length - 1; i >= 0; i--) {
+                const ts = timestamps[i];
+                const maxVal = band.max[i];
+                if (ts === null || maxVal === null) continue;
+                const x = u.valToPos(ts, 'x', true);
+                const y = u.valToPos(maxVal, 'y', true);
                 if (!isFinite(x) || !isFinite(y)) continue;
                 ctx.lineTo(x, y);
               }
@@ -157,45 +183,6 @@ export default function LineChart({
     []
   );
 
-  // Build uPlot data format: [timestamps, ...values]
-  const buildChartData = useCallback(() => {
-    // Get all channels sorted (for consistent color indexing)
-    const allChannels = Object.keys(data).sort();
-    // Filter out hidden channels for display
-    const visibleChannels = allChannels.filter((ch) => !hiddenChannels.has(ch));
-
-    if (visibleChannels.length === 0) {
-      return { data: [[]] as uPlot.AlignedData, channels: [], allChannels };
-    }
-
-    const timestampSet = new Set<number>();
-    for (const channel of visibleChannels) {
-      const points = data[channel];
-      for (const [t] of points) {
-        timestampSet.add(t);
-      }
-    }
-    const timestamps = Array.from(timestampSet).sort((a, b) => a - b);
-
-    if (timestamps.length === 0) {
-      return { data: [[]] as uPlot.AlignedData, channels: [], allChannels };
-    }
-
-    const chartData: (number | null)[][] = [timestamps.map((t) => t / 1000)];
-
-    for (const channel of visibleChannels) {
-      const points = data[channel];
-      const valueMap = new Map<number, number>();
-      for (const [t, v] of points) {
-        valueMap.set(t, v);
-      }
-      const values = timestamps.map((t) => valueMap.get(t) ?? null);
-      chartData.push(values);
-    }
-
-    return { data: chartData as uPlot.AlignedData, channels: visibleChannels, allChannels };
-  }, [data, hiddenChannels]);
-
   // Setup event handlers for the chart
   const setupEventHandlers = useCallback((u: uPlot) => {
     // Double-click to reset zoom
@@ -205,15 +192,24 @@ export default function LineChart({
       manualXRangeRef.current = null;
       const chartData = u.data;
       if (chartData && chartData[0] && chartData[0].length > 0) {
-        const xData = chartData[0] as number[];
-        const xMin = Math.min(...xData);
-        const xMax = Math.max(...xData);
-        u.setScale('x', { min: xMin, max: xMax });
+        const xData = chartData[0].filter((v): v is number => v !== null);
+        if (xData.length > 0) {
+          const xMin = Math.min(...xData);
+          const xMax = Math.max(...xData);
+          u.setScale('x', { min: xMin, max: xMax });
 
-        const { yMin, yMax } = calculateYRange(chartData);
-        if (yMin !== Infinity && yMax !== -Infinity) {
-          const padding = (yMax - yMin) * 0.1;
-          u.setScale('y', { min: yMin - padding, max: yMax + padding });
+          // Calculate Y range excluding hidden series
+          const hiddenIndices = new Set<number>();
+          for (let i = 0; i < channelsRef.current.length; i++) {
+            if (hiddenChannelsRef.current.has(channelsRef.current[i])) {
+              hiddenIndices.add(i + 1); // +1 because index 0 is timestamps
+            }
+          }
+          const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
+          if (yMin !== Infinity && yMax !== -Infinity) {
+            const padding = (yMax - yMin) * 0.1;
+            u.setScale('y', { min: yMin - padding, max: yMax + padding });
+          }
         }
       }
     });
@@ -261,27 +257,24 @@ export default function LineChart({
     });
   }, []);
 
-  // Build chart options
+  // Build chart options with series.show for hidden channels
   const buildChartOptions = useCallback(
     (
       channels: string[],
-      allChannels: string[],
       stateRowCount: number,
       width: number,
-      height: number
+      height: number,
+      currentHiddenChannels: Set<string>
     ): uPlot.Options => {
       const series: uPlot.Series[] = [
         { label: 'Time' },
-        ...channels.map((ch) => {
-          // Use index in allChannels for consistent coloring
-          const colorIndex = allChannels.indexOf(ch);
-          return {
-            label: ch,
-            stroke: COLORS[colorIndex % COLORS.length],
-            width: 2,
-            spanGaps: true,
-          };
-        }),
+        ...channels.map((ch, i) => ({
+          label: ch,
+          stroke: COLORS[i % COLORS.length],
+          width: 2,
+          spanGaps: true,
+          show: !currentHiddenChannels.has(ch), // Use series.show for hiding
+        })),
       ];
 
       const stateTimelineHeight = calculateStateTimelineHeight(stateRowCount);
@@ -293,7 +286,7 @@ export default function LineChart({
       plugins.push(
         minMaxBandPlugin(
           () => channelsRef.current,
-          () => Object.keys(data).sort()
+          () => (chartRef.current?.data[0] as (number | null)[]) ?? []
         )
       );
 
@@ -350,57 +343,90 @@ export default function LineChart({
         plugins,
       };
     },
-    [setupEventHandlers, debouncedTimeRangeChange, minMaxBandPlugin, data]
+    [setupEventHandlers, debouncedTimeRangeChange, minMaxBandPlugin]
   );
 
   // Update chart scales based on current data and zoom state
-  const updateChartScales = useCallback((chart: uPlot, chartData: uPlot.AlignedData) => {
-    const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
-    const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
+  const updateChartScales = useCallback(
+    (chart: uPlot, chartData: uPlot.AlignedData, currentHiddenChannels: Set<string>) => {
+      const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
+      const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
 
-    chart.setData(chartData);
+      chart.setData(chartData);
 
-    if (isZoomedRef.current) {
-      if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
-        chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
-      }
-      if (prevYScale.min !== undefined && prevYScale.max !== undefined) {
-        chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
-      }
-    } else {
-      if (chartData[0] && chartData[0].length > 0) {
-        const xData = chartData[0] as number[];
-        const xMin = Math.min(...xData);
-        const xMax = Math.max(...xData);
-
-        if (manualXRangeRef.current !== null) {
-          const range = manualXRangeRef.current;
-          chart.setScale('x', { min: xMax - range, max: xMax });
-        } else {
-          chart.setScale('x', { min: xMin, max: xMax });
+      // Calculate hidden series indices
+      const hiddenIndices = new Set<number>();
+      for (let i = 0; i < channelsRef.current.length; i++) {
+        if (currentHiddenChannels.has(channelsRef.current[i])) {
+          hiddenIndices.add(i + 1); // +1 because index 0 is timestamps
         }
+      }
 
-        const { yMin, yMax } = calculateYRange(chartData);
-        if (yMin !== Infinity && yMax !== -Infinity) {
-          if (manualYScaleRef.current) {
-            chart.setScale('y', manualYScaleRef.current);
-          } else {
-            const padding = (yMax - yMin) * 0.1 || 1;
-            chart.setScale('y', { min: yMin - padding, max: yMax + padding });
+      if (isZoomedRef.current) {
+        if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
+          chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
+        }
+        if (prevYScale.min !== undefined && prevYScale.max !== undefined) {
+          chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
+        }
+      } else {
+        if (chartData[0] && chartData[0].length > 0) {
+          const xData = chartData[0].filter((v): v is number => v !== null);
+          if (xData.length > 0) {
+            const xMin = Math.min(...xData);
+            const xMax = Math.max(...xData);
+
+            if (manualXRangeRef.current !== null) {
+              const range = manualXRangeRef.current;
+              chart.setScale('x', { min: xMax - range, max: xMax });
+            } else {
+              chart.setScale('x', { min: xMin, max: xMax });
+            }
+
+            const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
+            if (yMin !== Infinity && yMax !== -Infinity) {
+              if (manualYScaleRef.current) {
+                chart.setScale('y', manualYScaleRef.current);
+              } else {
+                const padding = (yMax - yMin) * 0.1 || 1;
+                chart.setScale('y', { min: yMin - padding, max: yMax + padding });
+              }
+            }
           }
         }
       }
+    },
+    []
+  );
+
+  // Update series visibility when hiddenChannels changes
+  useEffect(() => {
+    if (!chartRef.current) return;
+    const chart = chartRef.current;
+
+    // Update each series' show property
+    for (let i = 0; i < channelsRef.current.length; i++) {
+      const channel = channelsRef.current[i];
+      const seriesIdx = i + 1; // +1 because index 0 is time
+      const shouldShow = !hiddenChannels.has(channel);
+      if (chart.series[seriesIdx]) {
+        chart.series[seriesIdx].show = shouldShow;
+      }
     }
-  }, []);
+
+    // Redraw to apply visibility changes
+    chart.redraw();
+  }, [hiddenChannels]);
 
   // Main chart effect
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const { data: chartData, channels, allChannels } = buildChartData();
+    // Use aligned data directly (no transformation needed!)
+    const chartData = alignedData as uPlot.AlignedData;
 
     // If no data or no channels, destroy chart
-    if (channels.length === 0 || chartData[0].length === 0) {
+    if (channelNames.length === 0 || chartData[0].length === 0) {
       if (chartRef.current) {
         chartRef.current.destroy();
         chartRef.current = null;
@@ -410,8 +436,8 @@ export default function LineChart({
 
     // Check if chart needs to be recreated
     const channelsChanged =
-      channels.length !== channelsRef.current.length ||
-      channels.some((ch, i) => ch !== channelsRef.current[i]);
+      channelNames.length !== channelsRef.current.length ||
+      channelNames.some((ch, i) => ch !== channelsRef.current[i]);
 
     const stateRowsChanged =
       stateRows.length !== stateRowsRef.current.length ||
@@ -426,23 +452,23 @@ export default function LineChart({
       }
 
       stateRowsRef.current = stateRows;
+      channelsRef.current = channelNames;
 
       const opts = buildChartOptions(
-        channels,
-        allChannels,
+        channelNames,
         stateRows.length,
         containerRef.current.clientWidth,
-        containerRef.current.clientHeight
+        containerRef.current.clientHeight,
+        hiddenChannels
       );
 
       chartRef.current = new uPlot(opts, chartData, containerRef.current);
-      channelsRef.current = channels;
     } else {
       // Just update data
       stateRowsRef.current = stateRows;
-      updateChartScales(chartRef.current!, chartData);
+      updateChartScales(chartRef.current!, chartData, hiddenChannels);
     }
-  }, [buildChartData, stateRows, buildChartOptions, updateChartScales]);
+  }, [alignedData, channelNames, stateRows, buildChartOptions, updateChartScales, hiddenChannels]);
 
   // Handle resize
   useEffect(() => {

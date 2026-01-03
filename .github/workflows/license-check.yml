@@ -45,7 +45,7 @@ jobs:
           npm install
 
       - name: Generate npm license file
-        run: npx license-checker --production --markdown > docs/THIRD_PARTY_NPM_GENERATED.md
+        run: npx license-checker --production --markdown --excludePrivatePackages > docs/THIRD_PARTY_NPM_GENERATED.md
 
       - name: Generate Rust license file
         run: |
@@ -58,7 +58,7 @@ jobs:
             echo "::error::docs/THIRD_PARTY_NPM.md is outdated!"
             echo ""
             echo "Please run the following command and commit the changes:"
-            echo "  npx license-checker --production --markdown > docs/THIRD_PARTY_NPM.md"
+            echo "  npx license-checker --production --markdown --excludePrivatePackages > docs/THIRD_PARTY_NPM.md"
             echo ""
             echo "Diff:"
             diff docs/THIRD_PARTY_NPM.md docs/THIRD_PARTY_NPM_GENERATED.md || true

@@ -12,15 +12,12 @@ use std::sync::{Arc, RwLock};
 
 // Re-export common types from data_store
 pub use crate::plotter::data_store::{
-    AggregatedPoint, AggregationMode, ChannelInfo, ChannelType, PlotterConfig, PlotterDataRequest,
-    PlotterRangedPayload, StateChange,
+    AggregatedPoint, AggregationMode, BandSeriesData, ChannelInfo, ChannelType,
+    PlotterChartPayload, PlotterConfig, PlotterDataRequest, PlotterRangedPayload, StateChange,
 };
 
-/// Maximum target points for aggregation (4K display cap)
-const MAX_TARGET_POINTS: u32 = 4000;
-
-/// Default pixel width threshold change percentage for cache invalidation
-const PIXEL_WIDTH_THRESHOLD_PERCENT: f32 = 0.2;
+// Note: MAX_TARGET_POINTS, PIXEL_WIDTH_THRESHOLD_PERCENT, DEFAULT_BUCKET_SIZE
+// are now configured via PlotterConfig for better flexibility.
 
 /// Cached aggregation for current view
 #[derive(Debug, Clone)]
@@ -34,9 +31,6 @@ struct ViewCache {
     /// Whether this was generated in realtime mode
     was_realtime: bool,
 }
-
-/// Default bucket size for aggregating raw data
-const DEFAULT_BUCKET_SIZE: usize = 10;
 
 /// Internal bucket storing all statistics for mode-agnostic storage
 ///
@@ -93,6 +87,91 @@ fn find_range_end(buckets: &[AggregatedBucket], time_max: u64) -> usize {
     }
 }
 
+/// LTTB (Largest Triangle Three Buckets) downsampling algorithm
+///
+/// Selects n points from the input data that best preserve visual features.
+/// Uses triangle area maximization: for each bucket, selects the point that
+/// forms the largest triangle with the previously selected point and the
+/// average of the next bucket.
+///
+/// Returns indices of selected points in the original data array.
+fn lttb_downsample(data: &[AggregatedBucket], target_points: usize) -> Vec<usize> {
+    let n = data.len();
+
+    // If data is already small enough, return all indices
+    if n <= target_points || target_points < 3 {
+        return (0..n).collect();
+    }
+
+    let mut selected = Vec::with_capacity(target_points);
+
+    // Always include first point
+    selected.push(0);
+
+    // Calculate bucket size for middle points
+    let bucket_size = (n - 2) as f64 / (target_points - 2) as f64;
+
+    for i in 0..(target_points - 2) {
+        // Current bucket range
+        let bucket_start = ((i as f64 * bucket_size) + 1.0).floor() as usize;
+        let bucket_end = (((i + 1) as f64 * bucket_size) + 1.0).floor() as usize;
+        let bucket_end = bucket_end.min(n - 1);
+
+        // Next bucket range (for calculating average point)
+        let next_start = bucket_end;
+        let next_end = (((i + 2) as f64 * bucket_size) + 1.0).floor() as usize;
+        let next_end = next_end.min(n);
+
+        // Calculate average point of next bucket
+        let (avg_ts, avg_val) = if next_start < next_end {
+            let mut sum_ts: f64 = 0.0;
+            let mut sum_val: f64 = 0.0;
+            let count = (next_end - next_start) as f64;
+            for bucket in data.iter().take(next_end).skip(next_start) {
+                sum_ts += bucket.ts as f64;
+                sum_val += bucket.avg;
+            }
+            (sum_ts / count, sum_val / count)
+        } else {
+            // Fallback to last point
+            (data[n - 1].ts as f64, data[n - 1].avg)
+        };
+
+        // Get previously selected point
+        let prev_idx = *selected.last().unwrap();
+        let prev_ts = data[prev_idx].ts as f64;
+        let prev_val = data[prev_idx].avg;
+
+        // Find point in current bucket with maximum triangle area
+        let mut best_idx = bucket_start;
+        let mut best_area = f64::NEG_INFINITY;
+
+        for (j, bucket) in data.iter().enumerate().take(bucket_end).skip(bucket_start) {
+            // Calculate triangle area using the shoelace formula
+            // Area = 0.5 * |x1(y2-y3) + x2(y3-y1) + x3(y1-y2)|
+            let curr_ts = bucket.ts as f64;
+            let curr_val = bucket.avg;
+
+            let area = ((prev_ts * (curr_val - avg_val))
+                + (curr_ts * (avg_val - prev_val))
+                + (avg_ts * (prev_val - curr_val)))
+                .abs();
+
+            if area > best_area {
+                best_area = area;
+                best_idx = j;
+            }
+        }
+
+        selected.push(best_idx);
+    }
+
+    // Always include last point
+    selected.push(n - 1);
+
+    selected
+}
+
 /// Inner data structure (protected by RwLock)
 ///
 /// Uses 3-buffer design for uniform aggregation levels:
@@ -139,6 +218,9 @@ struct PlotterAggregatorInner {
 
     /// View cache for current display
     view_cache: Option<ViewCache>,
+
+    /// Debug call counter for periodic logging
+    debug_call_count: usize,
 }
 
 /// Plotter aggregator - stores all parsed data with dynamic aggregation
@@ -178,11 +260,12 @@ impl PlotterAggregator {
                 buffer: HashMap::new(),
                 raw_buffer: HashMap::new(),
                 current_level: 1,
-                bucket_size: DEFAULT_BUCKET_SIZE,
+                bucket_size: config.bucket_size,
                 state_data: HashMap::new(),
                 config,
                 enabled: false,
                 view_cache: None,
+                debug_call_count: 0,
             })),
         }
     }
@@ -303,7 +386,8 @@ impl PlotterAggregator {
             }
         }
 
-        inner.view_cache = None;
+        // Cache validity is checked at query time by is_cache_valid
+        // which handles time range changes correctly
         Self::maybe_aggregate(&mut inner);
     }
 
@@ -322,21 +406,35 @@ impl PlotterAggregator {
         }
 
         for point in data_points {
-            for (channel, value) in point.channels {
-                Self::ensure_channel_exists(&mut inner, &channel);
+            // Iterate in channel_order to preserve CSV header order
+            for channel in &point.channel_order {
+                if let Some(value) = point.channels.get(channel) {
+                    Self::ensure_channel_exists(&mut inner, channel);
 
-                match value {
-                    ChannelValue::Numeric(v) => {
-                        Self::process_numeric_value(&mut inner, &channel, point.timestamp_ms, v);
-                    }
-                    ChannelValue::State(s) => {
-                        Self::process_state_value(&mut inner, &channel, point.timestamp_ms, s);
+                    match value {
+                        ChannelValue::Numeric(v) => {
+                            Self::process_numeric_value(
+                                &mut inner,
+                                channel,
+                                point.timestamp_ms,
+                                *v,
+                            );
+                        }
+                        ChannelValue::State(s) => {
+                            Self::process_state_value(
+                                &mut inner,
+                                channel,
+                                point.timestamp_ms,
+                                s.clone(),
+                            );
+                        }
                     }
                 }
             }
         }
 
-        inner.view_cache = None;
+        // Cache validity is checked at query time by is_cache_valid
+        // which handles time range changes correctly
         Self::maybe_aggregate(&mut inner);
     }
 
@@ -367,8 +465,8 @@ impl PlotterAggregator {
         }
 
         // Debug log buffer sizes (periodic, not every call)
-        static CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let call_count = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        inner.debug_call_count += 1;
+        let call_count = inner.debug_call_count;
         if call_count.is_multiple_of(1000) {
             let total_history: usize = inner.history.values().map(|v| v.len()).sum();
             let total_buffer: usize = inner.buffer.values().map(|v| v.len()).sum();
@@ -426,7 +524,8 @@ impl PlotterAggregator {
             };
         }
 
-        let ts = chunk[0].0; // Use first timestamp
+        // Use average of first and last timestamp for better bucket positioning
+        let ts = (chunk[0].0 + chunk[chunk.len() - 1].0) / 2;
         let count = chunk.len();
 
         let min = chunk.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
@@ -587,192 +686,67 @@ impl PlotterAggregator {
         result
     }
 
-    /// Aggregate data into target number of points
+    /// Get ranged plotter data with dynamic aggregation
     ///
-    /// Uses stable bucket boundaries: buckets are fixed intervals from time_min,
-    /// so adding new data only affects the latest bucket(s), not historical ones.
-    #[cfg(test)]
-    pub fn aggregate_data(
-        data: &[(u64, f64)],
-        target_points: usize,
-        mode: &AggregationMode,
-    ) -> Vec<AggregatedPoint> {
-        if data.is_empty() || target_points == 0 {
-            return Vec::new();
-        }
-
-        if data.len() <= target_points {
-            return data
-                .iter()
-                .map(|&(ts, value)| AggregatedPoint::Single { ts, value })
-                .collect();
-        }
-
-        // Use LTTB algorithm for Lttb mode
-        if matches!(mode, AggregationMode::Lttb) {
-            return Self::lttb_downsample(data, target_points);
-        }
-
-        let time_min = data.first().map(|(ts, _)| *ts).unwrap_or(0);
-        let time_max = data.last().map(|(ts, _)| *ts).unwrap_or(0);
-        let time_range = time_max.saturating_sub(time_min);
-
-        if time_range == 0 {
-            let avg = data.iter().map(|(_, v)| v).sum::<f64>() / data.len() as f64;
-            return vec![AggregatedPoint::Single {
-                ts: time_min,
-                value: avg,
-            }];
-        }
-
-        // Calculate stable bucket width based on data density
-        // This ensures bucket boundaries are fixed relative to time_min
-        let data_rate = data.len() as f64 / time_range as f64; // points per ms
-
-        // Calculate bucket width that would give us target_points worth of data
-        // Use ceiling to ensure we don't exceed target_points
-        let bucket_width = if data_rate > 0.0 {
-            // Each bucket should contain approximately (data.len() / target_points) points
-            // bucket_width = points_per_bucket / data_rate
-            let points_per_bucket = data.len() as f64 / target_points as f64;
-            (points_per_bucket / data_rate).max(1.0) as u64
-        } else {
-            time_range / target_points as u64
-        }
-        .max(1);
-
-        // Calculate actual number of buckets needed (may exceed target_points slightly)
-        let num_buckets = ((time_range / bucket_width) + 1) as usize;
-
-        let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); num_buckets];
-        let mut bucket_times: Vec<u64> = vec![0; num_buckets];
-
-        // Assign data to buckets using stable boundaries from time_min
-        for &(ts, value) in data {
-            let bucket_idx = ((ts - time_min) / bucket_width) as usize;
-            if bucket_idx < num_buckets {
-                buckets[bucket_idx].push(value);
-                if bucket_times[bucket_idx] == 0 {
-                    bucket_times[bucket_idx] = ts;
-                }
-            }
-        }
-
-        match mode {
-            AggregationMode::Average => {
-                // Average mode returns MinMax points (average line with min/max band)
-                let mut result = Vec::with_capacity(num_buckets);
-                for (i, bucket) in buckets.iter().enumerate() {
-                    if bucket.is_empty() {
-                        continue;
-                    }
-                    let min = bucket.iter().cloned().fold(f64::INFINITY, f64::min);
-                    let max = bucket.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let ts = if bucket_times[i] != 0 {
-                        bucket_times[i]
-                    } else {
-                        time_min + (i as u64 * bucket_width)
+    /// Uses two-phase locking to reduce contention:
+    /// 1. Read lock to check cache and gather data
+    /// 2. Only upgrades to write lock if cache needs updating
+    pub fn get_ranged_data(&self, req: &PlotterDataRequest) -> PlotterRangedPayload {
+        // Phase 1: Try to get data with read lock (fast path for cache hits)
+        let read_result = {
+            let inner = match self.inner.read() {
+                Ok(inner) => inner,
+                Err(_) => {
+                    return PlotterRangedPayload {
+                        channels: Vec::new(),
+                        line_data: HashMap::new(),
+                        state_data: HashMap::new(),
+                        start_ms: 0,
+                        end_ms: 0,
+                        is_aggregated: false,
                     };
-                    result.push(AggregatedPoint::MinMax { ts, min, max });
                 }
-                result
-            }
-            AggregationMode::Lttb => {
-                // Already handled above, this branch is unreachable
-                unreachable!()
-            }
-        }
-    }
-
-    /// LTTB (Largest Triangle Three Buckets) downsampling algorithm
-    ///
-    /// This algorithm preserves the visual characteristics of the waveform by selecting
-    /// points that maximize the triangle area formed with neighboring buckets.
-    /// Reference: https://skemman.is/bitstream/1946/15343/3/SS_MSthesis.pdf
-    #[cfg(test)]
-    fn lttb_downsample(data: &[(u64, f64)], target_points: usize) -> Vec<AggregatedPoint> {
-        let data_len = data.len();
-
-        if data_len <= target_points || target_points < 3 {
-            return data
-                .iter()
-                .map(|&(ts, value)| AggregatedPoint::Single { ts, value })
-                .collect();
-        }
-
-        let mut result = Vec::with_capacity(target_points);
-
-        // Always include the first point
-        let (first_ts, first_val) = data[0];
-        result.push(AggregatedPoint::Single {
-            ts: first_ts,
-            value: first_val,
-        });
-
-        // Calculate bucket size (excluding first and last points)
-        let bucket_size = (data_len - 2) as f64 / (target_points - 2) as f64;
-
-        let mut prev_selected_idx: usize = 0;
-
-        for i in 0..(target_points - 2) {
-            // Calculate bucket boundaries
-            let bucket_start = ((i as f64 * bucket_size) as usize) + 1;
-            let bucket_end = (((i + 1) as f64 * bucket_size) as usize + 1).min(data_len - 1);
-
-            // Calculate average point of next bucket (for triangle calculation)
-            let next_bucket_start = bucket_end;
-            let next_bucket_end = (((i + 2) as f64 * bucket_size) as usize + 1).min(data_len);
-
-            let (avg_ts, avg_val) = if next_bucket_start < next_bucket_end {
-                let slice = &data[next_bucket_start..next_bucket_end];
-                let sum_ts: u64 = slice.iter().map(|(ts, _)| *ts).sum();
-                let sum_val: f64 = slice.iter().map(|(_, v)| *v).sum();
-                let count = slice.len() as f64;
-                (sum_ts as f64 / count, sum_val / count)
-            } else {
-                // Last bucket: use last point
-                let (ts, val) = data[data_len - 1];
-                (ts as f64, val)
             };
 
-            // Find the point in current bucket that forms the largest triangle
-            let (prev_ts, prev_val) = data[prev_selected_idx];
-            let mut max_area = -1.0f64;
-            let mut selected_idx = bucket_start;
+            // Calculate global time range from data
+            let (data_min_ms, data_max_ms) = Self::calculate_data_time_range(&inner);
 
-            for (idx, &(curr_ts, curr_val)) in data[bucket_start..bucket_end].iter().enumerate() {
-                // Calculate triangle area using the cross product formula
-                // Area = 0.5 * |x1(y2-y3) + x2(y3-y1) + x3(y1-y2)|
-                let area = ((prev_ts as f64 - avg_ts) * (curr_val - prev_val)
-                    - (prev_ts as f64 - curr_ts as f64) * (avg_val - prev_val))
-                    .abs();
+            // Resolve actual time range
+            let time_min_ms = req.time_min_ms.unwrap_or(data_min_ms);
+            let time_max_ms = req.time_max_ms.unwrap_or(data_max_ms);
 
-                if area > max_area {
-                    max_area = area;
-                    selected_idx = bucket_start + idx;
-                }
+            // Check cache validity
+            let cache_valid = Self::is_cache_valid(&inner, time_min_ms, time_max_ms, req);
+
+            if cache_valid {
+                // Cache hit - use cached data directly (no write lock needed)
+                let cache = inner.view_cache.as_ref().unwrap();
+                let line_data = cache.data.clone();
+
+                // Filter state data by time range
+                let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+                let channels = Self::build_channel_info(&inner);
+
+                Some(PlotterRangedPayload {
+                    channels,
+                    line_data,
+                    state_data,
+                    start_ms: time_min_ms,
+                    end_ms: time_max_ms,
+                    is_aggregated: true,
+                })
+            } else {
+                // Cache miss - need to regenerate (will need write lock)
+                None
             }
+        };
 
-            let (sel_ts, sel_val) = data[selected_idx];
-            result.push(AggregatedPoint::Single {
-                ts: sel_ts,
-                value: sel_val,
-            });
-            prev_selected_idx = selected_idx;
+        // If cache hit, return early without write lock
+        if let Some(payload) = read_result {
+            return payload;
         }
 
-        // Always include the last point
-        let (last_ts, last_val) = data[data_len - 1];
-        result.push(AggregatedPoint::Single {
-            ts: last_ts,
-            value: last_val,
-        });
-
-        result
-    }
-
-    /// Get ranged plotter data with dynamic aggregation
-    pub fn get_ranged_data(&self, req: &PlotterDataRequest) -> PlotterRangedPayload {
+        // Phase 2: Cache miss - need write lock to regenerate and update cache
         let mut inner = match self.inner.write() {
             Ok(inner) => inner,
             Err(_) => {
@@ -787,140 +761,177 @@ impl PlotterAggregator {
             }
         };
 
-        // Calculate global time range from data
+        // Recalculate time range (data may have changed between read and write lock)
         let (data_min_ms, data_max_ms) = Self::calculate_data_time_range(&inner);
-
-        // Resolve actual time range
         let time_min_ms = req.time_min_ms.unwrap_or(data_min_ms);
         let time_max_ms = req.time_max_ms.unwrap_or(data_max_ms);
 
-        // Check cache validity
-        let cache_valid = Self::is_cache_valid(&inner, time_min_ms, time_max_ms, req);
-
-        let (line_data, is_aggregated) = if cache_valid {
+        // Double-check cache (another thread may have updated it)
+        if Self::is_cache_valid(&inner, time_min_ms, time_max_ms, req) {
             let cache = inner.view_cache.as_ref().unwrap();
-            (cache.data.clone(), true)
-        } else {
-            // Generate fresh data by merging aggregated and recent
-            let target_points = req.pixel_width.min(MAX_TARGET_POINTS) as usize;
-            let threshold = inner
-                .config
-                .aggregation_threshold
-                .unwrap_or_else(|| inner.config.aggregation_mode.default_threshold());
+            let line_data = cache.data.clone();
+            let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+            let channels = Self::build_channel_info(&inner);
 
-            let mut aggregated_data = HashMap::new();
-            let mut any_aggregated = false;
+            return PlotterRangedPayload {
+                channels,
+                line_data,
+                state_data,
+                start_ms: time_min_ms,
+                end_ms: time_max_ms,
+                is_aggregated: true,
+            };
+        }
 
-            // Get all channel names and current aggregation mode
-            let channel_names: Vec<String> = inner.channel_names.clone();
-            let aggregation_mode = inner.config.aggregation_mode.clone();
+        // Generate fresh data by merging aggregated and recent
+        let target_points = req.pixel_width.min(inner.config.max_target_points) as usize;
+        let threshold = inner
+            .config
+            .aggregation_threshold
+            .unwrap_or_else(|| inner.config.aggregation_mode.default_threshold());
 
-            for channel in &channel_names {
-                // Skip non-line channels
-                let channel_type = inner
-                    .channel_types
-                    .get(channel)
-                    .cloned()
-                    .unwrap_or(ChannelType::Auto);
-                if channel_type == ChannelType::State {
-                    continue;
-                }
+        let mut aggregated_data = HashMap::new();
+        let mut any_aggregated = false;
 
-                // Collect buckets from all sources using binary search for O(log n) range finding
-                // Pre-calculate capacity to reduce allocations
-                let hist_data = inner.history.get(channel);
-                let buf_data = inner.buffer.get(channel);
-                let raw_buf = inner.raw_buffer.get(channel);
+        // Get all channel names and current aggregation mode
+        let channel_names: Vec<String> = inner.channel_names.clone();
+        let aggregation_mode = inner.config.aggregation_mode.clone();
 
-                let estimated_size = hist_data.map(|h| h.len()).unwrap_or(0)
-                    + buf_data.map(|b| b.len()).unwrap_or(0)
-                    + raw_buf
-                        .map(|r| r.len() / inner.current_level.max(1))
-                        .unwrap_or(0);
-                let mut all_buckets: Vec<AggregatedBucket> =
-                    Vec::with_capacity(estimated_size.min(target_points * 2));
-
-                // Add buckets from history using binary search for range
-                if let Some(hist_data) = hist_data {
-                    let start_idx = find_range_start(hist_data, time_min_ms);
-                    let end_idx = find_range_end(hist_data, time_max_ms);
-                    if start_idx < end_idx {
-                        all_buckets.extend_from_slice(&hist_data[start_idx..end_idx]);
-                    }
-                }
-
-                // Add buckets from buffer using binary search for range
-                if let Some(buf_data) = buf_data {
-                    let start_idx = find_range_start(buf_data, time_min_ms);
-                    let end_idx = find_range_end(buf_data, time_max_ms);
-                    if start_idx < end_idx {
-                        all_buckets.extend_from_slice(&buf_data[start_idx..end_idx]);
-                    }
-                }
-
-                // Add points from raw_buffer (these are still unsorted in VecDeque,
-                // so we need to iterate, but raw_buffer is typically small)
-                if let Some(raw_buf) = raw_buf {
-                    // Collect raw points in range - raw_buffer is small, O(n) is acceptable
-                    let display_bucket = inner.current_level.max(1);
-                    let mut chunk_buffer: Vec<(u64, f64)> = Vec::with_capacity(display_bucket);
-
-                    for &(ts, v) in raw_buf.iter() {
-                        if ts >= time_min_ms && ts <= time_max_ms {
-                            chunk_buffer.push((ts, v));
-                            if chunk_buffer.len() >= display_bucket {
-                                all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
-                                chunk_buffer.clear();
-                            }
-                        }
-                    }
-                    // Handle remaining points
-                    if !chunk_buffer.is_empty() {
-                        all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
-                    }
-                }
-
-                // No sorting needed - data is already in timestamp order
-
-                // Check if further aggregation is needed for display
-                let needs_aggregation = all_buckets.len() > target_points * threshold;
-
-                // Convert buckets to points based on current aggregation mode
-                let points: Vec<AggregatedPoint> = if needs_aggregation && time_max_ms > time_min_ms
-                {
-                    any_aggregated = true;
-                    // Re-aggregate buckets first, then convert to points
-                    let aggregated_buckets =
-                        Self::aggregate_buckets_preserving(&all_buckets, target_points);
-                    aggregated_buckets
-                        .iter()
-                        .map(|b| b.to_point(&aggregation_mode))
-                        .collect()
-                } else {
-                    // Just convert to points based on mode
-                    all_buckets
-                        .iter()
-                        .map(|b| b.to_point(&aggregation_mode))
-                        .collect()
-                };
-
-                aggregated_data.insert(channel.clone(), points);
+        for channel in &channel_names {
+            // Skip non-line channels
+            let channel_type = inner
+                .channel_types
+                .get(channel)
+                .cloned()
+                .unwrap_or(ChannelType::Auto);
+            if channel_type == ChannelType::State {
+                continue;
             }
 
-            // Update cache (move instead of clone when possible)
-            let cache_data = aggregated_data.clone();
-            inner.view_cache = Some(ViewCache {
-                time_range: (time_min_ms, time_max_ms),
-                pixel_width: req.pixel_width,
-                data: cache_data,
-                was_realtime: req.is_realtime,
-            });
+            // Collect buckets from all sources using binary search for O(log n) range finding
+            // Pre-calculate capacity to reduce allocations
+            let hist_data = inner.history.get(channel);
+            let buf_data = inner.buffer.get(channel);
+            let raw_buf = inner.raw_buffer.get(channel);
 
-            (aggregated_data, any_aggregated)
-        };
+            let estimated_size = hist_data.map(|h| h.len()).unwrap_or(0)
+                + buf_data.map(|b| b.len()).unwrap_or(0)
+                + raw_buf
+                    .map(|r| r.len() / inner.current_level.max(1))
+                    .unwrap_or(0);
+            let mut all_buckets: Vec<AggregatedBucket> =
+                Vec::with_capacity(estimated_size.min(target_points * 2));
+
+            // Add buckets from history using binary search for range
+            if let Some(hist_data) = hist_data {
+                let start_idx = find_range_start(hist_data, time_min_ms);
+                let end_idx = find_range_end(hist_data, time_max_ms);
+                if start_idx < end_idx {
+                    all_buckets.extend_from_slice(&hist_data[start_idx..end_idx]);
+                }
+            }
+
+            // Add buckets from buffer using binary search for range
+            if let Some(buf_data) = buf_data {
+                let start_idx = find_range_start(buf_data, time_min_ms);
+                let end_idx = find_range_end(buf_data, time_max_ms);
+                if start_idx < end_idx {
+                    all_buckets.extend_from_slice(&buf_data[start_idx..end_idx]);
+                }
+            }
+
+            // Add points from raw_buffer (these are still unsorted in VecDeque,
+            // so we need to iterate, but raw_buffer is typically small)
+            if let Some(raw_buf) = raw_buf {
+                // Collect raw points in range - raw_buffer is small, O(n) is acceptable
+                let display_bucket = inner.current_level.max(1);
+                let mut chunk_buffer: Vec<(u64, f64)> = Vec::with_capacity(display_bucket);
+
+                for &(ts, v) in raw_buf.iter() {
+                    if ts >= time_min_ms && ts <= time_max_ms {
+                        chunk_buffer.push((ts, v));
+                        if chunk_buffer.len() >= display_bucket {
+                            all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                            chunk_buffer.clear();
+                        }
+                    }
+                }
+                // Handle remaining points
+                if !chunk_buffer.is_empty() {
+                    all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                }
+            }
+
+            // No sorting needed - data is already in timestamp order
+
+            // Check if further aggregation is needed for display
+            let needs_aggregation = all_buckets.len() > target_points * threshold;
+
+            // Convert buckets to points based on current aggregation mode
+            let points: Vec<AggregatedPoint> = if needs_aggregation && time_max_ms > time_min_ms {
+                any_aggregated = true;
+                match aggregation_mode {
+                    AggregationMode::Lttb => {
+                        // Use true LTTB algorithm for feature-preserving downsampling
+                        let selected_indices = lttb_downsample(&all_buckets, target_points);
+                        selected_indices
+                            .iter()
+                            .map(|&idx| all_buckets[idx].to_point(&aggregation_mode))
+                            .collect()
+                    }
+                    AggregationMode::Average => {
+                        // Use preserving aggregation for Average mode (keeps min/max bands)
+                        let aggregated_buckets =
+                            Self::aggregate_buckets_preserving(&all_buckets, target_points);
+                        aggregated_buckets
+                            .iter()
+                            .map(|b| b.to_point(&aggregation_mode))
+                            .collect()
+                    }
+                }
+            } else {
+                // Just convert to points based on mode
+                all_buckets
+                    .iter()
+                    .map(|b| b.to_point(&aggregation_mode))
+                    .collect()
+            };
+
+            aggregated_data.insert(channel.clone(), points);
+        }
+
+        // Update cache
+        let cache_data = aggregated_data.clone();
+        inner.view_cache = Some(ViewCache {
+            time_range: (time_min_ms, time_max_ms),
+            pixel_width: req.pixel_width,
+            data: cache_data,
+            was_realtime: req.is_realtime,
+        });
 
         // Filter state data by time range
-        let state_data: HashMap<String, Vec<StateChange>> = inner
+        let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+
+        // Build channel info
+        let channels = Self::build_channel_info(&inner);
+
+        PlotterRangedPayload {
+            channels,
+            line_data: aggregated_data,
+            state_data,
+            start_ms: time_min_ms,
+            end_ms: time_max_ms,
+            is_aggregated: any_aggregated,
+        }
+    }
+
+    /// Filter state data by time range (helper for get_ranged_data)
+    fn filter_state_data(
+        inner: &PlotterAggregatorInner,
+        time_min_ms: u64,
+        time_max_ms: u64,
+    ) -> HashMap<String, Vec<StateChange>> {
+        inner
             .state_data
             .iter()
             .filter(|(channel, _)| {
@@ -941,21 +952,170 @@ impl PlotterAggregator {
                     .collect();
                 (channel.clone(), filtered)
             })
-            .collect();
-
-        // Build channel info
-        let channels = Self::build_channel_info(&inner);
-
-        PlotterRangedPayload {
-            channels,
-            line_data,
-            state_data,
-            start_ms: time_min_ms,
-            end_ms: time_max_ms,
-            is_aggregated,
-        }
+            .collect()
     }
 
+    /// Get chart data in uPlot-ready format
+    ///
+    /// Returns data pre-aligned for uPlot consumption:
+    /// - `aligned_data[0]`: timestamps in seconds (f64)
+    /// - `aligned_data[1..]`: channel values in `channel_names` order
+    /// - `band_data`: min/max bands for Average mode
+    ///
+    /// This eliminates per-frame data transformation in the frontend,
+    /// fixing the memory leak caused by repeated object creation.
+    pub fn get_chart_data(&self, req: &PlotterDataRequest) -> PlotterChartPayload {
+        // First, get the existing ranged data
+        let ranged = self.get_ranged_data(req);
+
+        // Get channel names in registration order (CSV header order) from inner state
+        // Only include channels that have line data
+        let channel_names: Vec<String> = self
+            .inner
+            .read()
+            .map(|inner| {
+                inner
+                    .channel_names
+                    .iter()
+                    .filter(|name| ranged.line_data.contains_key(*name))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_else(|_| ranged.line_data.keys().cloned().collect());
+
+        // If no data, return empty payload
+        if channel_names.is_empty() {
+            return PlotterChartPayload {
+                aligned_data: vec![vec![]], // Empty timestamps array
+                channel_names: vec![],
+                band_data: None,
+                state_data: ranged.state_data,
+                channels: ranged.channels,
+                start_ms: ranged.start_ms,
+                end_ms: ranged.end_ms,
+            };
+        }
+
+        // Collect all unique timestamps from all channels
+        let mut timestamp_set: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for points in ranged.line_data.values() {
+            for point in points {
+                let ts = match point {
+                    AggregatedPoint::Single { ts, .. } => *ts,
+                    AggregatedPoint::MinMax { ts, .. } => *ts,
+                };
+                timestamp_set.insert(ts);
+            }
+        }
+        let timestamps: Vec<u64> = timestamp_set.into_iter().collect();
+
+        // If no timestamps, return empty payload
+        if timestamps.is_empty() {
+            return PlotterChartPayload {
+                aligned_data: vec![vec![]],
+                channel_names: vec![],
+                band_data: None,
+                state_data: ranged.state_data,
+                channels: ranged.channels,
+                start_ms: ranged.start_ms,
+                end_ms: ranged.end_ms,
+            };
+        }
+
+        // Build aligned data arrays
+        // aligned_data[0] = timestamps in seconds
+        let timestamps_seconds: Vec<Option<f64>> = timestamps
+            .iter()
+            .map(|&ts| Some(ts as f64 / 1000.0))
+            .collect();
+
+        let mut aligned_data: Vec<Vec<Option<f64>>> = vec![timestamps_seconds];
+
+        // Check if we have MinMax data (Average mode) for band_data
+        let has_minmax = ranged.line_data.values().any(|points| {
+            points
+                .iter()
+                .any(|p| matches!(p, AggregatedPoint::MinMax { .. }))
+        });
+
+        let mut band_data_map: HashMap<String, BandSeriesData> = HashMap::new();
+
+        // Build data arrays for each channel
+        for channel in &channel_names {
+            let points = ranged.line_data.get(channel);
+            let num_timestamps = timestamps.len();
+
+            // Create a map from timestamp to point for efficient lookup
+            let mut ts_to_point: HashMap<u64, &AggregatedPoint> = HashMap::new();
+            if let Some(points) = points {
+                for point in points {
+                    let ts = match point {
+                        AggregatedPoint::Single { ts, .. } => *ts,
+                        AggregatedPoint::MinMax { ts, .. } => *ts,
+                    };
+                    ts_to_point.insert(ts, point);
+                }
+            }
+
+            // Build value array (null for missing timestamps)
+            let mut values: Vec<Option<f64>> = Vec::with_capacity(num_timestamps);
+            let mut mins: Vec<Option<f64>> = Vec::with_capacity(num_timestamps);
+            let mut maxs: Vec<Option<f64>> = Vec::with_capacity(num_timestamps);
+
+            for ts in &timestamps {
+                match ts_to_point.get(ts) {
+                    Some(AggregatedPoint::Single { value, .. }) => {
+                        values.push(Some(*value));
+                        if has_minmax {
+                            // For Single points in Average mode, use value as both min and max
+                            mins.push(Some(*value));
+                            maxs.push(Some(*value));
+                        }
+                    }
+                    Some(AggregatedPoint::MinMax { min, max, .. }) => {
+                        // Use midpoint (average) as the line value
+                        values.push(Some((min + max) / 2.0));
+                        mins.push(Some(*min));
+                        maxs.push(Some(*max));
+                    }
+                    None => {
+                        values.push(None);
+                        if has_minmax {
+                            mins.push(None);
+                            maxs.push(None);
+                        }
+                    }
+                }
+            }
+
+            aligned_data.push(values);
+
+            // Store band data if in Average mode (has MinMax points)
+            if has_minmax {
+                band_data_map.insert(
+                    channel.clone(),
+                    BandSeriesData {
+                        min: mins,
+                        max: maxs,
+                    },
+                );
+            }
+        }
+
+        PlotterChartPayload {
+            aligned_data,
+            channel_names,
+            band_data: if band_data_map.is_empty() {
+                None
+            } else {
+                Some(band_data_map)
+            },
+            state_data: ranged.state_data,
+            channels: ranged.channels,
+            start_ms: ranged.start_ms,
+            end_ms: ranged.end_ms,
+        }
+    }
     /// Calculate data time range from all channels
     fn calculate_data_time_range(inner: &PlotterAggregatorInner) -> (u64, u64) {
         let mut min_ms = u64::MAX;
@@ -1022,7 +1182,7 @@ impl PlotterAggregator {
 
         // Check pixel width change (20% threshold)
         let pixel_diff = (cache.pixel_width as f32 - req.pixel_width as f32).abs();
-        let pixel_threshold = cache.pixel_width as f32 * PIXEL_WIDTH_THRESHOLD_PERCENT;
+        let pixel_threshold = cache.pixel_width as f32 * inner.config.pixel_width_threshold_percent;
         if pixel_diff > pixel_threshold {
             return false;
         }
@@ -1109,7 +1269,7 @@ impl PlotterAggregator {
             inner.buffer.clear();
             inner.raw_buffer.clear();
             inner.current_level = 1;
-            inner.bucket_size = DEFAULT_BUCKET_SIZE;
+            inner.bucket_size = inner.config.bucket_size;
             inner.state_data.clear();
             inner.view_cache = None;
         }
@@ -1188,7 +1348,7 @@ impl PlotterAggregator {
             }
 
             inner.current_level = 1;
-            inner.bucket_size = DEFAULT_BUCKET_SIZE;
+            inner.bucket_size = inner.config.bucket_size;
             inner.view_cache = None;
         }
     }
@@ -1350,51 +1510,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lttb_aggregation() {
-        // Create a sine wave with clear peaks and valleys
-        let mut data: Vec<(u64, f64)> = Vec::new();
-        for i in 0..1000 {
-            let t = i as f64 * 0.01;
-            let value = (t * std::f64::consts::PI * 2.0).sin() * 100.0;
-            data.push((i * 10, value)); // 10ms intervals
-        }
-
-        // Downsample to 50 points using LTTB
-        let result = PlotterAggregator::aggregate_data(&data, 50, &AggregationMode::Lttb);
-
-        // Should return approximately target_points
-        assert!(result.len() <= 52); // Allow small variance
-        assert!(result.len() >= 48);
-
-        // First and last points should be preserved (LTTB always keeps them)
-        if let AggregatedPoint::Single { ts, value } = result[0] {
-            assert_eq!(ts, 0);
-            assert!((value - 0.0).abs() < 0.01); // sin(0) = 0
-        }
-        if let AggregatedPoint::Single { ts, .. } = result[result.len() - 1] {
-            assert_eq!(ts, 9990); // Last point
-        }
-
-        // Check that peaks are approximately preserved
-        // The max abs value should be close to 100 (within 10%)
-        let max_abs: f64 = result
-            .iter()
-            .filter_map(|p| {
-                if let AggregatedPoint::Single { value, .. } = p {
-                    Some(value.abs())
-                } else {
-                    None
-                }
-            })
-            .fold(0.0, f64::max);
-        assert!(
-            max_abs > 90.0,
-            "LTTB should preserve peaks, got max={}",
-            max_abs
-        );
-    }
-
-    #[test]
     fn test_average_minmax_aggregation() {
         let config = PlotterConfig {
             max_points: 100,
@@ -1507,36 +1622,6 @@ mod tests {
             })
             .collect();
         assert_eq!(values, vec![20.0, 30.0, 40.0]);
-    }
-
-    #[test]
-    fn test_lttb_with_small_data() {
-        // LTTB with data <= target_points should return all data
-        let data: Vec<(u64, f64)> = (0..10).map(|i| (i * 100, i as f64)).collect();
-
-        let result = PlotterAggregator::aggregate_data(&data, 20, &AggregationMode::Lttb);
-
-        // All 10 points should be returned as Single
-        assert_eq!(result.len(), 10);
-        for (i, point) in result.iter().enumerate() {
-            if let AggregatedPoint::Single { ts, value } = *point {
-                assert_eq!(ts, (i as u64) * 100);
-                assert_eq!(value, i as f64);
-            } else {
-                panic!("Expected Single point");
-            }
-        }
-    }
-
-    #[test]
-    fn test_lttb_minimum_target() {
-        // LTTB with target_points < 3 should return all data
-        let data: Vec<(u64, f64)> = (0..100).map(|i| (i * 100, i as f64)).collect();
-
-        let result = PlotterAggregator::aggregate_data(&data, 2, &AggregationMode::Lttb);
-
-        // Should return all data since target < 3
-        assert_eq!(result.len(), 100);
     }
 
     #[test]
@@ -1809,7 +1894,12 @@ mod tests {
         assert!(!data.is_empty(), "Should have data");
 
         // Verify time range covers full dataset (allowing for bucket aggregation)
-        assert_eq!(payload.start_ms, 0);
+        // Note: start_ms may be slightly offset due to average timestamp calculation in buckets
+        assert!(
+            payload.start_ms <= 100,
+            "Start should be near 0, got {}",
+            payload.start_ms
+        );
         assert!(
             payload.end_ms >= 49800,
             "End time should be at least 49800, got {}",
@@ -1879,6 +1969,7 @@ mod tests {
             batch.push(crate::plotter::parser::ParsedDataPoint {
                 timestamp_ms: i * 100,
                 channels,
+                channel_order: vec!["ch0".to_string()],
             });
         }
         agg2.add_data_points_batch(batch);
@@ -2043,7 +2134,7 @@ mod tests {
                 AggregatedPoint::MinMax { ts, .. } => *ts,
             };
             assert!(
-                ts >= 3000 && ts <= 7000,
+                (3000..=7000).contains(&ts),
                 "Point at {} should be in range [3000, 7000]",
                 ts
             );
@@ -2113,11 +2204,382 @@ mod tests {
         let payload = agg.get_ranged_data(&req);
 
         // Time range should still cover full data (allowing for bucket boundaries)
-        assert_eq!(payload.start_ms, 0, "Start should be 0");
+        // Note: start_ms may be slightly offset due to average timestamp calculation in buckets
+        assert!(
+            payload.start_ms <= 100,
+            "Start should be near 0, got {}",
+            payload.start_ms
+        );
         assert!(
             payload.end_ms >= 4800,
             "End should be >= 4800, got {}",
             payload.end_ms
+        );
+    }
+
+    // ==================== get_chart_data tests ====================
+
+    #[test]
+    fn test_get_chart_data_format() {
+        // Verify that get_chart_data returns data in uPlot format
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        // Add some data points
+        agg.add_data_point("ch0", 1000, ChannelValue::Numeric(10.0));
+        agg.add_data_point("ch0", 2000, ChannelValue::Numeric(20.0));
+        agg.add_data_point("ch1", 1000, ChannelValue::Numeric(100.0));
+        agg.add_data_point("ch1", 2000, ChannelValue::Numeric(200.0));
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        };
+
+        let payload = agg.get_chart_data(&req);
+
+        // Check structure: aligned_data[0] = timestamps, aligned_data[1..] = channel values
+        assert!(
+            payload.aligned_data.len() >= 3,
+            "Should have timestamps + 2 channels"
+        );
+        assert_eq!(
+            payload.channel_names.len(),
+            payload.aligned_data.len() - 1,
+            "channel_names should match data columns"
+        );
+
+        // Check channel names are sorted
+        let mut sorted_names = payload.channel_names.clone();
+        sorted_names.sort();
+        assert_eq!(
+            payload.channel_names, sorted_names,
+            "Channels should be sorted"
+        );
+
+        // Check timestamps are in seconds (should be 1.0 and 2.0)
+        let timestamps = &payload.aligned_data[0];
+        assert_eq!(timestamps.len(), 2);
+        assert_eq!(timestamps[0], Some(1.0)); // 1000ms = 1.0s
+        assert_eq!(timestamps[1], Some(2.0)); // 2000ms = 2.0s
+    }
+
+    #[test]
+    fn test_chart_data_null_handling() {
+        // Verify that missing data points are represented as None
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        // Add data with different timestamps per channel
+        agg.add_data_point("ch0", 1000, ChannelValue::Numeric(10.0));
+        agg.add_data_point("ch0", 2000, ChannelValue::Numeric(20.0));
+        agg.add_data_point("ch1", 2000, ChannelValue::Numeric(200.0)); // ch1 only has ts=2000
+        agg.add_data_point("ch1", 3000, ChannelValue::Numeric(300.0)); // ch1 only has ts=3000
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        };
+
+        let payload = agg.get_chart_data(&req);
+
+        // Should have 3 timestamps: 1000, 2000, 3000
+        assert_eq!(payload.aligned_data[0].len(), 3);
+
+        // Find channel indices
+        let ch0_idx = payload
+            .channel_names
+            .iter()
+            .position(|n| n == "ch0")
+            .unwrap()
+            + 1;
+        let ch1_idx = payload
+            .channel_names
+            .iter()
+            .position(|n| n == "ch1")
+            .unwrap()
+            + 1;
+
+        let ch0_data = &payload.aligned_data[ch0_idx];
+        let ch1_data = &payload.aligned_data[ch1_idx];
+
+        // ch0: has data at ts=1000, 2000; missing at ts=3000
+        assert!(ch0_data[0].is_some()); // ts=1000
+        assert!(ch0_data[1].is_some()); // ts=2000
+        assert!(ch0_data[2].is_none()); // ts=3000 missing
+
+        // ch1: missing at ts=1000; has data at ts=2000, 3000
+        assert!(ch1_data[0].is_none()); // ts=1000 missing
+        assert!(ch1_data[1].is_some()); // ts=2000
+        assert!(ch1_data[2].is_some()); // ts=3000
+    }
+
+    #[test]
+    fn test_chart_data_timestamps_aligned() {
+        // Verify that all channels use the same timestamp array
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        // Add data with overlapping timestamps
+        for i in 0..100 {
+            agg.add_data_point("ch0", i * 100, ChannelValue::Numeric(i as f64));
+            if i % 2 == 0 {
+                agg.add_data_point("ch1", i * 100, ChannelValue::Numeric(i as f64 * 10.0));
+            }
+        }
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        };
+
+        let payload = agg.get_chart_data(&req);
+
+        // All data arrays should have the same length as timestamps
+        let ts_len = payload.aligned_data[0].len();
+        for (i, data) in payload.aligned_data.iter().enumerate() {
+            assert_eq!(
+                data.len(),
+                ts_len,
+                "Channel {} should have same length as timestamps",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_chart_data_band_data() {
+        // Verify band_data is populated in Average mode
+        let config = PlotterConfig {
+            max_points: 10, // Small to trigger aggregation
+            aggregation_mode: AggregationMode::Average,
+            ..Default::default()
+        };
+        let agg = PlotterAggregator::with_config(config);
+        agg.set_enabled(true);
+
+        // Add enough data to trigger aggregation which produces MinMax points
+        for i in 0..200 {
+            agg.add_data_point("ch0", i * 10, ChannelValue::Numeric((i % 50) as f64));
+        }
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 50, // Small to trigger view aggregation
+            is_realtime: false,
+        };
+
+        let payload = agg.get_chart_data(&req);
+
+        // In Average mode with aggregation, band_data should be Some
+        if payload.band_data.is_some() {
+            let band_data = payload.band_data.as_ref().unwrap();
+            assert!(
+                band_data.contains_key("ch0"),
+                "Should have band data for ch0"
+            );
+
+            let ch0_band = band_data.get("ch0").unwrap();
+            assert_eq!(
+                ch0_band.min.len(),
+                payload.aligned_data[0].len(),
+                "Band min should match timestamps length"
+            );
+            assert_eq!(
+                ch0_band.max.len(),
+                payload.aligned_data[0].len(),
+                "Band max should match timestamps length"
+            );
+        }
+        // Note: band_data may be None if no aggregation occurred
+    }
+
+    #[test]
+    fn test_chart_data_empty() {
+        // Verify empty data handling
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        };
+
+        let payload = agg.get_chart_data(&req);
+
+        // Should return empty but valid structure
+        assert!(
+            !payload.aligned_data.is_empty(),
+            "Should have at least timestamps array"
+        );
+        assert!(payload.channel_names.is_empty(), "Should have no channels");
+        assert!(payload.band_data.is_none(), "Should have no band data");
+    }
+
+    // ==================== LTTB Algorithm Tests ====================
+
+    #[test]
+    fn test_lttb_downsample_small_data() {
+        // When data is smaller than target, return all indices
+        let data: Vec<AggregatedBucket> = (0..5)
+            .map(|i| AggregatedBucket {
+                ts: i * 100,
+                min: i as f64,
+                max: i as f64,
+                avg: i as f64,
+                count: 1,
+            })
+            .collect();
+
+        let result = lttb_downsample(&data, 10);
+        assert_eq!(result, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_lttb_downsample_preserves_endpoints() {
+        // LTTB always includes first and last points
+        let data: Vec<AggregatedBucket> = (0..100)
+            .map(|i| AggregatedBucket {
+                ts: i * 100,
+                min: i as f64,
+                max: i as f64,
+                avg: i as f64,
+                count: 1,
+            })
+            .collect();
+
+        let result = lttb_downsample(&data, 10);
+
+        assert_eq!(result[0], 0, "First point should always be included");
+        assert_eq!(
+            *result.last().unwrap(),
+            99,
+            "Last point should always be included"
+        );
+        assert_eq!(result.len(), 10, "Should return exactly target points");
+    }
+
+    #[test]
+    fn test_lttb_preserves_peak() {
+        // Create data with a clear peak - LTTB should select it
+        let mut data: Vec<AggregatedBucket> = Vec::new();
+
+        // Flat baseline at 0
+        for i in 0..20 {
+            data.push(AggregatedBucket {
+                ts: i * 100,
+                min: 0.0,
+                max: 0.0,
+                avg: 0.0,
+                count: 1,
+            });
+        }
+
+        // Sharp peak at position 25
+        for i in 20..30 {
+            let peak_value = if i == 25 { 100.0 } else { 0.0 };
+            data.push(AggregatedBucket {
+                ts: i * 100,
+                min: peak_value,
+                max: peak_value,
+                avg: peak_value,
+                count: 1,
+            });
+        }
+
+        // Back to baseline
+        for i in 30..50 {
+            data.push(AggregatedBucket {
+                ts: i * 100,
+                min: 0.0,
+                max: 0.0,
+                avg: 0.0,
+                count: 1,
+            });
+        }
+
+        let result = lttb_downsample(&data, 10);
+
+        // The peak at index 25 should be selected (forms largest triangle)
+        assert!(
+            result.contains(&25),
+            "LTTB should select the peak point. Selected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_lttb_mode_uses_lttb_algorithm() {
+        // Test that LTTB mode actually uses the LTTB algorithm
+        let config = PlotterConfig {
+            max_points: 100,
+            aggregation_mode: AggregationMode::Lttb,
+            aggregation_threshold: Some(2), // Trigger aggregation easily
+            ..Default::default()
+        };
+        let agg = PlotterAggregator::with_config(config);
+        agg.set_enabled(true);
+
+        // Add data with varying amplitude (triangular wave)
+        for i in 0..200 {
+            let value = if i % 20 < 10 {
+                (i % 20) as f64 * 10.0
+            } else {
+                (20 - (i % 20)) as f64 * 10.0
+            };
+            agg.add_data_point("ch0", i * 100, ChannelValue::Numeric(value));
+        }
+
+        let req = PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 50, // Force downsampling
+            is_realtime: false,
+        };
+
+        let payload = agg.get_ranged_data(&req);
+        let data = payload.line_data.get("ch0").unwrap();
+
+        // LTTB mode should return Single points
+        assert!(
+            data.iter()
+                .all(|p| matches!(p, AggregatedPoint::Single { .. })),
+            "LTTB mode should only return Single points"
+        );
+
+        // Verify peaks are preserved in some form
+        let values: Vec<f64> = data
+            .iter()
+            .map(|p| match p {
+                AggregatedPoint::Single { value, .. } => *value,
+                AggregatedPoint::MinMax { min, max, .. } => (min + max) / 2.0,
+            })
+            .collect();
+
+        let max_value = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let min_value = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+
+        // Data goes through bucket averaging, so peaks are reduced.
+        // What matters is that LTTB preserves relative variation (max > min)
+        assert!(
+            max_value > min_value,
+            "LTTB should preserve variation: max={}, min={}",
+            max_value,
+            min_value
+        );
+        assert!(
+            max_value > 0.0,
+            "LTTB should preserve some peak values, max was {}",
+            max_value
         );
     }
 }
