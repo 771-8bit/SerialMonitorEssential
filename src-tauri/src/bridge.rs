@@ -29,6 +29,7 @@
 //!
 //! | method | params | result |
 //! |--------|--------|--------|
+//! | `help` | - | プロトコル仕様（機械可読・認証不要） |
 //! | `auth` | `{token}` | `{authenticated: true}` |
 //! | `status` | - | `{connected, port_name, total_bytes, app_version, protocol}` |
 //! | `read_range` | `{offset: u64, length: u32}` | `{base64, offset, length_read}` |
@@ -119,6 +120,10 @@ pub struct BridgeActivity {
     pub bytes: usize,
     /// 発生時刻（Unix epoch ms）
     pub at_ms: u64,
+    /// 送信内容の先頭 64 文字（lossy）。「AI の送信内容を人間が確認できる」
+    /// 要件（SYS-F-1103）の中身の部分。イベントを見逃しても `bridge_status`
+    /// のポーリングで復元できるよう、活動ログ側にも持たせる。
+    pub preview: String,
 }
 
 /// `bridge-activity` イベントのペイロード
@@ -178,6 +183,7 @@ impl BridgeCtx {
                 kind: "send".to_string(),
                 bytes,
                 at_ms: now_ms(),
+                preview: preview.clone(),
             });
         }
         (self.emit)(BridgeActivityEvent {
@@ -365,6 +371,11 @@ pub fn preview_of(data: &[u8]) -> String {
 pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> Response {
     let id = req.id.clone();
 
+    // help は自己記述のための発見用メソッド: データを一切含まないので認証不要
+    if req.method == "help" {
+        return Response::ok(id, method_help());
+    }
+
     // 認証ゲート: トークン設定時は auth が最初の必須リクエスト
     if req.method == "auth" {
         return match &ctx.token {
@@ -406,6 +417,41 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
         },
         other => Response::error(id, format!("unknown method: {}", other)),
     }
+}
+
+/// `help`: プロトコル仕様を機械可読で返す
+///
+/// MCP を使わず生 TCP で繋ぐ AI エージェントが、この 1 メソッドだけで
+/// 使い方を自己取得できるようにする（認証不要・データ非含有）。
+fn method_help() -> Value {
+    json!({
+        "name": "serial-monitor-essential AI Bridge",
+        "protocol": PROTOCOL_VERSION,
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "transport": "NDJSON over TCP (127.0.0.1 only). One JSON object per line. Request: {\"id\":n,\"method\":\"...\",\"params\":{...}}. Response: {\"id\":n,\"ok\":true,\"result\":{...}} or {\"id\":n,\"ok\":false,\"error\":\"...\"}.",
+        "auth": "Only required when a token is configured; then 'auth' {token} must be the first request. 'help' never requires auth.",
+        "methods": {
+            "help": { "params": {}, "result": "this document" },
+            "auth": { "params": { "token": "string" }, "result": { "authenticated": true } },
+            "status": { "params": {}, "result": { "connected": "bool", "port_name": "string|null", "total_bytes": "u64", "app_version": "string", "protocol": "u32" } },
+            "read_range": { "params": { "offset": "u64", "length": "u32 (clamped to 1 MiB and to available bytes)" }, "result": { "base64": "string", "offset": "u64", "length_read": "u32" } },
+            "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
+            "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
+            "ports": { "params": {}, "result": { "ports": ["string"] } },
+            "subscribe": { "params": { "from_offset": "u64 (optional)" }, "result": { "subscribed": true }, "note": "after this the connection becomes push-only: frames {event:'data',offset,base64} every <=50ms, {event:'reset'} when the capture restarts; close the socket to stop" }
+        },
+        "limits": {
+            "max_read_length": MAX_READ_LENGTH,
+            "default_tail_bytes": DEFAULT_TAIL_BYTES,
+            "max_connections": MAX_CONNECTIONS,
+            "subscribe_max_frame": SUBSCRIBE_MAX_FRAME,
+        },
+        "hints": [
+            "Poll 'tail' (or use 'subscribe') to follow live data; offsets are absolute stream offsets.",
+            "Typical debug flow: status -> send -> poll tail until the reply pattern appears.",
+            "An MCP stdio adapter with higher-level tools is built into the app binary: run it with --mcp.",
+        ],
+    })
 }
 
 fn method_status(ctx: &BridgeCtx) -> Value {
@@ -877,6 +923,42 @@ impl BridgeState {
     }
 }
 
+/// AI 連携ガイドの表示に必要な情報
+///
+/// `exe_path` は実行中バイナリの絶対パス。ガイドはこれを埋め込んだ
+/// コピペ可能な MCP 登録コマンドを表示する（インストール先はユーザーごとに
+/// 異なるため、実行時に解決するしかない）。
+#[derive(Clone, Debug, Serialize)]
+pub struct BridgeGuideInfo {
+    pub exe_path: String,
+    pub bridge_enabled: bool,
+    pub bridge_port: u16,
+    pub app_version: String,
+}
+
+/// AI 連携ガイド用の情報を返す
+#[tauri::command]
+pub fn bridge_guide_info(state: tauri::State<'_, BridgeState>) -> BridgeGuideInfo {
+    let config = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    // AppImage では current_exe() が一時マウントされた squashfs 内のパスを返し、
+    // アプリ終了とともに消える。AppImage ランタイムが設定する $APPIMAGE
+    // （.AppImage 本体のパス）を優先する。
+    let exe_path = std::env::var("APPIMAGE")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+    BridgeGuideInfo {
+        exe_path,
+        bridge_enabled: config.enabled,
+        bridge_port: config.port,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
 /// ブリッジの現在状態を取得する
 #[tauri::command]
 pub fn bridge_status(state: tauri::State<'_, BridgeState>) -> BridgeStatusInfo {
@@ -1185,6 +1267,33 @@ mod tests {
     }
 
     #[test]
+    fn test_help_is_self_describing_and_needs_no_auth() {
+        // トークン設定時でも help は未認証で通る（発見用・データ非含有）
+        let (ctx, _) = test_ctx(None, Some("s3cret".to_string()));
+        let mut session = Session::new(true);
+        let response = handle_request(&Request::new(1, "help", json!({})), &ctx, &mut session);
+        let result = result_of(response);
+        assert_eq!(result["protocol"], json!(PROTOCOL_VERSION));
+        // 全メソッドが仕様に載っている
+        let methods = result["methods"].as_object().unwrap();
+        for name in [
+            "help",
+            "auth",
+            "status",
+            "read_range",
+            "tail",
+            "send",
+            "ports",
+            "subscribe",
+        ] {
+            assert!(methods.contains_key(name), "missing method doc: {}", name);
+        }
+        assert_eq!(result["limits"]["max_read_length"], json!(MAX_READ_LENGTH));
+        // help を呼んでも認証状態にはならない
+        assert!(!session.authed);
+    }
+
+    #[test]
     fn test_unknown_method() {
         let (ctx, _) = test_ctx(None, None);
         assert_eq!(
@@ -1225,6 +1334,8 @@ mod tests {
         assert_eq!(activity.kind, "send");
         assert_eq!(activity.bytes, 5);
         assert!(activity.at_ms > 0);
+        // ポーリング側（bridge_status）でも送信内容を復元できる
+        assert_eq!(activity.preview, "hello");
 
         let events = emitted.lock().unwrap();
         assert_eq!(events.len(), 1);

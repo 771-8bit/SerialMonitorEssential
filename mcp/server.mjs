@@ -136,7 +136,9 @@ export class BridgeClient {
   /** Close the connection (safe to call more than once). */
   close() {
     this.closed = true;
-    this._failPending(new BridgeError(connectionLostMessage(this.host, this.port, 'client closed')));
+    this._failPending(
+      new BridgeError(connectionLostMessage(this.host, this.port, 'client closed'))
+    );
     this._dropSocket();
   }
 
@@ -169,7 +171,9 @@ export class BridgeClient {
       const onError = (err) => {
         clearTimeout(timer);
         socket.destroy();
-        reject(new BridgeError(unreachableMessage(this.host, this.port, err?.message), { cause: err }));
+        reject(
+          new BridgeError(unreachableMessage(this.host, this.port, err?.message), { cause: err })
+        );
       };
 
       socket.once('error', onError);
@@ -251,6 +255,17 @@ export class BridgeClient {
       } catch {
         continue; // ignore garbage lines rather than killing the connection
       }
+      // An id:null error line is a connection-level rejection (e.g. "too many
+      // connections", sent just before the bridge closes the socket). Skipping
+      // it would surface as a misleading "cannot reach the bridge" error.
+      if (message && message.id === null && message.ok === false) {
+        const reason = new BridgeError(
+          bridgeReturnedError('connection', message.error ?? 'connection rejected')
+        );
+        this._failPending(reason);
+        this._dropSocket();
+        return;
+      }
       const entry = this.pending.get(message?.id);
       if (!entry) continue;
       this.pending.delete(message.id);
@@ -308,11 +323,17 @@ export function decodeBase64(base64) {
 function isValidUtf8(buf) {
   if (buf.length === 0) return true;
   const decoder = new TextDecoder('utf-8', { fatal: true });
-  // Allow up to 3 trailing bytes to be a truncated multi-byte sequence: a tail
-  // read can legitimately cut a character in half.
-  for (let trim = 0; trim <= 3 && trim < buf.length; trim++) {
+  // A tail/window read can cut a multi-byte character at BOTH ends: skip up to
+  // 3 leading continuation bytes (0b10xxxxxx) and allow up to 3 trailing bytes
+  // to be a truncated sequence. Trailing-only tolerance misclassifies windows
+  // that start mid-character, hex-dumping legitimate text.
+  let start = 0;
+  while (start < Math.min(3, buf.length) && (buf[start] & 0xc0) === 0x80) start++;
+  const body = buf.subarray(start);
+  if (body.length === 0) return true;
+  for (let trim = 0; trim <= 3 && trim < body.length; trim++) {
     try {
-      decoder.decode(buf.subarray(0, buf.length - trim));
+      decoder.decode(body.subarray(0, body.length - trim));
       return true;
     } catch {
       /* keep trimming */
@@ -443,27 +464,37 @@ export async function waitForPattern(client, options = {}) {
 
   for (;;) {
     const res = await client.request('tail', { bytes: windowBytes });
-    totalBytes = Number(res?.total_bytes ?? totalBytes);
+    const newTotal = Number(res?.total_bytes ?? totalBytes);
+    // Capture reset (port reopen / Clear): total_bytes rewound past our cursor.
+    // Without this the cursor points past the new stream and every poll is
+    // ignored, guaranteeing a timeout even though the reply arrived.
+    if (newTotal < cursor) {
+      acc = Buffer.alloc(0);
+      accStart = 0;
+      cursor = 0;
+      gap = true;
+    }
+    totalBytes = newTotal;
     const chunk = decodeBase64(res?.base64);
     const chunkOffset = Number(res?.offset ?? 0);
     const chunkEnd = chunkOffset + chunk.length;
 
     if (chunkEnd > cursor) {
-      let take;
-      let takeStart;
       if (chunkOffset > cursor) {
-        // Data scrolled past our window between polls.
+        // Data scrolled past our window between polls. REPLACE the accumulator:
+        // concatenating across the discontinuity allows phantom matches that
+        // span the gap and corrupts every offset computed afterwards.
         gap = true;
-        take = chunk;
-        takeStart = chunkOffset;
-      } else {
-        takeStart = cursor;
-        take = chunk.subarray(cursor - chunkOffset);
-      }
-      if (take.length > 0) {
-        if (acc.length === 0) accStart = takeStart;
-        acc = Buffer.concat([acc, take]);
+        acc = Buffer.from(chunk);
+        accStart = chunkOffset;
         cursor = chunkEnd;
+      } else {
+        const take = chunk.subarray(cursor - chunkOffset);
+        if (take.length > 0) {
+          if (acc.length === 0) accStart = cursor;
+          acc = Buffer.concat([acc, take]);
+          cursor = chunkEnd;
+        }
       }
     }
 
@@ -512,9 +543,7 @@ function textResult(text) {
 
 function errorResult(err) {
   const text =
-    err instanceof BridgeError
-      ? err.message
-      : `エラー / Error: ${err?.message ?? String(err)}`;
+    err instanceof BridgeError ? err.message : `エラー / Error: ${err?.message ?? String(err)}`;
   return { content: [{ type: 'text', text }], isError: true };
 }
 

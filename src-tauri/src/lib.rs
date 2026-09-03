@@ -1,5 +1,6 @@
 // SerialMonitorEssential - Main library entry point
 mod bridge;
+mod mcp_stdio;
 mod plotter;
 mod serial;
 #[cfg(test)]
@@ -21,8 +22,16 @@ pub struct PlotterState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize logger
+    // Initialize logger (stderr; stdout は --mcp モードで JSON-RPC 専用)
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // --mcp: GUI を起動せず、内蔵の MCP stdio サーバとして動く。
+    // インストール済みの exe だけで AI 連携が完結する（Node.js 不要）。
+    if std::env::args().any(|arg| arg == "--mcp") {
+        mcp_stdio::run_stdio();
+        return;
+    }
+
     log::info!("SerialMonitorEssential starting...");
 
     tauri::Builder::default()
@@ -51,9 +60,13 @@ pub fn run() {
                     log::info!("[plotter] Window destroyed: thread stopped, collection disabled");
                 }
                 "main" => {
-                    if let Some(plotter) = window.app_handle().get_webview_window("plotter") {
-                        log::info!("[main] Window destroyed: closing plotter window too");
-                        let _ = plotter.close();
+                    // メインを閉じたら子ウィンドウ（プロッタ / AI ガイド）も道連れに
+                    // 閉じる（残るとアプリが終了しない）
+                    for label in ["plotter", "ai-guide"] {
+                        if let Some(child) = window.app_handle().get_webview_window(label) {
+                            log::info!("[main] Window destroyed: closing {} window too", label);
+                            let _ = child.close();
+                        }
                     }
                 }
                 _ => {}
@@ -84,6 +97,7 @@ pub fn run() {
             serial::write_dtr,
             serial::write_rts,
             open_plotter_window,
+            open_ai_guide_window,
             get_plotter_chart_data,
             check_plotter_version,
             set_plotter_enabled,
@@ -91,7 +105,8 @@ pub fn run() {
             start_plotter_thread,
             stop_plotter_thread,
             bridge::bridge_status,
-            bridge::bridge_set
+            bridge::bridge_set,
+            bridge::bridge_guide_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -130,6 +145,34 @@ async fn open_plotter_window(
     log::info!("[open_plotter_window] Created window: {}", PLOTTER_LABEL);
 
     Ok(PLOTTER_LABEL.to_string())
+}
+
+/// Open the AI integration guide window (single instance)
+///
+/// インストール後のユーザーが AI 連携（MCP）のセットアップ手順を GUI から
+/// 参照できるようにする。内容はフロントエンドの AiGuideWindow が描画する。
+#[tauri::command]
+async fn open_ai_guide_window(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    const GUIDE_LABEL: &str = "ai-guide";
+
+    if let Some(window) = app.get_webview_window(GUIDE_LABEL) {
+        window.set_focus().map_err(|e| e.to_string())?;
+        log::info!("[open_ai_guide_window] Focused existing window");
+        return Ok(GUIDE_LABEL.to_string());
+    }
+
+    let _window =
+        WebviewWindowBuilder::new(&app, GUIDE_LABEL, WebviewUrl::App("ai-guide.html".into()))
+            .title("AI Integration Guide")
+            .inner_size(760.0, 680.0)
+            .min_inner_size(560.0, 420.0)
+            .build()
+            .map_err(|e| format!("Failed to create AI guide window: {}", e))?;
+
+    log::info!("[open_ai_guide_window] Created window: {}", GUIDE_LABEL);
+    Ok(GUIDE_LABEL.to_string())
 }
 
 /// Get plotter chart data in uPlot-ready format

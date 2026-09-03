@@ -19,6 +19,7 @@ export default defineConfig(async () => ({
       input: {
         main: resolve(__dirname, 'index.html'),
         plotter: resolve(__dirname, 'plotter.html'),
+        aiGuide: resolve(__dirname, 'ai-guide.html'),
       },
     },
   },

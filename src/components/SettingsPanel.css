@@ -85,6 +85,17 @@
   color: #888;
 }
 
+.bridge-guide-button {
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.bridge-preview {
+  font-family: 'Consolas', 'Courier New', monospace;
+  color: #aaa;
+}
+
 /* Edit option in dropdown */
 .baud-dropdown-edit {
   padding: 4px 8px;

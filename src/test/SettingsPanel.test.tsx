@@ -10,7 +10,7 @@ interface BridgeStatusInfo {
   enabled: boolean;
   port: number;
   connections: number;
-  last_activity: { kind: string; bytes: number; at_ms: number } | null;
+  last_activity: { kind: string; bytes: number; at_ms: number; preview: string } | null;
 }
 
 const bridgeStatus = (over: Partial<BridgeStatusInfo> = {}): BridgeStatusInfo => ({
@@ -131,11 +131,16 @@ describe('SettingsPanel - AI Bridge', () => {
     expect(await screen.findByText('127.0.0.1:60000')).toBeInTheDocument();
   });
 
-  it('renders connection count and last send activity from bridge_status', async () => {
+  it('renders connection count, last send activity, and the content preview', async () => {
     invokeMock.mockResolvedValue(
       bridgeStatus({
         connections: 2,
-        last_activity: { kind: 'send', bytes: 12, at_ms: Date.UTC(2026, 0, 1, 12, 0, 0) },
+        last_activity: {
+          kind: 'send',
+          bytes: 12,
+          at_ms: Date.UTC(2026, 0, 1, 12, 0, 0),
+          preview: 'AT+GMR\r\n',
+        },
       })
     );
 
@@ -144,5 +149,18 @@ describe('SettingsPanel - AI Bridge', () => {
 
     const hint = await screen.findByText(/接続 2/);
     expect(hint).toHaveTextContent('送信 12 bytes');
+    // 人間が AI の送信内容を確認できる（制御文字は可視化される）
+    expect(hint).toHaveTextContent('AT+GMR··');
+  });
+
+  it('opens the AI guide window from the Setup Guide button', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Setup Guide' }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('open_ai_guide_window');
+    });
   });
 });

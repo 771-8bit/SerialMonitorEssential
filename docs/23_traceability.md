@@ -34,10 +34,10 @@
 
 | 種別 | 件数 | 内訳 |
 |------|------|------|
-| Rust 例示テスト `#[test]` | **183** | aggregator 37 / data_store 36 / parser 31 / **bridge 27** / thread 22 / logger 8 / worker 8 / chunk 6 / serial::mod 6 / state_transition 2 |
+| Rust 例示テスト `#[test]` | **214** | aggregator 37 / data_store 36 / parser 31 / **mcp_stdio 30** / **bridge 28** / thread 22 / logger 8 / worker 8 / chunk 6 / serial::mod 6 / state_transition 2 |
 | Rust プロパティテスト `proptest` | **11** | aggregator 7 / parser 3 / data_store 1 |
-| Rust 合計（`cargo test --lib` 実行結果） | **194 passed** | |
-| vitest | **167 passed** | 10 ファイル（scrollUtils / LineChart / PlotterWindow / PlotterViewFsm / HexViewer / SendPanel / useByteScroll / **App** / **SettingsPanel** / **calculateYRange**） |
+| Rust 合計（`cargo test --lib` 実行結果） | **225 passed** | |
+| vitest | **173 passed** | 11 ファイル（scrollUtils / LineChart / PlotterWindow / PlotterViewFsm / HexViewer / SendPanel / useByteScroll / **App** / **SettingsPanel** / **calculateYRange** / **AiGuideWindow**） |
 
 > [07_plotter_spec.md](07_plotter_spec.md) の 2026-09-03 時点の記録は Rust 114 件。以後、
 > 絶対時刻整列グリッド関連の例示テスト 4 件（`test_quantize_bucket_width_125`,
@@ -95,7 +95,8 @@
 | UN-21 | 複数インスタンス | SYS-NF-503 |
 | UN-22 | 自動で回帰を止める | SYS-NF-401, 402, 403 |
 | UN-23 | 設計理由が残る | SYS-NF-404 |
-| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106 |
+| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106, 1107, 1109 |
+| UN-25 | インストール後の環境だけで AI 連携をセットアップできる（手順はアプリから参照可能） | SYS-F-1107, 1108, 1109 |
 
 ---
 
@@ -235,10 +236,13 @@
 |-----|----------|----------|------|
 | SYS-F-1101 | 既定 OFF・`127.0.0.1` 限定・トークン任意 | `src-tauri/src/bridge.rs`（`BridgeServer`、`Ipv4Addr::LOCALHOST` バインド、`DEFAULT_BRIDGE_PORT = 57320`、`MAX_CONNECTIONS = 4`）、`bridge_set` / `bridge_status` コマンド、`src/components/SettingsPanel.tsx`（AI Bridge トグル） | `UT`: `test_server_binds_loopback_only`, `test_integration_connection_limit`, `test_auth_required_when_token_configured`, `test_auth_is_noop_without_token` / `FE`: `src/test/SettingsPanel.test.tsx`（`renders the bridge toggle off by default and hides the endpoint`, `has the localhost-only tooltip`, `calls bridge_set and shows the endpoint when enabled`, `calls bridge_set with enabled=false when toggled back off`, `reverts the toggle when the backend rejects the start`, `shows the port reported by the backend, not the hardcoded default`）/ `E2E`（2026-09-03） |
 | SYS-F-1102 | 読み出し API（status / tail / read_range / subscribe） | `bridge.rs`（メソッドディスパッチ、`clamp_read_length`、`MAX_READ_LENGTH = 1 MiB`、push ループ 50 ms / 1 フレーム 256 KiB） | `UT`: `test_status_without_store`, `test_status_reports_total_bytes`, `test_read_range_basic_and_clamping`, `test_read_range_bad_params_and_no_store`, `test_tail_default_and_window`, `test_tail_bad_params`, `test_clamp_read_length_caps_at_1mib`, `test_subscribe_params`, `test_integration_status_read_range_tail`, `test_integration_subscribe_pushes_new_data` / `E2E`（TCP 経由で status/tail/read_range と subscribe push を確認、2026-09-03） |
-| SYS-F-1103 | 送信 + GUI 可視化（`bridge-activity`） | `bridge.rs`（`send` メソッド、`build_send_payload`、`preview_of`、`record_send` → `bridge-activity` emit）、`SerialState.port` の `Arc` 化、`src/components/SettingsPanel.tsx`（活動表示行） | `UT`: `test_build_send_payload_line_endings`, `test_build_send_payload_base64_and_errors`, `test_preview_of_truncates_to_64_chars`, `test_record_send_updates_activity_and_emits`, `test_send_without_port_is_error`, `test_send_bad_params_before_port_check`, `test_integration_send_without_port` / `FE`: `SettingsPanel.test.tsx`（`renders connection count and last send activity from bridge_status`）/ `E2E`（COM16→COM15 へ `PING`、GUI に「送信 5 bytes HH:MM:SS」、2026-09-03。スクリーンショット取得済） |
+| SYS-F-1103 | 送信 + GUI 可視化（`bridge-activity`） | `bridge.rs`（`send` メソッド、`build_send_payload`、`preview_of`、`record_send` → `bridge-activity` emit）、`SerialState.port` の `Arc` 化、`src/components/SettingsPanel.tsx`（活動表示行） | `UT`: `test_build_send_payload_line_endings`, `test_build_send_payload_base64_and_errors`, `test_preview_of_truncates_to_64_chars`, `test_record_send_updates_activity_and_emits`, `test_send_without_port_is_error`, `test_send_bad_params_before_port_check`, `test_integration_send_without_port` / `FE`: `SettingsPanel.test.tsx`（`renders connection count, last send activity, and the content preview` — 送信内容プレビューの表示と制御文字の可視化）/ `E2E`（COM16→COM15 へ `PING`、GUI に「送信 5 bytes HH:MM:SS」、2026-09-03。スクリーンショット取得済） |
 | SYS-F-1104 | `ports`（GUI と同一列挙） | `bridge.rs`（`ports` メソッド → `serial::list_ports`） | `UT`: `test_ports_returns_list` / `E2E`（2026-09-03） |
 | SYS-F-1105 | MCP アダプタ（プロセス外）の提供 | `mcp/server.mjs`（7 ツール）、`mcp/README.md`（`claude mcp add serial-monitor -- node .../mcp/server.mjs`）、`mcp/package.json` | `T`: `mcp/smoke.mjs`（偽ブリッジに対する結合。status ラウンドトリップ / base64 デコード / 改行付き送信 / `wait_for` のポーリング一致 / アプリ未起動時のメッセージ）/ `E2E`（MCP クライアントから実ブリッジ経由で `PING` → `PONG 42` のラウンドトリップ、2026-09-03） |
 | SYS-F-1106 | 世代変化で `reset` フレーム | `bridge.rs`（push ループの世代検知: `Arc` 差し替え or `total_bytes` の巻き戻り） | `UT`: `test_integration_subscribe_emits_reset_on_store_swap` |
+| SYS-F-1107 | MCP stdio アダプタのアプリ内蔵（`--mcp`） | `src-tauri/src/mcp_stdio.rs`（`dispatch_line`/ワーカースレッド分離で `serial_wait_for` 中も `ping` 即応答・`notifications/cancelled` 対応、`TcpBridgeClient`、7 ツール、`wait_for_pattern` は生バイト regex + 世代交代/gap 対応、Windows は `AttachConsole`）、`lib.rs`（`--mcp` 分岐。stdout は JSON-RPC 専用・ログ stderr） | `UT`: `mcp_stdio::tests` 全 30 件 = モック 27（JSON-RPC の initialize/ping/tools・dispatch 分離・cancelled・各ツールの整形とバリデーション・`wait_for` の新規データ限定/バイト正確オフセット/リセット検知/gap 置換/キャンセル/タイムアウト/複数行アンカー）+ 実ソケット統合 3（`test_tcp_client_against_real_bridge`、`test_tcp_client_unreachable_bridge_friendly_error`、`test_tcp_client_surfaces_connection_rejection`） |
+| SYS-F-1108 | AI 連携ガイドウィンドウ（実 exe パス入り登録コマンド） | `lib.rs`（`open_ai_guide_window`、main 破棄時の道連れクローズ）、`bridge.rs`（`bridge_guide_info`: `current_exe` / enabled / port / version）、`src/components/aiguide/AiGuideWindow.tsx`（コピー可能なコマンド・ブリッジ状態表示・ツール一覧・生 TCP 説明・セキュリティ節）、`ai-guide.html`、`SettingsPanel.tsx`（Setup Guide ボタン） | `FE`: `src/test/AiGuideWindow.test.tsx`（5 件: 実パス入りコマンド・ON/OFF とポート表示・7 ツール列挙・バックエンド不通時のフォールバック）、`SettingsPanel.test.tsx`（`opens the AI guide window from the Setup Guide button`）/ `I`: 手動（ウィンドウ起動・コピー動作） |
+| SYS-F-1109 | ブリッジの自己記述 `help`（認証不要・データ非含有） | `bridge.rs`（`method_help`: 全メソッド・制限値・ヒント。認証ゲートの前で処理） | `UT`: `test_help_is_self_describing_and_needs_no_auth`（トークン設定時も未認証で通る / 全メソッド網羅 / 認証状態を変えない） |
 
 補助: `test_parse_request_errors`, `test_unknown_method`, `test_response_json_shapes` が protocol v1 のワイヤ形式（`{id, ok, result/error}`、parse error、未知メソッド）を契約として固定している。
 
@@ -356,7 +360,7 @@
 | **GAP-25** | ウィンドウライフサイクル（単一インスタンス、X 閉じ、メイン閉での全終了）に自動テストがない | SYS-F-901〜903, INV-5/6 | 中 |
 | **GAP-26** | メモリ定常性（バックエンド、チャンク上限）の自動計測がない。手動の `monitor_memory.py` のみ | SYS-NF-104, 108 | 中 |
 | **GAP-27** | Clear に確認ダイアログがない（不可逆な操作） | SYS-NF-302 | 低 |
-| **GAP-31** | AI Bridge の E2E（実アプリ + com0com + 実 MCP クライアントでの送受信ラウンドトリップ）が `test_tools/e2e/` のハーネスに入っておらず、2026-09-03 の手動実施の記録のみ。また `mcp/smoke.mjs` は**偽ブリッジ**に対する結合であり、実ブリッジとの突き合わせは自動化されていない。トークン設定 UI 自体が未提供（TBD-R7） | SYS-F-1101〜1106 | 中 |
+| **GAP-31** | AI Bridge の E2E（実アプリ + com0com + 実 MCP クライアントでの送受信ラウンドトリップ）が `test_tools/e2e/` のハーネスに入っておらず、2026-09-03 の手動実施の記録のみ。**部分解消（2026-09-03）**: Rust 内蔵アダプタは実 `BridgeServer` に対する自動統合テスト（`test_tcp_client_against_real_bridge`）を持つ。**残**: Node 版 `mcp/smoke.mjs` は**偽ブリッジ**に対する結合のまま。トークン設定 UI 自体が未提供（TBD-R7） | SYS-F-1101〜1107 | 中 |
 
 ### 4.3 テスト技法としての不足
 

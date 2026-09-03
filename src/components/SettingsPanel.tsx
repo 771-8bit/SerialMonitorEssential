@@ -8,6 +8,8 @@ interface BridgeActivity {
   kind: string;
   bytes: number;
   at_ms: number;
+  /** 送信内容の先頭 64 文字（人間が AI の送信内容を確認するための表示） */
+  preview: string;
 }
 
 /** `bridge_status` / `bridge_set` の戻り値 */
@@ -32,6 +34,14 @@ const BRIDGE_TOOLTIP = 'ローカルのAIエージェント用ブリッジ（127
 /** 活動時刻の表示（時刻のみ） */
 function formatBridgeTime(atMs: number): string {
   return new Date(atMs).toLocaleTimeString();
+}
+
+/** 送信プレビューの整形: 制御文字を可視化し、表示用に切り詰める */
+function formatPreview(preview: string, maxChars: number): string {
+  const sanitized = Array.from(preview)
+    .map((ch) => (ch < ' ' || ch.charCodeAt(0) === 0x7f ? '·' : ch))
+    .join('');
+  return sanitized.length > maxChars ? `${sanitized.slice(0, maxChars)}…` : sanitized;
 }
 
 export interface SerialConfig {
@@ -133,6 +143,7 @@ export default function SettingsPanel({
         kind: event.payload.kind,
         bytes: event.payload.bytes,
         at_ms: Date.now(),
+        preview: event.payload.preview,
       });
     }).then((fn) => {
       if (cancelled) fn();
@@ -344,13 +355,33 @@ export default function SettingsPanel({
           AI Bridge
         </label>
 
+        <button
+          type="button"
+          className="bridge-guide-button"
+          title="How to connect an AI agent (MCP setup guide)"
+          onClick={() => {
+            invoke('open_ai_guide_window').catch((e) => console.error(e));
+          }}
+        >
+          Setup Guide
+        </button>
+
         {bridgeEnabled && (
           <>
             <span className="bridge-endpoint">127.0.0.1:{bridgePort}</span>
-            <span className="bridge-hint">
+            <span
+              className="bridge-hint"
+              title={bridgeActivity?.preview ? `送信内容: ${bridgeActivity.preview}` : undefined}
+            >
               {bridgeConnections > 0 ? `接続 ${bridgeConnections}` : '待機中'}
               {bridgeActivity &&
                 ` / 送信 ${bridgeActivity.bytes} bytes ${formatBridgeTime(bridgeActivity.at_ms)}`}
+              {bridgeActivity?.preview && (
+                <span className="bridge-preview">
+                  {' '}
+                  “{formatPreview(bridgeActivity.preview, 24)}”
+                </span>
+              )}
             </span>
           </>
         )}

@@ -2,6 +2,14 @@
 
 AI エージェント（Claude Code など）が **SerialMonitorEssential の GUI アプリが開いているシリアルセッションを、そのまま読み書きする**ための MCP (Model Context Protocol) stdio サーバーです。
 
+> **インストール済みアプリを使う場合はこのディレクトリは不要です。**
+> 同じ MCP アダプタが**アプリ本体に内蔵**されており、`serial-monitor-essential --mcp` で
+> Node.js なしに起動できます（登録コマンドはアプリの **Settings → Setup Guide** が
+> 実際の exe パス入りで表示します）。本ディレクトリの Node 実装は**開発用リファレンス**で、
+> ツールの追加・変更は Rust 版（`src-tauri/src/mcp_stdio.rs`）と同時に行います
+> （docs/22 ADR-13 / DEBT-6）。なお正規表現の方言だけ差があります
+> （Node 版 = JavaScript regex、内蔵版 = Rust regex で lookaround 非対応）。
+
 ## 目的
 
 COM ポートは排他デバイスで、同時に開けるプロセスはひとつだけです。
@@ -88,6 +96,9 @@ claude mcp add serial-monitor -e SME_BRIDGE_PORT=57320 -- node "C:/Users/kazuki/
 補足:
 
 - `serial_wait_for` の `pattern` は JavaScript の正規表現ソース（`m` フラグ付きで評価）。
+- この Node 版では `serial_wait_for` が返す `offset` は lossy UTF-8 変換に基づくため、
+  マッチ前に不正 UTF-8 バイトが混じっていると置換分だけずれることがあります
+  （アプリ内蔵の Rust 版は生バイト基準で正確）。
 - `from_end: false` にすると、既にバッファに溜まっている直近 4096 バイトも検索対象に含めます。
 - バイナリ判定は「印字不可バイトが 10% 超」。UTF-8 として妥当な日本語ログはテキスト扱いになります。
 

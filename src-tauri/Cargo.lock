@@ -3602,6 +3602,7 @@ dependencies = [
  "env_logger",
  "log",
  "proptest",
+ "regex",
  "serde",
  "serde_json",
  "serialport",

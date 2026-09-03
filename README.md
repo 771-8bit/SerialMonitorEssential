@@ -115,14 +115,19 @@ in the GUI.
 
 ![AI Bridge](docs/images/ai-bridge.png)
 
-Enabling it takes two steps:
+Enabling it takes two steps (the app's **Settings → Setup Guide** button opens a window with
+these instructions and the exact command for your install path):
 
 1. Turn on **AI Bridge** in the settings panel (off by default; listens on `127.0.0.1:57320`).
-2. Register the MCP server:
+2. Register the app itself as an MCP server — the adapter is built into the executable, so no
+   Node.js or other runtime is required:
 
 ```bash
-claude mcp add serial-monitor -- node "<path-to-repo>/mcp/server.mjs"
+claude mcp add serial-monitor -- "<path-to>/serial-monitor-essential.exe" --mcp
 ```
+
+(For development from a repo checkout, `node mcp/server.mjs` is an equivalent
+reference implementation.)
 
 Then ask for what you need:
 
@@ -141,6 +146,10 @@ Available tools: `serial_status`, `serial_ports`, `serial_read_tail`, `serial_re
 `serial_send`, `serial_send_hex`, `serial_wait_for`.
 See [`mcp/README.md`](mcp/README.md) (Japanese) for setup details, environment variables,
 and the tool reference.
+
+Agents that don't speak MCP can use the bridge directly: connect to `127.0.0.1:57320`
+(one JSON object per line) and send `{"id":1,"method":"help"}` to get the machine-readable
+protocol spec. Details in [docs/04_api.md](docs/04_api.md) (Japanese).
 
 > **Security:** the bridge listens on `127.0.0.1` only and is off by default.
 > Agent sends are always visible in the GUI — there is no invisible TX path by design
