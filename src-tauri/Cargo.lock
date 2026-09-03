@@ -3593,6 +3593,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "serial-monitor-essential"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "crossbeam",
+ "env_logger",
+ "log",
+ "proptest",
+ "serde",
+ "serialport",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+]
+
+[[package]]
 name = "serialize-to-javascript"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3987,24 +4005,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows 0.61.3",
-]
-
-[[package]]
-name = "tauri-appserial-monitor-essential"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "crossbeam",
- "env_logger",
- "log",
- "proptest",
- "serde",
- "serialport",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
 ]
 
 [[package]]

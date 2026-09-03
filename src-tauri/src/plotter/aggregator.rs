@@ -2654,8 +2654,7 @@ mod tests {
         let payload = agg.get_chart_data(&req);
 
         // In Average mode with aggregation, band_data should be Some
-        if payload.band_data.is_some() {
-            let band_data = payload.band_data.as_ref().unwrap();
+        if let Some(band_data) = payload.band_data.as_ref() {
             assert!(
                 band_data.contains_key("ch0"),
                 "Should have band data for ch0"

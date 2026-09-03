@@ -16,7 +16,15 @@ $root = $auto::RootElement
 function Find-Window([string]$title) {
   $cond = New-Object System.Windows.Automation.PropertyCondition($auto::NameProperty, $title)
   $w = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-  if ($null -eq $w) { throw "Window '$title' not found" }
+  if ($null -eq $w) {
+    # Fallback: substring match. WSLg rewrites titles (e.g.
+    # "[WARN:COPY MODE] Serial Monitor Essential (Ubuntu)"), so an exact
+    # match misses Linux windows surfaced through RAIL.
+    foreach ($c in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {
+      if ($c.Current.Name -like "*$title*") { return $c }
+    }
+    throw "Window '$title' not found"
+  }
   return $w
 }
 

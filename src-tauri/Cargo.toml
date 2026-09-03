@@ -1,8 +1,8 @@
 [package]
-name = "tauri-appserial-monitor-essential"
+name = "serial-monitor-essential"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Fast serial monitor and plotter for embedded development"
+authors = ["771-8bit"]
 edition = "2021"
 license = "MIT"
 
@@ -12,7 +12,7 @@ license = "MIT"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_appserial_monitor_essential_lib"
+name = "serial_monitor_essential_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

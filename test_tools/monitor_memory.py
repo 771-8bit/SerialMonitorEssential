@@ -18,7 +18,7 @@ from pathlib import Path
 import psutil
 
 
-def find_process(process_name="tauri-appserial-monitor-essential"):
+def find_process(process_name="serial-monitor-essential"):
     """プロセス名でプロセスを検索"""
     for proc in psutil.process_iter(['pid', 'name']):
         try:
@@ -70,8 +70,8 @@ def main():
     parser.add_argument(
         '--process',
         type=str,
-        default='tauri-appserial-monitor-essential',
-        help='Process name to monitor (default: tauri-appserial-monitor-essential)'
+        default='serial-monitor-essential',
+        help='Process name to monitor (default: serial-monitor-essential)'
     )
     parser.add_argument(
         '--duration',
