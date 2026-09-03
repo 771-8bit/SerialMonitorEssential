@@ -1,438 +1,224 @@
-# Plotter Refactoring 2: Throttled Event-Based Updates
+# Plotter Refactoring 2: Event-Driven Updates with Backpressure
 
 ## 概要
 
-ポーリングベースの更新を、スロットル付きイベントベースの更新に変更し、アイドル時の CPU 使用率をゼロに近づける。
+ポーリングベースの更新を、イベントドリブン + バックプレッシャー（ACK）方式に変更し、アイドル時の CPU 使用率をゼロにする。
 
 ---
 
-## 現在の実装と問題点
+## 現在の問題点
 
-### 現在のアーキテクチャ
+### 問題 1: PlotterThread のポーリング
+
+現在の `PlotterThread` は 10ms 間隔で `DataStore` をポーリングし、新しいデータがあるかをチェックしている。
+
+```
+loop {
+    total_bytes = data_store.total_bytes();
+    if total_bytes > last_processed_offset {
+        // 処理
+    }
+    sleep(10ms);  // ← 常に CPU を消費
+}
+```
+
+**問題点**:
+- データが来なくても 10ms ごとに CPU が起きる
+- 1 秒間に 100 回の無駄なチェック
+- アイドル時でも CPU 使用率が 0% にならない
+
+### 問題 2: フロントエンドのポーリング
+
+フロントエンドは `requestAnimationFrame` ループ（約 16ms 間隔）でバックエンドの `get_plotter_chart_data()` を呼び出している。
+
+**問題点**:
+- データがなくても 60 IPC/秒
+- 毎回データを取得してレンダリングを試みる
+- CPU とメモリの無駄
+
+### 問題 3: データフローの非同期性
+
+現在のアーキテクチャでは、データ到着からレンダリングまでのタイミングが非同期で管理されていない。
 
 ```mermaid
 sequenceDiagram
+    participant WK as Worker Thread
+    participant PT as Plotter Thread
     participant FE as Frontend
-    participant BE as Backend
     
-    loop Every 16ms (60Hz)
-        FE->>BE: get_plotter_chart_data()
-        BE-->>FE: payload
-        Note over FE: Check if changed
-    end
+    Note over PT: 10ms ポーリング
+    Note over FE: 16ms ポーリング
+    
+    WK->>WK: データ受信
+    Note over PT: 最大 10ms 遅延
+    PT->>PT: データ処理
+    Note over FE: 最大 16ms 遅延
+    FE->>FE: レンダリング
 ```
 
-### 問題点
-
-| 問題 | 影響 |
-|------|------|
-| フロントエンドがバックエンドをポーリング | アイドル時でも CPU 消費 |
-| データがなくても 60 IPC/秒 | 無駄なリソース消費 |
-| バックエンドは「いつ更新があったか」を知っている | この情報を活用できていない |
-
-### なぜ単純なイベントベースではダメか
-
-単純にデータ追加ごとにイベントを発火すると：
-
-```
-1000 Hz データ → 1000 events/秒 → フロントエンドがパンク
-```
-
-**必要なのは: スロットル付きイベント**
+**結果**: データ到着からレンダリングまで最大 26ms の遅延が発生。
 
 ---
 
-## リファクタリング方針
+## なぜポーリングが使われているのか
 
-### アプローチ: Coalesced Event with Minimum Interval
+### DataStore の設計
+
+`DataStore` は Worker Thread が書き込み、他のスレッド（Plotter Thread、Logger Thread など）が読み取るデータストアである。
+
+現状、`DataStore` はデータ追加を外部に通知する仕組みを持っていない。そのため、消費者側（Plotter Thread）は「データがあるかどうか」を定期的に確認するしかない。
+
+### フロントエンドの設計
+
+Tauri のフロントエンドからバックエンドへの通信は「リクエスト-レスポンス」型が基本である。バックエンドからフロントエンドへのプッシュ通知（イベント）は可能だが、現在は使用していない。
+
+---
+
+## 新アーキテクチャ: Event-Driven with Backpressure
+
+### 基本方針
+
+1. **データ到着をイベントで通知**: Worker Thread がデータを書き込んだら、Plotter Thread に通知
+2. **Plotter Thread は待機状態**: ポーリングではなく、通知が来るまでブロック（CPU 消費なし）
+3. **フロントエンドにプッシュ通知**: Plotter Thread がデータ処理後、フロントエンドにイベント発火
+4. **ACK による同期**: フロントエンドが「処理完了」をバックエンドに通知
+
+### データフロー
 
 ```mermaid
 sequenceDiagram
-    participant DI as Data Ingestion
-    participant TH as Throttle Logic  
+    participant WK as Worker Thread
+    participant DS as DataStore
+    participant PT as Plotter Thread
     participant FE as Frontend
     
-    Note over TH: min_interval = 50ms
+    Note over PT: 待機状態 (CPU 0%)
     
-    DI->>TH: New data (t=0ms)
-    TH->>FE: emit "plotter-update"
-    TH->>TH: next_emit_allowed = t+50ms
-    
-    DI->>TH: New data (t=10ms)
-    Note over TH: t < next_emit_allowed
-    TH->>TH: pending = true
-    
-    DI->>TH: New data (t=30ms)
-    Note over TH: t < next_emit_allowed
-    TH->>TH: pending = true
-    
-    Note over TH: Timer fires (t=50ms)
-    alt pending == true
-        TH->>FE: emit "plotter-update"
-        TH->>TH: pending = false
-    end
+    WK->>DS: データ書き込み
+    DS->>PT: 通知 (Condvar)
+    PT->>PT: 即座に起動・処理
+    PT->>FE: イベント発火
+    FE->>FE: fetchData() & render
+    FE->>PT: ACK (処理完了通知)
 ```
 
-### 設計ポイント
+### Condvar (Condition Variable) とは
 
-1. **最小間隔 (50ms)**: 最大 20 events/秒に制限
-2. **Dirty flag**: 間隔内の更新を合体
-3. **タイマー**: 間隔経過後に pending をフラッシュ
-4. **アイドル時**: イベント発火なし（CPU 0%）
+Condvar はスレッド間の同期プリミティブで、「ある条件が満たされるまでスレッドをブロック」する機能を提供する。
+
+- **待機側**: `condvar.wait()` でスリープ状態に入る（CPU 消費なし）
+- **通知側**: `condvar.notify_all()` で待機中のスレッドを起こす
+
+これにより、ポーリングのような「定期的なチェック」が不要になる。
+
+### ACK (Acknowledgement) によるバックプレッシャー
+
+高頻度データ（例: 1000 Hz）が来た場合、フロントエンドが追いつけないとイベントが蓄積してパンクする。
+
+これを防ぐため、**バックプレッシャー**を導入する:
+
+1. Plotter Thread がイベントを発火したら「ACK 待ち」状態に入る
+2. フロントエンドは処理完了後に `plotter_ack` コマンドを呼び出す
+3. ACK を受信するまで、新しいイベントは発火しない
+4. ACK 待ち中に新しいデータが来たら、`pending_update` フラグを立てる
+5. ACK 受信後、pending があれば即座に次のイベントを発火
+
+```mermaid
+sequenceDiagram
+    participant PT as Plotter Thread
+    participant FE as Frontend
+    
+    PT->>FE: イベント発火 (t=0ms)
+    Note over PT: ACK 待ち
+    
+    Note over PT: 新データ (t=5ms)
+    Note over PT: pending = true (イベント抑制)
+    
+    Note over PT: 新データ (t=10ms)
+    Note over PT: pending のまま (合体)
+    
+    FE->>PT: ACK (t=20ms)
+    PT->>FE: イベント発火 (pending 解消)
+```
+
+**効果**: どれだけ高速にデータが来ても、フロントエンドの処理能力を超えない。
 
 ---
 
-## 具体的な実装手順
+## 状態遷移
 
-### Step 1: PlotterState にスロットル状態を追加
-
-**ファイル**: `src-tauri/src/lib.rs`
-
-```rust
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
-
-/// Plotter state accessible across the application
-pub struct PlotterState {
-    /// Data aggregator for plotter
-    pub aggregator: PlotterAggregator,
-    /// Background thread handle
-    pub thread: Mutex<Option<PlotterThread>>,
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: 起動時
     
-    // === 新規追加: スロットル状態 ===
-    /// Last time an event was emitted
-    last_emit_time: Mutex<Option<Instant>>,
-    /// Whether there's pending data that needs to be notified
-    pending_update: AtomicBool,
-}
-
-impl Default for PlotterState {
-    fn default() -> Self {
-        Self {
-            aggregator: PlotterAggregator::new(),
-            thread: Mutex::new(None),
-            last_emit_time: Mutex::new(None),
-            pending_update: AtomicBool::new(false),
-        }
-    }
-}
+    Idle --> Processing: Condvar 通知受信
+    Processing --> WaitingForAck: イベント発火
+    WaitingForAck --> Idle: ACK 受信 (pending なし)
+    WaitingForAck --> Processing: ACK 受信 (pending あり)
+    WaitingForAck --> WaitingForAck: 新データ (pending 設定)
 ```
 
-### Step 2: スロットル付きイベント発火ロジック
+---
 
-**ファイル**: `src-tauri/src/lib.rs`
+## 実装方針
 
-```rust
-/// Minimum interval between events (milliseconds)
-const MIN_EMIT_INTERVAL_MS: u64 = 50;
+### Step 1: DataStore に通知機構を追加
 
-impl PlotterState {
-    /// Notify that new data is available (called by PlotterThread)
-    /// This implements throttled event emission
-    pub fn notify_data_changed(&self, app: &tauri::AppHandle) {
-        let now = Instant::now();
-        
-        let should_emit = {
-            let mut last_emit = self.last_emit_time.lock().unwrap();
-            
-            match *last_emit {
-                Some(last) if now.duration_since(last) < Duration::from_millis(MIN_EMIT_INTERVAL_MS) => {
-                    // Too soon, mark as pending
-                    self.pending_update.store(true, Ordering::Relaxed);
-                    false
-                }
-                _ => {
-                    // Enough time passed, emit now
-                    *last_emit = Some(now);
-                    self.pending_update.store(false, Ordering::Relaxed);
-                    true
-                }
-            }
-        };
-        
-        if should_emit {
-            // Emit event to frontend
-            let _ = app.emit("plotter-update", ());
-        }
-    }
-    
-    /// Flush pending update (called by timer)
-    pub fn flush_pending(&self, app: &tauri::AppHandle) {
-        if self.pending_update.swap(false, Ordering::Relaxed) {
-            let mut last_emit = self.last_emit_time.lock().unwrap();
-            *last_emit = Some(Instant::now());
-            let _ = app.emit("plotter-update", ());
-        }
-    }
-}
-```
+`DataStore` に `Condvar` と `Mutex` を追加し、データ書き込み時に `notify_all()` を呼び出す。
 
-### Step 3: PlotterThread からイベントを発火
+**変更ファイル**: `src-tauri/src/serial/data_store.rs`
 
-**ファイル**: `src-tauri/src/plotter/thread.rs`
+**追加するメソッド**:
+- `signal_data_available()`: Worker Thread から呼び出し、待機中のスレッドを起こす
+- `wait_for_data(timeout)`: Plotter Thread から呼び出し、データが来るまでブロック
 
-現在の実装では `PlotterThread` は `PlotterAggregator` への参照しか持っていない。
-`tauri::AppHandle` を渡す必要がある。
+### Step 2: Worker Thread から通知を発火
 
-```rust
-pub struct PlotterThread {
-    handle: Option<JoinHandle<()>>,
-    stop_flag: Arc<AtomicBool>,
-}
+`WorkerThread` がデータを `DataStore` に書き込んだ後、`signal_data_available()` を呼び出す。
 
-impl PlotterThread {
-    /// Start a new plotter thread with event notification
-    pub fn start_with_events(
-        data_store: Arc<DataStore>, 
-        aggregator: PlotterAggregator,
-        app: tauri::AppHandle,
-        notify_callback: Arc<dyn Fn() + Send + Sync>,
-    ) -> Self {
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = Arc::clone(&stop_flag);
+**変更ファイル**: `src-tauri/src/serial/worker_thread.rs`
 
-        let handle = thread::spawn(move || {
-            Self::run_with_events(data_store, aggregator, stop_flag_clone, notify_callback);
-        });
+### Step 3: PlotterThread を待機ベースに変更
 
-        Self {
-            handle: Some(handle),
-            stop_flag,
-        }
-    }
-    
-    fn run_with_events(
-        data_store: Arc<DataStore>, 
-        aggregator: PlotterAggregator, 
-        stop_flag: Arc<AtomicBool>,
-        notify_callback: Arc<dyn Fn() + Send + Sync>,
-    ) {
-        let mut parser = PlotterParser::new();
-        let mut last_processed_offset: u64 = 0;
-        let start_time = Instant::now();
+現在の 10ms ポーリングループを、`wait_for_data()` ベースに変更する。
 
-        const MAX_READ_SIZE: u64 = 1024 * 1024;
+**変更ファイル**: `src-tauri/src/plotter/thread.rs`
 
-        loop {
-            if stop_flag.load(Ordering::SeqCst) {
-                break;
-            }
+**変更内容**:
+- `start()` メソッドに `AppHandle` を追加（イベント発火用）
+- メインループを `wait_for_data()` ベースに変更
+- ACK フラグ（`AtomicBool`）を追加
+- `acknowledge()` メソッドを追加
 
-            let total_bytes = data_store.total_bytes();
+### Step 4: Tauri コマンドを追加
 
-            if total_bytes > last_processed_offset {
-                let bytes_to_read = (total_bytes - last_processed_offset).min(MAX_READ_SIZE) as u32;
+フロントエンドから ACK を送信するためのコマンドを追加する。
 
-                if let Ok(data) = data_store.get_data(last_processed_offset, bytes_to_read) {
-                    if !data.is_empty() {
-                        let timestamp_ms = start_time.elapsed().as_millis() as u64;
-                        let data_points = parser.parse(&data, timestamp_ms);
+**変更ファイル**: `src-tauri/src/lib.rs`
 
-                        if !data_points.is_empty() {
-                            aggregator.add_data_points_batch(data_points);
-                            
-                            // === 新規追加: イベント通知 ===
-                            notify_callback();
-                        }
-
-                        last_processed_offset += data.len() as u64;
-                    }
-                }
-            }
-
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-}
-```
-
-### Step 4: start_plotter_thread を更新
-
-**ファイル**: `src-tauri/src/lib.rs`
-
-```rust
-#[tauri::command]
-fn start_plotter_thread(
-    app: tauri::AppHandle,  // AppHandle を追加
-    serial_state: tauri::State<'_, SerialState>,
-    plotter_state: tauri::State<'_, PlotterState>,
-) -> Result<(), String> {
-    let store_guard = serial_state.data_store.lock().map_err(|e| e.to_string())?;
-    let data_store = store_guard.as_ref().ok_or("Serial port not open")?;
-
-    // Stop existing thread
-    {
-        let mut thread_guard = plotter_state.thread.lock().map_err(|e| e.to_string())?;
-        if let Some(mut thread) = thread_guard.take() {
-            thread.stop();
-        }
-    }
-
-    plotter_state.aggregator.clear();
-    plotter_state.aggregator.set_enabled(true);
-
-    // Create notify callback that captures PlotterState and AppHandle
-    let app_clone = app.clone();
-    let plotter_state_ref = plotter_state.inner().clone(); // Arc clone
-    let notify_callback = Arc::new(move || {
-        plotter_state_ref.notify_data_changed(&app_clone);
-    });
-
-    // Start thread with event notification
-    let thread = PlotterThread::start_with_events(
-        data_store.clone(), 
-        plotter_state.aggregator.clone(),
-        app.clone(),
-        notify_callback,
-    );
-
-    // ... 残りは同じ
-}
-```
-
-**注意**: `PlotterState` を `Arc` でラップする必要がある場合がある。
+**追加するコマンド**: `plotter_ack`
 
 ### Step 5: フロントエンドをイベントベースに変更
 
-**ファイル**: `src/components/plotter/PlotterWindow.tsx`
+`requestAnimationFrame` ループを削除し、`listen('plotter-update')` でイベントを受信する方式に変更する。
 
-```typescript
-import { listen } from '@tauri-apps/api/event';
+**変更ファイル**: `src/components/plotter/PlotterWindow.tsx`
 
-// requestAnimationFrame ループを削除し、イベントリスナーに置き換え
-
-useEffect(() => {
-  if (!isRunning) return;
-  
-  let isActive = true;
-  
-  // イベントリスナーを設定
-  const setupListener = async () => {
-    const unlisten = await listen('plotter-update', async () => {
-      if (!isActive || isFetchingRef.current) return;
-      
-      isFetchingRef.current = true;
-      try {
-        await fetchData();
-      } finally {
-        isFetchingRef.current = false;
-      }
-    });
-    
-    return unlisten;
-  };
-  
-  const unlistenPromise = setupListener();
-  
-  // 初回データ取得
-  fetchData();
-  
-  return () => {
-    isActive = false;
-    unlistenPromise.then(unlisten => unlisten());
-  };
-}, [fetchData, isRunning]);
-```
-
-### Step 6: Pending flush タイマーを追加
-
-バックエンドで定期的に pending をチェック。
-
-**ファイル**: `src-tauri/src/lib.rs` (または専用スレッド)
-
-```rust
-// アプリ起動時にタイマースレッドを開始
-fn start_pending_flush_timer(app: tauri::AppHandle, plotter_state: Arc<PlotterState>) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(MIN_EMIT_INTERVAL_MS));
-            plotter_state.flush_pending(&app);
-        }
-    });
-}
-```
+**変更内容**:
+- `listen()` でバックエンドからのイベントを購読
+- `fetchData()` 完了後に `invoke('plotter_ack')` を呼び出し
+- cleanup で `unlisten()` を確実に呼び出し
 
 ---
 
-## 代替案: フロントエンド側タイマー
+## 利点
 
-バックエンドのタイマーが複雑な場合、フロントエンドでタイマーを使う：
-
-```typescript
-useEffect(() => {
-  if (!isRunning) return;
-  
-  let isActive = true;
-  let updatePending = false;
-  
-  // イベントを受信したらフラグを立てる
-  const unlistenPromise = listen('plotter-update', () => {
-    updatePending = true;
-  });
-  
-  // 50ms ごとにチェック
-  const intervalId = setInterval(async () => {
-    if (!isActive || !updatePending || isFetchingRef.current) return;
-    
-    updatePending = false;
-    isFetchingRef.current = true;
-    try {
-      await fetchData();
-    } finally {
-      isFetchingRef.current = false;
-    }
-  }, 50);
-  
-  // 初回データ取得
-  fetchData();
-  
-  return () => {
-    isActive = false;
-    clearInterval(intervalId);
-    unlistenPromise.then(unlisten => unlisten());
-  };
-}, [fetchData, isRunning]);
-```
-
-この方式のほうがシンプルで、バックエンドの変更が少ない。
-
----
-
-## テスト
-
-### ユニットテスト（バックエンド）
-
-```rust
-#[test]
-fn test_throttle_coalesces_rapid_updates() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    
-    let emit_count = Arc::new(AtomicUsize::new(0));
-    let emit_count_clone = Arc::clone(&emit_count);
-    
-    // Mock AppHandle (テスト用)
-    // 実際の実装では AppHandle のモックが必要
-    
-    let plotter_state = PlotterState::default();
-    
-    // 10ms 間隔で 10 回更新
-    for _ in 0..10 {
-        plotter_state.notify_data_changed(&mock_app);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    
-    // 50ms 間隔なので、最大 2-3 回のイベントが発火するはず
-    assert!(emit_count.load(Ordering::Relaxed) <= 3);
-}
-```
-
-### 統合テスト
-
-1. シリアルポートを開く
-2. 高頻度データ（1000 Hz）を送信
-3. イベント発火回数をカウント
-4. **期待**: 最大 20 events/秒
+| 項目 | 現在 (ポーリング) | 変更後 (Event-Driven + ACK) |
+|------|------------------|----------------------------|
+| アイドル時 CPU | > 0% | 0% |
+| データ到着 → レンダリング | 最大 26ms | 即時 |
+| フロントエンド過負荷保護 | なし | ACK によるバックプレッシャー |
+| IPC 回数/秒 (アイドル時) | 60 | 0 |
 
 ---
 
@@ -440,30 +226,20 @@ fn test_throttle_coalesces_rapid_updates() {
 
 | リスク | 対策 |
 |--------|------|
-| AppHandle を PlotterThread に渡すのが複雑 | 代替案（フロントエンド側タイマー）を使用 |
-| イベントリスナーのリーク | cleanup 関数で確実に unlisten |
-| 最初のデータ表示が遅れる | 初回は即座に fetchData() を呼び出し |
-
----
-
-## Version Counter との比較
-
-| 項目 | Version Counter | Throttled Events |
-|------|----------------|------------------|
-| アイドル時 CPU | 60 light IPC/秒 | 0 |
-| 実装複雑度 | 低 | 中 |
-| バックエンド変更 | 少 | 多 |
-| 最大レイテンシ | 16ms | 50ms |
-
-**推奨**: まず Version Counter を実装し、さらに最適化が必要なら Throttled Events を追加。
+| ACK が来ない場合の停止 | `pending_update` フラグで更新を蓄積し、ACK 受信時に即発火 |
+| Condvar タイムアウト | 100ms タイムアウトで `stop_flag` をチェック |
+| 既存テストへの影響 | 既存の `start()` メソッドを維持しつつ、新しい `start_event_driven()` を追加 |
 
 ---
 
 ## 完了条件
 
-- [ ] `PlotterState` にスロットル状態を追加
-- [ ] `notify_data_changed()` を実装
-- [ ] `PlotterThread` からイベントを発火
-- [ ] フロントエンドをイベントベースに変更
-- [ ] テストを追加
-- [ ] アイドル時の CPU 使用率がほぼ 0 であることを確認
+- [ ] `DataStore` に `Condvar` と通知メソッドを追加
+- [ ] Worker Thread から `signal_data_available()` を呼び出し
+- [ ] `PlotterThread` を `wait_for_data()` ベースに変更
+- [ ] `PlotterThread` に ACK 機構を追加
+- [ ] `plotter_ack` Tauri コマンドを追加
+- [ ] フロントエンドをイベントベース + ACK に変更
+- [ ] 既存テストが通ることを確認
+- [ ] 新しいテストを追加
+- [ ] アイドル時の CPU 使用率がほぼ 0% であることを確認

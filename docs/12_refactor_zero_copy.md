@@ -347,7 +347,7 @@ struct SharedPlotterBuffer {
 
 ### 将来検討
 
-3. **Throttled Events** (doc 11) - アイドル時の CPU ゼロ化
+3. **Event-Driven Updates with Backpressure** (doc 11) - Condvar による待機 + ACK 制御でアイドル時 CPU ゼロ化
 4. **SharedArrayBuffer** (this doc Phase 2) - 完全ゼロコピー
 
 ---
