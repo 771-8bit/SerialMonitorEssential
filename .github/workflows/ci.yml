@@ -6,6 +6,11 @@
 # com0com のカーネルモードドライバを入れられず、UI Automation に必要な
 # 対話的デスクトップセッションも無いため、CI では回さない。詳細は docs/25 §3.4。
 #
+# ただし MCP まわりは GUI 不要の範囲を CI で回す:
+#   - MCP smoke (Node): mcp/server.mjs の偽ブリッジ結合（mcp/smoke.mjs）
+#   - MCP stdio smoke: ビルドした実バイナリを --mcp で起動し、実パイプ越しに
+#     JSON-RPC を検証（test_tools/e2e/mcp_stdio_smoke.py。両 OS）
+#
 # ジョブは windows-latest と ubuntu-22.04 の 2 本（どちらも正式サポート対象 OS）。
 # 両者は依存関係を持たせず並列に走らせる。macOS を含む 3 OS マトリクスは
 # 引き続き rust-ci.yml（週次の定点観測）が担当する。
@@ -80,6 +85,22 @@ jobs:
         run: cargo test
         working-directory: src-tauri
 
+      # Node 版 MCP アダプタの結合スモーク（偽ブリッジ。docs/23 SYS-F-1105）
+      - name: MCP smoke (Node)
+        run: |
+          npm ci
+          node smoke.mjs
+        working-directory: mcp
+
+      # 内蔵 MCP アダプタ（--mcp）を実プロセス・実パイプで検証（SYS-F-1107）。
+      # cargo test 直後なので依存はビルド済み、bin の追加ビルドは差分のみ。
+      - name: Build app binary
+        run: cargo build --bin serial-monitor-essential
+        working-directory: src-tauri
+
+      - name: MCP stdio smoke (built binary)
+        run: python test_tools/e2e/mcp_stdio_smoke.py --exe src-tauri/target/debug/serial-monitor-essential.exe
+
   # Linux（Ubuntu 22.04+ x64）正式サポートに伴うバックエンド検査。
   # test ジョブとは needs で繋がず並列に走らせる（両方の結果を 1 回の push で得る）。
   test-linux:
@@ -119,3 +140,11 @@ jobs:
       - name: Rust tests
         run: cargo test
         working-directory: src-tauri
+
+      # Linux バイナリでも内蔵 MCP アダプタが動くことを実プロセスで確認
+      - name: Build app binary
+        run: cargo build --bin serial-monitor-essential
+        working-directory: src-tauri
+
+      - name: MCP stdio smoke (built binary)
+        run: python3 test_tools/e2e/mcp_stdio_smoke.py --exe src-tauri/target/debug/serial-monitor-essential

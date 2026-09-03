@@ -408,12 +408,13 @@ SetForegroundWindow が効かずホイールが別窓に飛んだ自動化フレ
 
 | 項目 | 内容 |
 |------|------|
-| 仮想 COM ペア | com0com（COM15 ⇔ COM16）。実機不要で双方向を再現できる |
+| 仮想 COM ペア | com0com（COM15 ⇔ COM16）。実機不要で双方向を再現できる。**セットアップ手順（インストール・ペア作成・確認・仮想ペアの制約）は [`test_tools/e2e/README.md`](../test_tools/e2e/README.md) が正** |
 | 実機 | Raspberry Pi Pico（`test_tools/pico_serial_tx_test`）、Arduino 系 |
 | 送信スクリプト | `test_tools/serial_test.py`（各種フォーマットの生成） |
 | 受信検証 | `test_tools/verify_received_data.py`（欠落・順序の検査） |
 | メモリ計測 | `test_tools/monitor_memory.py`, `test_tools/analyze_memory.py` |
 | UI 自動操作 | Windows UI Automation (UIA) + スクリーンショット検証 |
+| AI Bridge E2E | `test_tools/e2e/run_bridge_e2e.ps1`（一括: 起動→UIA 設定→`pong_bot.py`→`mcp_bridge_live.py`）。GUI 不要の `mcp_stdio_smoke.py` は **CI（Tier 1、両 OS）でも実行** |
 
 ### 6.2 実施済みのシナリオ（2026-09-03）
 
@@ -446,6 +447,7 @@ SetForegroundWindow が効かずホイールが別窓に飛んだ自動化フレ
 | E-18 | ▶LIVE ボタンとダブルクリックの両方で LIVE へ戻る | SYS-F-605 |
 | E-19 | レンジ外へ飛ぶ値を注入し、Y 軸が即座に拡大することを確認。その後 3 秒以上経ってから縮小することを確認 | SYS-F-521, 522 |
 | E-20 | 125% / 150% DPI での State Timeline 描画 | SYS-NF-304 |
+| E-21 | **AI Bridge 実往復**（`run_bridge_e2e.ps1` で自動化済）: 内蔵 MCP アダプタ経由の status → send "PING" → wait_for "PONG \d+" MATCH → read_tail、`serial_wait_for` ブロック中の ping 即応答（<2s）、`notifications/cancelled` による即中断と応答抑止、GUI への送信表示 | SYS-F-1103, 1107 |
 
 ### 6.4 合否基準
 
@@ -455,9 +457,15 @@ SetForegroundWindow が効かずホイールが別窓に飛んだ自動化フレ
 
 ### 6.5 実施状況
 
-**E-1〜E-12 は実施済み**（手動、2026-09-03）。
-ただし**スクリプト化されておらず再実行可能な形になっていない**（GAP-30）。
-E-13〜E-20 は LIVE 表示リワークの完了後に実施。
+**E-1〜E-12 は実施済み**（手動、2026-09-03）。個別の UIA 操作は
+`test_tools/e2e/ui.ps1` で再現可能だが、E-1〜E-12 のシナリオ単位の
+一括スクリプトは未整備（GAP-30 の残り。ペアワイズ実行 `pairwise_run*.ps1` が
+主要な操作組合せを機械実行できる状態にはなっている）。
+E-13〜E-20 は**一部実施済み**（2026-09-03、[07 検証節](07_plotter_spec.md#検証)に記録:
+E-13 は 10s/30s の 2 幅のみ、E-14・E-16・E-18 は実施済み。
+E-15（ピクセル完全一致）・E-17・E-19・E-20 は未実施）。
+**E-21（AI Bridge）は `run_bridge_e2e.ps1` としてスクリプト化済み**で、
+ワンコマンドで再実行できる（2026-09-03 実施・全 PASS）。
 
 ---
 

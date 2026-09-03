@@ -224,8 +224,11 @@ flowchart LR
 
 ### 3.2 Tier 1 — push / PR（数分、GitHub Actions = `ci.yml`）
 
-`.github/workflows/ci.yml` の単一ジョブ `test`（`windows-latest`）。
+`.github/workflows/ci.yml` の 2 ジョブ（`test` = `windows-latest`、
+`test-linux` = `ubuntu-22.04`。並列・依存なし）。
 **[24 §9.1 の必須ゲート 7 項目をすべて含む**ことを設計の条件とする。
+フロントエンド検査は OS 非依存のため windows ジョブのみで実行し、
+Rust 検査と MCP stdio smoke は両 OS で実行する。
 
 | 検査 | コマンド | docs/24 の対応 |
 |------|----------|----------------|
@@ -237,6 +240,8 @@ flowchart LR
 | Rust 書式 | `cargo fmt -- --check` | §9.1-3 |
 | Rust 静的検査 | `cargo clippy --all-targets -- -D warnings` | §9.1-2（テストコードまで対象を広げている） |
 | Rust テスト全件 | `cargo test` | §9.1-1、§3（プロパティ）、§4.6（状態遷移 0/1-switch） |
+| MCP smoke (Node) | `node mcp/smoke.mjs` | §6.1（偽ブリッジ結合。windows のみ） |
+| MCP stdio smoke | `cargo build --bin` + `test_tools/e2e/mcp_stdio_smoke.py` | §6.1（実バイナリ `--mcp` を実パイプで検証。**両 OS**） |
 
 `cargo test`（`--lib` ではなく全件）に、プロパティテスト 8 件と
 状態遷移テスト（0-switch + 49 順序対）が含まれる。1-switch は 3〜9 秒かかるが、
@@ -258,7 +263,7 @@ push/PR で落ちたらマージしない必須ゲートは `ci.yml` の 1 本�
 
 | ワークフロー | トリガ | 役割 | 位置づけ |
 |--------------|--------|------|----------|
-| `ci.yml` | push/PR（dev, master） | **Tier 1 の必須ゲート**。Windows 単一ジョブ、fast-fail | 落ちたらマージしない |
+| `ci.yml` | push/PR（dev, master） | **Tier 1 の必須ゲート**。Windows + Linux の 2 ジョブ、fast-fail | 落ちたらマージしない |
 | `rust-ci.yml` | 手動 + 週次 | 3 OS マトリクス、カバレッジ、未使用依存 | 移植性の定点観測（SYS-NF-501） |
 | `frontend-ci.yml` | 手動 + 週次 | 未使用 CSS の検出ほか | 補助 |
 | `license-check.yml` / `security-audit.yml` | （既存のまま） | 依存のライセンス・脆弱性 | リリース前に結果を確認する（§4 手順 1） |

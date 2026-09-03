@@ -34,11 +34,27 @@ function Find-Buttons($win) {
 }
 
 function Activate-Window($win) {
-  $hwnd = [IntPtr]$win.Current.NativeWindowHandle
-  $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
+  # SetForegroundWindow は前面化に失敗しても false すら返さないことがある。
+  # GetForegroundWindow で検証し、成るまで数回リトライする（キーボード操作系の
+  # アクションはフォーカスが無いと黙って空振りするため必須）。
+  # ハンドルが取れない要素もあるため全体をベストエフォートにする
+  # （後続の SetFocus だけで足りるケースもある）。
+  $raw = 0
+  try { $raw = $win.Current.NativeWindowHandle } catch {}
+  if (-not $raw) { Write-Host "WARN: window has no native handle"; return }
+  $hwnd = [IntPtr][Int64]$raw
+  $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd); [DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();'
   $t = Add-Type -MemberDefinition $sig -Name Win32SFW -Namespace W -PassThru
-  [void]$t::SetForegroundWindow($hwnd)
-  Start-Sleep -Milliseconds 300
+  for ($attempt = 0; $attempt -lt 5; $attempt++) {
+    try {
+      [void]$t::SetForegroundWindow($hwnd)
+      Start-Sleep -Milliseconds 300
+      if ($t::GetForegroundWindow() -eq $hwnd) { return }
+    } catch {
+      Start-Sleep -Milliseconds 300
+    }
+  }
+  Write-Host "WARN: could not bring window to foreground"
 }
 
 switch ($Action) {
