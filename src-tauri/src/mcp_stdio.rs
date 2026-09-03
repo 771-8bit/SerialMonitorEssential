@@ -1631,12 +1631,17 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            // 再試行しない（1 回だけ受け付ける）ことも検証対象:
-            // 2 回目の accept が来たらこの join がタイムアウトする代わりに
-            // ここでは 1 接続だけ処理して閉じる
+            // 1 接続だけ処理して閉じる（非リトライの検証も兼ねる）。
+            // 実サーバ同様、クライアントのリクエスト行を読んでから拒否行を
+            // 返す: 未読データを残して閉じると RST で拒否行が破棄されることが
+            // ある（Windows で顕著。本番の拒否パスも同じ理由で読み捨てる）。
             let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            let _ = reader.read_line(&mut request_line);
             let _ = stream
                 .write_all(b"{\"id\":null,\"ok\":false,\"error\":\"too many connections\"}\n");
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         });
 
         let mut client = TcpBridgeClient::new("127.0.0.1".to_string(), port, None);

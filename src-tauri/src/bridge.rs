@@ -627,6 +627,16 @@ impl BridgeServer {
                                 &mut stream,
                                 &Response::error(Value::Null, "too many connections").into_json(),
                             );
+                            // クライアントは接続直後に最初のリクエストを書き込んで
+                            // いることが多い。未読データを残したまま drop すると
+                            // （特に Windows で）RST が送信され、上のエラー行が
+                            // クライアントへ届く前に破棄され得る。書き込み側だけ
+                            // 閉じて、相手が閉じるまで短時間読み捨てる。
+                            let _ = stream.shutdown(std::net::Shutdown::Write);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                            let mut sink = [0u8; 256];
+                            use std::io::Read as _;
+                            while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
                             log::warn!("[bridge] Connection limit reached, rejected {}", peer);
                             continue;
                         }
