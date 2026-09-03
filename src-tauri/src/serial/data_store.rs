@@ -55,6 +55,8 @@ impl DataStore {
     /// PIDを使った一時ディレクトリを作成し、ObjectPoolを初期化する。
     /// 起動時に古い一時ディレクトリをクリーンアップする。
     pub fn new() -> Result<Self, String> {
+        use std::sync::atomic::AtomicU64;
+
         let pid = std::process::id();
         let base_dir = std::env::temp_dir().join("SerialMonitorEssential");
 
@@ -62,7 +64,15 @@ impl DataStore {
         cleanup_stale_directories(&base_dir, pid)?;
 
         // 一時ディレクトリ作成
-        let temp_dir = base_dir.join(pid.to_string());
+        //
+        // インスタンスごとに一意のサブディレクトリを使う。同一プロセス内で
+        // DataStore が作り直されるとき（clear / ポート再オープン）、古い
+        // インスタンスの Drop はプロッタスレッド等が Arc を離した後に遅延
+        // 実行され得る。ディレクトリを共有していると、その Drop が新しい
+        // インスタンスのライブなデータファイルまで削除してしまう。
+        static INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let instance = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = base_dir.join(pid.to_string()).join(instance.to_string());
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {:?}", e))?;
 
@@ -322,6 +332,31 @@ impl DataStore {
         total
     }
 
+    /// テスト用: バイト列を finished_list に直接追加する
+    ///
+    /// 実際の受信スレッドを起動せずに get_data / total_bytes を検証するための
+    /// ヘルパー（プロッタスレッドのテストからも使用）。
+    #[cfg(test)]
+    pub fn push_test_data(&self, data: &[u8]) {
+        self.push_test_data_at(self.total_bytes(), data);
+    }
+
+    /// テスト用: 任意のグローバルオフセットにチャンクを直接置く
+    ///
+    /// オフセットに空隙を作ると、その手前を読む `get_data` は
+    /// "Insufficient data" で失敗する。読み取り失敗パス
+    /// （プロッタスレッドの read_failures / スキップアヘッド）の
+    /// フォールト注入に使う。
+    #[cfg(test)]
+    pub fn push_test_data_at(&self, offset: u64, data: &[u8]) {
+        let mut chunk = Chunk::new(data.len().max(1));
+        chunk.push_data(data);
+        chunk.set_global_offset(offset);
+        if let Ok(mut list) = self.finished_list.write() {
+            list.push_back(Arc::new(chunk));
+        }
+    }
+
     /// 現在のバイトカウントとタイムスタンプを記録
     ///
     /// 100ms間隔でUiNotifierから呼び出される。
@@ -337,10 +372,14 @@ impl DataStore {
 
         if let Ok(mut index) = self.timestamp_index.write() {
             // 前回と同じバイト数の場合はスキップ
+            // また、システム時刻の巻き戻り（NTP調整等）で timestamp が
+            // 逆行すると二分探索が壊れるため、単調性を保証する
+            let mut timestamp = timestamp;
             if let Some(last) = index.last() {
                 if last.cumulative_bytes == current_bytes {
                     return;
                 }
+                timestamp = timestamp.max(last.timestamp);
             }
 
             index.push(ByteTimestamp {
@@ -471,6 +510,10 @@ impl Drop for DataStore {
         self.stop_reception();
 
         // 一時ファイルを削除（ベストエフォート）
+        // temp_dir はインスタンス固有のディレクトリなので、他のインスタンスの
+        // ファイルを巻き込むことはない。親の PID ディレクトリは意図的に残す
+        // （並行する create_dir_all との競合を避けるため。次回起動時の
+        // cleanup_stale_directories が回収する）。
         match fs::remove_dir_all(&self.temp_dir) {
             Ok(_) => info!("[DataStore::Drop] Successfully removed temp directory"),
             Err(e) => warn!("[DataStore::Drop] Failed to remove temp directory: {:?}", e),
@@ -568,16 +611,23 @@ mod tests {
     use std::io::Write;
 
     /// テスト用にDataStoreの内部状態を直接操作するためのヘルパー
+    ///
+    /// ディレクトリ名にはナノ秒に加えて単調カウンタを含める。プロパティテストは
+    /// 1 テスト内で数百個のストアを作るため、時計の分解能（Windows では約 100ns）
+    /// では衝突し得る。衝突すると別ケースの一時ファイルを共有してしまう。
     fn create_test_data_store() -> DataStore {
+        static DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         let pid = std::process::id();
         let base_dir = std::env::temp_dir().join("SerialMonitorEssential_test");
         let temp_dir = base_dir.join(format!(
-            "{}_{}",
+            "{}_{}_{}",
             pid,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            DIR_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1318,5 +1368,466 @@ mod tests {
         assert_eq!(offsets.len(), 5);
 
         let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    // ================================================================
+    // get_data: 読み出しの一貫性（P-8）と境界値分析
+    //
+    // docs/24_vv_plan.md §3.3 P-8 / §2.2 の 1 行目に対応する。
+    //
+    // ## 2 記憶域の順序契約（実装を読んで確定した実際の不変条件）
+    //
+    // `get_data` は archived_index → finished_list の順に **1 パスずつ** 走り、
+    // `current_offset` を前へ進めることしかしない。したがって 1 回の読み出しで
+    // 満たすべき条件は次のとおり:
+    //
+    // > 要求範囲 `[offset, offset+length)` のうち archived_index が供給する部分は、
+    // > 必ず **先頭側の連続した前半**でなければならない。finished_list は残りの
+    // > 後半だけを供給する。
+    //
+    // つまり「archived と finished をオフセット順で任意に交互配置してよい」わけ
+    // ではない。finished のチャンクより後ろに archived のページが来ると、その
+    // 継ぎ目をまたぐ読み出しは（データが全部存在していても）"Insufficient data"
+    // で失敗する。これは `test_get_data_ordering_contract_archived_must_precede_finished`
+    // で明示的に固定してある。
+    //
+    // 本番でこの契約が成り立つ理由: logger_thread は finished_list の **先頭から**
+    // 順にディスクへ落として archived_index へ push する（logger_thread.rs
+    // `process_buffer`）。よって archived は常に `[0, A)` を、finished は常に
+    // `[A, total)` を担当する。下のプロパティはこの実際の不変条件を生成する。
+    // ================================================================
+
+    use proptest::prelude::*;
+
+    /// アーカイブファイルの先頭に詰める junk。`file_offset != 0` の経路を通す。
+    const LEADING_JUNK: [u8; 16] = [0xAA; 16];
+    /// アーカイブファイルの末尾に詰める junk。`data_length` を無視して読む実装なら
+    /// これを拾ってしまうので、境界の取り違えを検出できる。
+    const TRAILING_JUNK: [u8; 4] = [0x55; 4];
+
+    /// 論理ストリームの `i` バイト目。
+    ///
+    /// 251 は素数で、以下で使うどのページ長・チャンク長とも互いに素なので、
+    /// 不一致が起きたときに「実際に読まれたグローバルオフセット」が値から逆算できる。
+    fn expected_byte(i: usize) -> u8 {
+        (i % 251) as u8
+    }
+
+    fn expected_bytes(total: usize) -> Vec<u8> {
+        (0..total).map(expected_byte).collect()
+    }
+
+    /// `data` を temp_dir 内の新規ファイルへ書き、archived_index へ登録する。
+    ///
+    /// 先頭に `junk_len` バイトの junk を置くので `file_offset` は 0 以外になる。
+    fn add_archived_page(
+        store: &DataStore,
+        name: &str,
+        global_offset: u64,
+        data: &[u8],
+        junk_len: usize,
+    ) {
+        let junk_len = junk_len.min(LEADING_JUNK.len());
+        let path = store.temp_dir.join(name);
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(&LEADING_JUNK[..junk_len]).unwrap();
+            file.write_all(data).unwrap();
+            file.write_all(&TRAILING_JUNK).unwrap();
+        }
+        store.archived_index.write().unwrap().push(PageMetadata {
+            file_path: path,
+            file_offset: junk_len as u64,
+            data_length: data.len(),
+            global_offset,
+        });
+    }
+
+    /// `archived` → `finished` の長さ列からストアを組み立てる。
+    ///
+    /// 内容は `expected_byte` 列。グローバルオフセットは 0 から連続で、
+    /// archived が前半・finished が後半（= 上で述べた実際の順序契約）。
+    /// 戻り値の `Vec<u8>` が期待されるストリーム全体。
+    fn build_store_from_segments(
+        archived: &[usize],
+        finished: &[usize],
+        junk: &[usize],
+    ) -> (DataStore, Vec<u8>) {
+        let total: usize = archived.iter().chain(finished.iter()).sum();
+        let expected = expected_bytes(total);
+        let store = create_test_data_store();
+
+        let mut global = 0usize;
+        for (i, &len) in archived.iter().enumerate() {
+            let junk_len = if junk.is_empty() {
+                0
+            } else {
+                junk[i % junk.len()]
+            };
+            add_archived_page(
+                &store,
+                &format!("page_{i}.bin"),
+                global as u64,
+                &expected[global..global + len],
+                junk_len,
+            );
+            global += len;
+        }
+        for &len in finished {
+            store.push_test_data_at(global as u64, &expected[global..global + len]);
+            global += len;
+        }
+
+        (store, expected)
+    }
+
+    /// 成功するはずの読み出し。失敗したらオフセット付きで panic する。
+    fn read_span(store: &DataStore, offset: u64, length: u32) -> Vec<u8> {
+        match store.get_data(offset, length) {
+            Ok(v) => v,
+            Err(e) => panic!("get_data({offset}, {length}) unexpectedly failed: {e}"),
+        }
+    }
+
+    /// BVA 用の固定レイアウト。
+    ///
+    /// archived: [0,40) [40,100)   finished: [100,150) [150,200)
+    /// 継ぎ目は 40（archived 同士）/ 100（archived→finished）/ 150（finished 同士）。
+    fn seam_fixture() -> (DataStore, Vec<u8>) {
+        build_store_from_segments(&[40, 60], &[50, 50], &[0, 7])
+    }
+
+    // ---------------- P-8: プロパティ ----------------
+
+    /// 生成された記憶域レイアウト。
+    #[derive(Debug, Clone)]
+    struct StorageLayout {
+        /// archived_index に置くセグメント長（グローバルオフセット順の前半）
+        archived: Vec<usize>,
+        /// finished_list に置くセグメント長（後半）
+        finished: Vec<usize>,
+        /// archived ページごとの先頭 junk バイト数（file_offset を散らす）
+        junk: Vec<usize>,
+    }
+
+    impl StorageLayout {
+        fn total(&self) -> usize {
+            self.archived.iter().chain(self.finished.iter()).sum()
+        }
+    }
+
+    /// 合計 1..=4096 バイトを 1..=8 個の連続セグメントに分割し、
+    /// 先頭から任意個を archived、残りを finished に割り当てる。
+    fn storage_layout() -> impl Strategy<Value = StorageLayout> {
+        (
+            1usize..=4096usize,
+            prop::collection::vec(0usize..4096, 0..8usize),
+            0usize..=8usize,
+            prop::collection::vec(0usize..=16, 8),
+        )
+            .prop_map(|(total, raw_cuts, archived_pick, junk)| {
+                // 内部の切れ目を 1..total に写して整列・重複除去する。
+                let mut cuts: Vec<usize> = raw_cuts
+                    .into_iter()
+                    .map(|c| 1 + c % total)
+                    .filter(|c| *c < total)
+                    .collect();
+                cuts.sort_unstable();
+                cuts.dedup();
+
+                let mut segments = Vec::with_capacity(cuts.len() + 1);
+                let mut prev = 0usize;
+                for c in cuts {
+                    segments.push(c - prev);
+                    prev = c;
+                }
+                segments.push(total - prev);
+
+                let archived_len = archived_pick % (segments.len() + 1);
+                let finished = segments.split_off(archived_len);
+                StorageLayout {
+                    archived: segments,
+                    finished,
+                    junk,
+                }
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        /// P-8 読み出しの一貫性（SYS-F-203 / docs/24_vv_plan.md §3.3）
+        ///
+        /// 任意の記憶域レイアウトに対して:
+        /// 1. 全体読み出しが論理ストリームと一致する
+        /// 2. 任意の (offset, length) を 1..=5 回に分割して読んで連結したものが、
+        ///    一括読み出しと一致する（= 読み出し境界は観測できない）
+        /// 3. 任意の範囲内 (offset, length) が `expected[offset..offset+length]` そのもの
+        /// 4. 範囲外は Err（部分成功しない）／`length == 0` は常に Ok(空)
+        #[test]
+        fn prop_get_data_split_read_consistency(
+            layout in storage_layout(),
+            windows in prop::collection::vec((any::<u64>(), any::<u64>()), 3),
+            split_seeds in prop::collection::vec(prop::collection::vec(any::<u64>(), 0..5), 3),
+        ) {
+            let total = layout.total();
+            let (store, expected) =
+                build_store_from_segments(&layout.archived, &layout.finished, &layout.junk);
+
+            prop_assert_eq!(store.total_bytes(), total as u64);
+
+            // (1) 全体読み出し
+            let whole = read_span(&store, 0, total as u32);
+            prop_assert_eq!(whole.as_slice(), expected.as_slice());
+
+            for (w, seeds) in windows.iter().zip(split_seeds.iter()) {
+                let offset = (w.0 % (total as u64 + 1)) as usize;
+                let length = (w.1 % (total as u64 - offset as u64 + 1)) as usize;
+
+                // (3) 任意窓は期待バイト列そのもの
+                let got = read_span(&store, offset as u64, length as u32);
+                prop_assert_eq!(got.as_slice(), &expected[offset..offset + length]);
+
+                // (2) 同じ窓を 1..=5 個の連続部分読み出しに割ってから連結する
+                let mut cuts: Vec<usize> = seeds
+                    .iter()
+                    .map(|s| (s % (length as u64 + 1)) as usize)
+                    .collect();
+                cuts.sort_unstable();
+
+                let mut concat = Vec::with_capacity(length);
+                let mut cursor = offset;
+                for end in cuts
+                    .iter()
+                    .map(|c| offset + c)
+                    .chain(std::iter::once(offset + length))
+                {
+                    let part_len = end - cursor;
+                    let part = read_span(&store, cursor as u64, part_len as u32);
+                    prop_assert_eq!(part.len(), part_len);
+                    concat.extend_from_slice(&part);
+                    cursor = end;
+                }
+                prop_assert_eq!(concat.as_slice(), got.as_slice());
+
+                // (4a) length == 0 は常に Ok(空)
+                let empty = read_span(&store, offset as u64, 0);
+                prop_assert!(empty.is_empty());
+
+                // (4b) 1 バイトでも範囲を超えたら Err（部分成功しない）
+                let over_len = (total - offset) as u32 + 1;
+                let over = store.get_data(offset as u64, over_len);
+                prop_assert!(
+                    over.is_err(),
+                    "get_data({}, {}) should fail past the end of {} bytes",
+                    offset,
+                    over_len,
+                    total
+                );
+            }
+
+            // store の Drop が temp_dir ごと削除する（アサート失敗時も同じ）
+        }
+    }
+
+    // ---------------- 順序契約（実装の実際の不変条件を固定する） ----------------
+
+    /// **順序契約**: 1 回の読み出しの中では archived が必ず finished より前に来る。
+    ///
+    /// `get_data` は archived_index を 1 パス走ってから finished_list を 1 パス
+    /// 走るだけで、`current_offset` を後戻りさせない。したがって
+    /// 「finished のチャンクより後ろにある archived のページ」は、その継ぎ目を
+    /// またぐ読み出しからは見えず、データが全部そろっていても Err になる。
+    ///
+    /// これは本番では起こらない（logger_thread は finished_list の先頭から
+    /// 順にアーカイブするため archived は常にストリームの前半）。この配置が
+    /// **サポート外**であることを明示的に固定するためのテスト。
+    #[test]
+    fn test_get_data_ordering_contract_archived_must_precede_finished() {
+        // --- ケース A: finished [0,10) の後ろに archived [10,20) ---
+        {
+            let expected = expected_bytes(20);
+            let store = create_test_data_store();
+            store.push_test_data_at(0, &expected[0..10]);
+            add_archived_page(&store, "tail.bin", 10, &expected[10..20], 3);
+
+            // 片方の記憶域に収まる読み出しは成功する
+            assert_eq!(read_span(&store, 0, 10), expected[0..10].to_vec());
+            assert_eq!(read_span(&store, 10, 10), expected[10..20].to_vec());
+
+            // 継ぎ目をまたぐと、データが全部あっても失敗する
+            let spanning = store.get_data(0, 20);
+            assert!(
+                spanning.is_err(),
+                "finished -> archived の順序は未サポートのはずが成功した: {spanning:?}"
+            );
+        }
+
+        // --- ケース B: archived [0,10) / finished [10,20) / archived [20,30) ---
+        {
+            let expected = expected_bytes(30);
+            let store = create_test_data_store();
+            add_archived_page(&store, "head.bin", 0, &expected[0..10], 0);
+            store.push_test_data_at(10, &expected[10..20]);
+            add_archived_page(&store, "tail.bin", 20, &expected[20..30], 5);
+
+            // archived -> finished の向きなら継ぎ目をまたげる
+            assert_eq!(read_span(&store, 0, 20), expected[0..20].to_vec());
+            // 2 つ目の archived 単独も読める
+            assert_eq!(read_span(&store, 20, 10), expected[20..30].to_vec());
+
+            // finished を挟んで再び archived へ戻る読み出しは失敗する
+            let spanning = store.get_data(0, 30);
+            assert!(
+                spanning.is_err(),
+                "archived -> finished -> archived は未サポートのはずが成功した: {spanning:?}"
+            );
+        }
+    }
+
+    // ---------------- 境界値分析（docs/24_vv_plan.md §2.2 1 行目） ----------------
+
+    /// BVA: `length = 0`（ストリーム両端・記憶域の内部・範囲外）
+    ///
+    /// **所見**: `length == 0` は範囲検査より先に短絡するため、`offset` が
+    /// どれだけ範囲外でも Err にならず Ok(空) を返す。実挙動として固定する。
+    #[test]
+    fn test_get_data_bva_zero_length() {
+        let (store, _expected) = seam_fixture();
+        let total = store.total_bytes();
+        assert_eq!(total, 200);
+
+        // 先頭
+        assert_eq!(read_span(&store, 0, 0), Vec::<u8>::new());
+        // 末尾ちょうど（offset == total_bytes）
+        assert_eq!(read_span(&store, total, 0), Vec::<u8>::new());
+        // archived ページ内部 / finished チャンク内部 / 各継ぎ目
+        for offset in [20u64, 40, 99, 100, 120, 150, 199] {
+            assert_eq!(
+                read_span(&store, offset, 0),
+                Vec::<u8>::new(),
+                "zero-length read at {offset} should be empty"
+            );
+        }
+        // 所見: 範囲外オフセットでも Ok(空)
+        assert_eq!(read_span(&store, total + 10_000, 0), Vec::<u8>::new());
+    }
+
+    /// BVA: `offset == total_bytes`（空の末尾読み出し）とその直前・直後
+    #[test]
+    fn test_get_data_bva_offset_equals_total_bytes() {
+        let (store, expected) = seam_fixture();
+        let total = store.total_bytes();
+
+        // 末尾ちょうどの空読み出しは成功
+        assert_eq!(read_span(&store, total, 0), Vec::<u8>::new());
+        // 末尾ちょうどから 1 バイトは失敗
+        assert!(store.get_data(total, 1).is_err());
+        // 最後の 1 バイトは読める
+        assert_eq!(read_span(&store, total - 1, 1), vec![expected_byte(199)]);
+        // ちょうど末尾で終わる読み出しは成功、1 バイト超過は失敗
+        assert_eq!(read_span(&store, 150, 50), expected[150..200].to_vec());
+        assert!(store.get_data(150, 51).is_err());
+        assert!(store.get_data(0, 201).is_err());
+    }
+
+    /// BVA: 各境界で「ちょうど終わる」読み出し
+    #[test]
+    fn test_get_data_bva_read_ends_exactly_at_boundary() {
+        let (store, expected) = seam_fixture();
+
+        // archived ページ同士の継ぎ目 40 でちょうど終わる
+        assert_eq!(read_span(&store, 0, 40), expected[0..40].to_vec());
+        assert_eq!(read_span(&store, 39, 1), expected[39..40].to_vec());
+        // archived -> finished の継ぎ目 100 でちょうど終わる
+        assert_eq!(read_span(&store, 40, 60), expected[40..100].to_vec());
+        assert_eq!(read_span(&store, 0, 100), expected[0..100].to_vec());
+        // finished チャンク同士の継ぎ目 150 でちょうど終わる
+        assert_eq!(read_span(&store, 100, 50), expected[100..150].to_vec());
+        assert_eq!(read_span(&store, 0, 150), expected[0..150].to_vec());
+        // ストリーム末尾 200 でちょうど終わる
+        assert_eq!(read_span(&store, 0, 200), expected.clone());
+    }
+
+    /// BVA: 各境界から「ちょうど始まる」読み出し
+    #[test]
+    fn test_get_data_bva_read_starts_exactly_at_boundary() {
+        let (store, expected) = seam_fixture();
+
+        // archived ページ同士の継ぎ目 40 から
+        assert_eq!(read_span(&store, 40, 60), expected[40..100].to_vec());
+        assert_eq!(read_span(&store, 40, 1), expected[40..41].to_vec());
+        // archived -> finished の継ぎ目 100 から
+        assert_eq!(read_span(&store, 100, 100), expected[100..200].to_vec());
+        assert_eq!(read_span(&store, 100, 1), expected[100..101].to_vec());
+        // finished チャンク同士の継ぎ目 150 から
+        assert_eq!(read_span(&store, 150, 50), expected[150..200].to_vec());
+        // ストリーム先頭 0 から
+        assert_eq!(read_span(&store, 0, 1), expected[0..1].to_vec());
+    }
+
+    /// BVA: archived と finished の継ぎ目をちょうどまたぐ読み出し
+    #[test]
+    fn test_get_data_bva_read_spans_seam_exactly() {
+        let (store, expected) = seam_fixture();
+
+        // 継ぎ目 100 をまたぐ最小の読み出し（archived 最終バイト + finished 先頭バイト）
+        assert_eq!(read_span(&store, 99, 2), expected[99..101].to_vec());
+        // archived を丸ごと + finished 先頭 1 バイト
+        assert_eq!(read_span(&store, 0, 101), expected[0..101].to_vec());
+        // archived 最終 1 バイト + finished を丸ごと
+        assert_eq!(read_span(&store, 99, 101), expected[99..200].to_vec());
+        // archived ページ同士の継ぎ目 40 をまたぐ最小の読み出し
+        assert_eq!(read_span(&store, 39, 2), expected[39..41].to_vec());
+        // finished チャンク同士の継ぎ目 150 をまたぐ最小の読み出し
+        assert_eq!(read_span(&store, 149, 2), expected[149..151].to_vec());
+        // 3 つの継ぎ目すべてをまたぐ
+        assert_eq!(read_span(&store, 39, 112), expected[39..151].to_vec());
+    }
+
+    /// BVA: 各継ぎ目の両側での 1 バイト読み出し
+    #[test]
+    fn test_get_data_bva_single_byte_reads_at_seams() {
+        let (store, _expected) = seam_fixture();
+
+        for seam in [40usize, 100, 150] {
+            assert_eq!(
+                read_span(&store, seam as u64 - 1, 1),
+                vec![expected_byte(seam - 1)],
+                "byte just before seam {seam}"
+            );
+            assert_eq!(
+                read_span(&store, seam as u64, 1),
+                vec![expected_byte(seam)],
+                "byte just after seam {seam}"
+            );
+        }
+
+        // ストリーム両端の 1 バイト
+        assert_eq!(read_span(&store, 0, 1), vec![expected_byte(0)]);
+        assert_eq!(read_span(&store, 199, 1), vec![expected_byte(199)]);
+    }
+
+    /// BVA: 単一チャンク／単一ページだけのストアでの端点
+    #[test]
+    fn test_get_data_bva_single_segment_edges() {
+        // archived 1 ページのみ
+        {
+            let (store, expected) = build_store_from_segments(&[1], &[], &[9]);
+            assert_eq!(read_span(&store, 0, 1), expected.clone());
+            assert_eq!(read_span(&store, 0, 0), Vec::<u8>::new());
+            assert_eq!(read_span(&store, 1, 0), Vec::<u8>::new());
+            assert!(store.get_data(1, 1).is_err());
+            assert!(store.get_data(0, 2).is_err());
+        }
+
+        // finished 1 チャンクのみ
+        {
+            let (store, expected) = build_store_from_segments(&[], &[1], &[]);
+            assert_eq!(read_span(&store, 0, 1), expected.clone());
+            assert_eq!(read_span(&store, 1, 0), Vec::<u8>::new());
+            assert!(store.get_data(1, 1).is_err());
+            assert!(store.get_data(0, 2).is_err());
+        }
     }
 }

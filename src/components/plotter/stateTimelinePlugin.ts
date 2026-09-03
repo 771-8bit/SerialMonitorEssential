@@ -89,6 +89,11 @@ function getStateColor(state: string, customColors?: Record<string, string>): st
   return color;
 }
 
+/** Scale the px size in a CSS font shorthand (e.g. "11px sans-serif") by dpr */
+function scaleFontPx(font: string, dpr: number): string {
+  return font.replace(/(\d+(?:\.\d+)?)px/, (_, size) => `${Math.round(Number(size) * dpr)}px`);
+}
+
 /**
  * Creates a uPlot plugin for rendering state timelines
  */
@@ -106,6 +111,14 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
 
         if (rows.length === 0) return;
 
+        // Canvas coordinates (u.bbox, valToPos(..., true)) are in DEVICE
+        // pixels, while option values (rowHeight, axis size, fonts) are CSS
+        // pixels. Scale all CSS-px quantities by the device pixel ratio so
+        // rows land below the x-axis at 125%/150% Windows display scaling.
+        const dpr = window.devicePixelRatio || 1;
+        const rh = rowHeight * dpr;
+        const rg = rowGap * dpr;
+
         // Get plot area dimensions
         const plotLeft = u.bbox.left;
         const plotWidth = u.bbox.width;
@@ -117,13 +130,10 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
 
         if (xMin === undefined || xMax === undefined) return;
 
-        // Calculate X-axis height (axis labels, ticks, gap)
-        // Access the X-axis configuration to get the actual size
+        // Calculate X-axis height (axis labels, ticks, gap) in device px
         const xAxis = u.axes[0];
-        // The axis size includes labels, ticks, and gap
-        // Default axis size is around 30px, but we account for actual configuration
-        const axisSize = (xAxis as { _size?: number })._size ?? 30;
-        const axisGap = xAxis.gap ?? 5;
+        const axisSize = ((xAxis as { _size?: number })._size ?? 30) * dpr;
+        const axisGap = (xAxis.gap ?? 5) * dpr;
         const xAxisHeight = axisSize + axisGap;
 
         // Start drawing below the X-axis
@@ -136,7 +146,7 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
         ctx.save();
 
         // Clip to state timeline area (below X-axis)
-        const totalStateHeight = rows.length * (rowHeight + rowGap);
+        const totalStateHeight = rows.length * (rh + rg);
         ctx.beginPath();
         ctx.rect(plotLeft, stateAreaTop, plotWidth, totalStateHeight);
         ctx.clip();
@@ -144,16 +154,16 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
         // Draw each state row (bars only, clipped to plot area)
         for (let r = 0; r < rows.length; r++) {
           const row = rows[r];
-          const y0 = stateAreaTop + r * (rowHeight + rowGap) + rowGap / 2;
+          const y0 = stateAreaTop + r * (rh + rg) + rg / 2;
 
           // Draw channel label background
           ctx.fillStyle = '#252526';
-          ctx.fillRect(plotLeft, y0, plotWidth, rowHeight);
+          ctx.fillRect(plotLeft, y0, plotWidth, rh);
 
           // Draw each segment
           for (const seg of row.segments) {
             // Skip segments outside visible range
-            if (seg.end_ms <= xMinMs || seg.start_ms >= xMaxMs) continue;
+            if (seg.end_ms < xMinMs || seg.start_ms > xMaxMs) continue;
 
             // Clamp segment to visible range
             const visStart = Math.max(seg.start_ms, xMinMs);
@@ -167,17 +177,17 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
             // Draw state bar
             const color = getStateColor(seg.state, opts.stateColors);
             ctx.fillStyle = color;
-            ctx.fillRect(x0, y0, barWidth, rowHeight);
+            ctx.fillRect(x0, y0, barWidth, rh);
 
             // Draw label if bar is wide enough
-            if (showLabel && barWidth > 20) {
+            if (showLabel && barWidth > 20 * dpr) {
               ctx.fillStyle = '#fff';
-              ctx.font = labelFont;
+              ctx.font = scaleFontPx(labelFont, dpr);
               ctx.textBaseline = 'middle';
               ctx.textAlign = 'left';
 
               // Truncate text if needed
-              const maxTextWidth = barWidth - 8;
+              const maxTextWidth = barWidth - 8 * dpr;
               let text = seg.state;
               const measured = ctx.measureText(text);
               if (measured.width > maxTextWidth) {
@@ -188,7 +198,7 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
                 text = text + '…';
               }
 
-              ctx.fillText(text, x0 + 4, y0 + rowHeight / 2);
+              ctx.fillText(text, x0 + 4 * dpr, y0 + rh / 2);
             }
           }
         }
@@ -199,13 +209,13 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
         ctx.save();
         for (let r = 0; r < rows.length; r++) {
           const row = rows[r];
-          const y0 = stateAreaTop + r * (rowHeight + rowGap) + rowGap / 2;
+          const y0 = stateAreaTop + r * (rh + rg) + rg / 2;
 
           ctx.fillStyle = '#9cdcfe';
-          ctx.font = '11px sans-serif';
+          ctx.font = scaleFontPx('11px sans-serif', dpr);
           ctx.textBaseline = 'middle';
           ctx.textAlign = 'right';
-          ctx.fillText(row.channel + ':', plotLeft - 8, y0 + rowHeight / 2);
+          ctx.fillText(row.channel + ':', plotLeft - 8 * dpr, y0 + rh / 2);
         }
         ctx.restore();
       },

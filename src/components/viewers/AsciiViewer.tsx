@@ -71,6 +71,13 @@ export default function AsciiViewer({
     onScrollChange,
   });
 
+  // Track visible-row count as of the last fetch, to detect viewport growth
+  // (e.g. window resize) that should trigger a refetch of newly exposed rows.
+  const prevVisibleRowsRef = useRef(visibleRows);
+  // Track the timestamp toggle: switching it must force a refetch, otherwise
+  // the proximity skip keeps showing rows fetched with the old setting.
+  const prevShowTimestampRef = useRef(showTimestamp);
+
   // Calculate ASCII-specific scroll height based on actual line count
   // NOW HANDLED BY HOOK via totalRows
   const asciiScrollHeight = scrollHeight;
@@ -109,39 +116,56 @@ export default function AsciiViewer({
     }
   }, [initialOffset, totalBytes, scrollTo, initialLineSet, effectiveTotalLines]);
 
+  // Pending request queue: a request arriving while a fetch is in flight is
+  // processed afterwards instead of dropped (a dropped forced refetch would
+  // leave the last received data permanently un-displayed).
+  const pendingFetchRef = useRef<{ startLine: number; force: boolean } | null>(null);
+
   // Fetch lines from backend
   const fetchLines = useCallback(
     async (startLine: number, force: boolean = false) => {
+      // Always record the latest request, OR-ing the force flag so a forced
+      // refetch queued during an in-flight fetch is not lost.
+      pendingFetchRef.current = {
+        startLine,
+        force: force || (pendingFetchRef.current?.force ?? false),
+      };
       if (fetchingRef.current) return;
-      // Optimization: Skip if we are close to the last fetched line.
-      // EXCEPTION: If startLine is 0, we MUST ensure we have the very first line.
-      // If we are at 0, and last fetch was NOT 0 (e.g. 10), we must fetch.
-      // If last fetch was 0, we can skip.
-      if (
-        !force &&
-        startLine !== 0 &&
-        Math.abs(startLine - lastFetchLineRef.current) < BUFFER_ROWS / 2
-      )
-        return;
-      if (!force && startLine === 0 && lastFetchLineRef.current === 0) return;
 
       fetchingRef.current = true;
-      lastFetchLineRef.current = startLine;
-
       try {
-        const fetchCount = visibleRows + BUFFER_ROWS * 2;
-        const payload = await invoke<AsciiLinesPayload>('get_ascii_lines', {
-          startLine: startLine,
-          lineCount: fetchCount,
-          showCtrl: false,
-          showTimestamp: showTimestamp,
-        });
-        setLines(payload.lines);
-        setTotalLines(payload.total_lines);
-        totalLinesRef.current = payload.total_lines;
-        setCurrentStartLine(startLine);
-      } catch (err) {
-        console.error('Failed to fetch lines:', err);
+        while (pendingFetchRef.current) {
+          const { startLine: target, force: effectiveForce } = pendingFetchRef.current;
+          pendingFetchRef.current = null;
+
+          // Optimization: Skip if we are close to the last fetched line.
+          // EXCEPTION: If target is 0, we MUST ensure we have the very first line.
+          if (
+            !effectiveForce &&
+            target !== 0 &&
+            Math.abs(target - lastFetchLineRef.current) < BUFFER_ROWS / 2
+          )
+            continue;
+          if (!effectiveForce && target === 0 && lastFetchLineRef.current === 0) continue;
+
+          lastFetchLineRef.current = target;
+
+          try {
+            const fetchCount = visibleRows + BUFFER_ROWS * 2;
+            const payload = await invoke<AsciiLinesPayload>('get_ascii_lines', {
+              startLine: target,
+              lineCount: fetchCount,
+              showCtrl: false,
+              showTimestamp: showTimestamp,
+            });
+            setLines(payload.lines);
+            setTotalLines(payload.total_lines);
+            totalLinesRef.current = payload.total_lines;
+            setCurrentStartLine(target);
+          } catch (err) {
+            console.error('Failed to fetch lines:', err);
+          }
+        }
       } finally {
         fetchingRef.current = false;
       }
@@ -172,13 +196,33 @@ export default function AsciiViewer({
     const forceRefetch = totalBytes !== lastTotalBytesRef.current;
     lastTotalBytesRef.current = totalBytes;
 
-    fetchLines(startLine, forceRefetch);
-  }, [totalBytes, scrollTop, getByteOffset, fetchLines, effectiveTotalLines]);
+    // Refetch when the viewport grew (more rows visible than last fetch covered)
+    const viewportGrew = visibleRows > prevVisibleRowsRef.current;
+    prevVisibleRowsRef.current = visibleRows;
 
-  // Handle Ctrl+A to warn user about partial selection
+    // Refetch when the timestamp display setting changed
+    const timestampToggled = showTimestamp !== prevShowTimestampRef.current;
+    prevShowTimestampRef.current = showTimestamp;
+
+    fetchLines(startLine, forceRefetch || viewportGrew || timestampToggled);
+  }, [
+    totalBytes,
+    scrollTop,
+    getByteOffset,
+    fetchLines,
+    effectiveTotalLines,
+    visibleRows,
+    showTimestamp,
+  ]);
+
+  // Handle Ctrl+A to warn user about partial selection.
+  // Skip when focus is in an editable element (Send textarea, search input,
+  // etc.) so their native select-all keeps working.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('input, textarea, select, [contenteditable]')) return;
         e.preventDefault();
         alert(
           'To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)'
@@ -252,10 +296,18 @@ export default function AsciiViewer({
     [timestampSeparator, showTimestamp]
   );
 
-  // Calculate display position
+  // Calculate display position.
+  // Clamp the visual offset so stale rows stay attached to the viewport during
+  // fast scrolling instead of rendering thousands of pixels away (blank view).
+  // The clamp is symmetric (+/- maxDiff) so it only kicks in once the stale
+  // block would actually leave the viewport - a plain BUFFER_ROWS cap would
+  // freeze normal downward scrolling whenever the diff legitimately exceeds
+  // the buffer before the refetch lands.
   const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
   const targetLine = Math.floor(scrollRatio * effectiveTotalLines);
-  const displayTop = scrollTop - (targetLine - currentStartLine) * ROW_HEIGHT;
+  const maxDiff = Math.max(BUFFER_ROWS, lines.length - visibleRows);
+  const visualLineDiff = Math.max(Math.min(targetLine - currentStartLine, maxDiff), -maxDiff);
+  const displayTop = scrollTop - visualLineDiff * ROW_HEIGHT;
   const naturalLineHeight = totalLines * ROW_HEIGHT;
   const isScaled = asciiScrollHeight < naturalLineHeight;
 
@@ -286,12 +338,16 @@ export default function AsciiViewer({
         <span>
           Total: {totalBytes.toLocaleString()} bytes ({totalLines.toLocaleString()} lines)
         </span>
-        <span className="ascii-debug">
-          scrollTop={scrollTop.toFixed(0)} | scrollHeight={asciiScrollHeight.toLocaleString()} |
-          byteOffset={getByteOffset().toLocaleString()} | displayTop={displayTop.toLocaleString()} |
-          startLine={currentStartLine.toLocaleString()} | isScaled={isScaled ? 'YES' : 'no'} |
-          scale={(asciiScrollHeight / naturalLineHeight || 1).toFixed(4)}
-        </span>
+        {/* Internal scroll diagnostics - dev builds only, never shipped */}
+        {import.meta.env.DEV && (
+          <span className="ascii-debug">
+            scrollTop={scrollTop.toFixed(0)} | scrollHeight={asciiScrollHeight.toLocaleString()} |
+            byteOffset={getByteOffset().toLocaleString()} | displayTop=
+            {displayTop.toLocaleString()} | startLine={currentStartLine.toLocaleString()} |
+            isScaled={isScaled ? 'YES' : 'no'} | scale=
+            {(asciiScrollHeight / naturalLineHeight || 1).toFixed(4)}
+          </span>
+        )}
       </div>
     </div>
   );

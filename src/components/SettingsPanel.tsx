@@ -36,9 +36,22 @@ export default function SettingsPanel({
 }: SettingsPanelProps) {
   const [baudRateEditing, setBaudRateEditing] = useState(false);
   const [baudDropdownOpen, setBaudDropdownOpen] = useState(false);
+  // Draft text while editing the baud rate; committed (with validation) on
+  // blur/Enter so invalid values (empty, 0, negative, decimal) never reach
+  // the config / backend.
+  const [baudDraft, setBaudDraft] = useState('');
 
   const handleChange = <K extends keyof SerialConfig>(key: K, value: SerialConfig[K]) => {
     onConfigChange({ ...config, [key]: value });
+  };
+
+  const commitBaudDraft = () => {
+    const n = Math.floor(Number(baudDraft));
+    if (Number.isFinite(n) && n >= 1 && n <= 12_000_000) {
+      handleChange('baud_rate', n);
+    }
+    // Invalid input: keep the previous valid baud rate
+    setBaudRateEditing(false);
   };
 
   return (
@@ -64,10 +77,13 @@ export default function SettingsPanel({
           {baudRateEditing ? (
             <input
               type="number"
-              value={config.baud_rate}
-              onChange={(e) => handleChange('baud_rate', Number(e.target.value))}
-              onBlur={() => setBaudRateEditing(false)}
-              onKeyDown={(e) => e.key === 'Enter' && setBaudRateEditing(false)}
+              value={baudDraft}
+              onChange={(e) => setBaudDraft(e.target.value)}
+              onBlur={commitBaudDraft}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitBaudDraft();
+                if (e.key === 'Escape') setBaudRateEditing(false);
+              }}
               disabled={isConnected}
               autoFocus
               className="baud-input"
@@ -107,6 +123,7 @@ export default function SettingsPanel({
                 <li
                   className="baud-dropdown-edit"
                   onClick={() => {
+                    setBaudDraft(String(config.baud_rate));
                     setBaudRateEditing(true);
                     setBaudDropdownOpen(false);
                   }}

@@ -105,14 +105,23 @@ export function useByteScroll({
     [totalRows, totalBytes, scrollHeight]
   );
 
-  // Update visible rows based on container height
+  // Update visible rows based on container height (measured on mount AND on
+  // resize, so an enlarged viewport fetches enough rows to fill itself)
   useEffect(() => {
-    if (containerRef.current) {
-      const height = containerRef.current.clientHeight;
+    const el = containerRef.current;
+    if (!el) return;
+
+    const update = () => {
+      const height = el.clientHeight;
       if (height > 0) {
         setVisibleRows(Math.ceil(height / ROW_HEIGHT));
       }
-    }
+    };
+
+    update();
+    const resizeObserver = new ResizeObserver(update);
+    resizeObserver.observe(el);
+    return () => resizeObserver.disconnect();
   }, []);
 
   // Anchor Scroll Logic: Maintain viewing position when data grows
@@ -183,17 +192,22 @@ export function useByteScroll({
 
   // Auto-scroll: keep at bottom when new data arrives
   const lastScrollHeightRef = useRef(0);
+  const prevAutoScrollRef = useRef(autoScroll);
 
   useEffect(() => {
     // Check if data grew OR if the view revealed more content (e.g. backend confirmed more rows)
     const hasNewData = totalBytes > lastTotalBytesRef.current;
     const hasRevealedContent = scrollHeight > lastScrollHeightRef.current;
+    // Jump to the bottom immediately when Auto Scroll is switched ON
+    // (not only when the next data arrives)
+    const justEnabled = autoScroll && !prevAutoScrollRef.current;
+    prevAutoScrollRef.current = autoScroll;
 
     if (
       autoScroll &&
       totalBytes > 0 &&
       containerRef.current &&
-      (hasNewData || hasRevealedContent)
+      (hasNewData || hasRevealedContent || justEnabled)
     ) {
       lastTotalBytesRef.current = totalBytes;
       lastScrollHeightRef.current = scrollHeight;

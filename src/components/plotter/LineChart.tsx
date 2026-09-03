@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { stateTimelinePlugin, calculateStateTimelineHeight, StateRow } from './stateTimelinePlugin';
@@ -21,42 +21,131 @@ interface LineChartProps {
   isPaused?: boolean;
   // State timeline rows to display below the chart
   stateRows?: StateRow[];
-  // Callback when visible time range changes (in seconds)
+  // Callback when visible time range changes (in seconds).
+  // Only fired while NOT in follow mode - in follow mode the parent owns the
+  // x scale (via setXWindow) and re-notifying it would create a fetch loop.
   onTimeRangeChange?: (min: number, max: number) => void;
   // Channels to hide from the chart (uses series.show for efficient toggling)
   hiddenChannels?: Set<string>;
+  // LIVE follow mode: the parent drives the x window imperatively through
+  // setXWindow(), so data updates must not touch the scales.
+  followMode?: boolean;
+  // Fired when the user zooms (wheel) or drag-selects - parent enters Inspect
+  onUserInteraction?: () => void;
+  // Fired on double click - parent returns to LIVE follow mode
+  onLiveRequest?: () => void;
 }
 
-/** Calculate Y-axis range from chart data, respecting hidden series */
+/** Imperative API used by PlotterWindow's rAF loop (no React state per frame) */
+export interface LineChartHandle {
+  /** Set the visible x window (seconds) and re-evaluate the y auto-range */
+  setXWindow: (minSec: number, maxSec: number) => void;
+  /** Drop all zoom/manual-scale state (returning to LIVE) */
+  resetView: () => void;
+  /** Drop only the y auto-range hysteresis state (e.g. window width changed) */
+  resetYRange: () => void;
+}
+
+// Y auto-range hysteresis:
+// - expand immediately when data leaves the current range (never clip a spike)
+// - shrink only after the data has occupied < 60% of the span for 3 seconds
+const Y_SHRINK_OCCUPANCY = 0.6;
+const Y_SHRINK_DELAY_MS = 3000;
+
+/** Round away float noise introduced by the nice-range snapping */
+function cleanFloat(v: number): number {
+  return Number.isFinite(v) ? parseFloat(v.toPrecision(12)) : v;
+}
+
+/** Nearest step from the 1-2-5 series at or above `raw` */
+function niceStep(raw: number): number {
+  if (!Number.isFinite(raw) || raw <= 0) return 1;
+  const exp = Math.floor(Math.log10(raw));
+  const pow = Math.pow(10, exp);
+  const frac = raw / pow;
+  const mult = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+  return mult * pow;
+}
+
+/**
+ * "Nice" y range: pad the extents by 10%, then round min down / max up to a
+ * 1-2-5 step of about 1/8 of the span. Keeps y changes rare and discrete
+ * instead of jittering on every frame.
+ */
+function niceYRange(min: number, max: number): { min: number; max: number } {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: 0, max: 1 };
+  let span = max - min;
+  if (span <= 0) span = Math.abs(max) || 1;
+  const pad = span * 0.1;
+  let lo = min - pad;
+  let hi = max + pad;
+  const step = niceStep((hi - lo) / 8);
+  lo = Math.floor(lo / step) * step;
+  hi = Math.ceil(hi / step) * step;
+  if (hi <= lo) hi = lo + step;
+  return { min: cleanFloat(lo), max: cleanFloat(hi) };
+}
+
+/**
+ * Calculate Y-axis range from chart data, respecting hidden series.
+ * When xMin/xMax are given, only samples inside that x window are considered.
+ */
 function calculateYRange(
   chartData: uPlot.AlignedData,
-  hiddenSeriesIndices: Set<number>
+  hiddenSeriesIndices: Set<number>,
+  xMin?: number,
+  xMax?: number
 ): { yMin: number; yMax: number } {
   let yMin = Infinity;
   let yMax = -Infinity;
+  const windowed = xMin !== undefined && xMax !== undefined;
+  const xData = chartData[0] as (number | null)[] | undefined;
   for (let i = 1; i < chartData.length; i++) {
     // Skip hidden series
     if (hiddenSeriesIndices.has(i)) continue;
     const yData = chartData[i] as (number | null)[];
-    for (const v of yData) {
-      if (v !== null) {
-        yMin = Math.min(yMin, v);
-        yMax = Math.max(yMax, v);
+    for (let j = 0; j < yData.length; j++) {
+      if (windowed) {
+        const x = xData?.[j];
+        if (x == null || x < xMin! || x > xMax!) continue;
+      }
+      const v = yData[j];
+      if (v !== null && v !== undefined && Number.isFinite(v)) {
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
       }
     }
   }
   return { yMin, yMax };
 }
 
-export default function LineChart({
-  alignedData,
-  channelNames,
-  bandData = null,
-  isPaused = false,
-  stateRows = [],
-  onTimeRangeChange,
-  hiddenChannels = new Set(),
-}: LineChartProps) {
+/** min/max of an array of possibly-null numbers (no spread - arrays can be large) */
+function extentOf(values: (number | null)[]): { min: number; max: number } | null {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return min === Infinity ? null : { min, max };
+}
+
+const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart(
+  {
+    alignedData,
+    channelNames,
+    bandData = null,
+    isPaused = false,
+    stateRows = [],
+    onTimeRangeChange,
+    hiddenChannels = new Set(),
+    followMode = false,
+    onUserInteraction,
+    onLiveRequest,
+  },
+  ref
+) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
   const channelsRef = useRef<string[]>([]);
@@ -67,14 +156,34 @@ export default function LineChart({
   const manualXRangeRef = useRef<number | null>(null);
   const onTimeRangeChangeRef = useRef(onTimeRangeChange);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const followModeRef = useRef(followMode);
+  const onUserInteractionRef = useRef(onUserInteraction);
+  const onLiveRequestRef = useRef(onLiveRequest);
+  // Currently applied auto y range (null = needs (re)computation)
+  const yRangeRef = useRef<{ min: number; max: number } | null>(null);
+  // Timestamp (ms) since when the data has been "too small" for the y range
+  const shrinkSinceRef = useRef<number | null>(null);
 
   // Debounce delay in ms for time range change notifications
   const DEBOUNCE_DELAY_MS = 200;
 
-  // Keep refs up to date
+  // Keep refs up to date (declared before the chart effects so the refs are
+  // already current when those run in the same commit)
   useEffect(() => {
     onTimeRangeChangeRef.current = onTimeRangeChange;
   }, [onTimeRangeChange]);
+
+  useEffect(() => {
+    onUserInteractionRef.current = onUserInteraction;
+  }, [onUserInteraction]);
+
+  useEffect(() => {
+    onLiveRequestRef.current = onLiveRequest;
+  }, [onLiveRequest]);
+
+  useEffect(() => {
+    followModeRef.current = followMode;
+  }, [followMode]);
 
   useEffect(() => {
     hiddenChannelsRef.current = hiddenChannels;
@@ -97,6 +206,26 @@ export default function LineChart({
   useEffect(() => {
     bandDataRef.current = bandData;
   }, [bandData]);
+
+  // Series indices (1-based, index 0 is the timestamp column) that are hidden
+  const getHiddenIndices = useCallback((currentHiddenChannels?: Set<string>) => {
+    const hidden = currentHiddenChannels ?? hiddenChannelsRef.current;
+    const indices = new Set<number>();
+    for (let i = 0; i < channelsRef.current.length; i++) {
+      if (hidden.has(channelsRef.current[i])) {
+        indices.add(i + 1); // +1 because index 0 is timestamps
+      }
+    }
+    return indices;
+  }, []);
+
+  // Apply a y range, skipping redundant uPlot commits
+  const applyYRange = useCallback((chart: uPlot, range: { min: number; max: number }) => {
+    const prev = yRangeRef.current;
+    yRangeRef.current = range;
+    if (prev && prev.min === range.min && prev.max === range.max) return;
+    chart.setScale('y', range);
+  }, []);
 
   // MinMax band drawing plugin - draws filled areas for min/max ranges
   // Updated to use new BandSeriesData format (same indices as timestamps)
@@ -184,78 +313,81 @@ export default function LineChart({
   );
 
   // Setup event handlers for the chart
-  const setupEventHandlers = useCallback((u: uPlot) => {
-    // Double-click to reset zoom
-    u.over.addEventListener('dblclick', () => {
-      isZoomedRef.current = false;
-      manualYScaleRef.current = null;
-      manualXRangeRef.current = null;
-      const chartData = u.data;
-      if (chartData && chartData[0] && chartData[0].length > 0) {
-        const xData = chartData[0].filter((v): v is number => v !== null);
-        if (xData.length > 0) {
-          const xMin = Math.min(...xData);
-          const xMax = Math.max(...xData);
-          u.setScale('x', { min: xMin, max: xMax });
+  const setupEventHandlers = useCallback(
+    (u: uPlot) => {
+      // Double-click: hand control back to the parent (return to LIVE).
+      // Only when no parent handler is wired do we do the legacy local reset.
+      u.over.addEventListener('dblclick', () => {
+        if (onLiveRequestRef.current) {
+          onLiveRequestRef.current();
+          return;
+        }
+        isZoomedRef.current = false;
+        manualYScaleRef.current = null;
+        manualXRangeRef.current = null;
+        yRangeRef.current = null;
+        shrinkSinceRef.current = null;
+        const chartData = u.data;
+        if (chartData && chartData[0] && chartData[0].length > 0) {
+          const xExtent = extentOf(chartData[0] as (number | null)[]);
+          if (xExtent) {
+            u.setScale('x', { min: xExtent.min, max: xExtent.max });
 
-          // Calculate Y range excluding hidden series
-          const hiddenIndices = new Set<number>();
-          for (let i = 0; i < channelsRef.current.length; i++) {
-            if (hiddenChannelsRef.current.has(channelsRef.current[i])) {
-              hiddenIndices.add(i + 1); // +1 because index 0 is timestamps
+            // Calculate Y range excluding hidden series
+            const { yMin, yMax } = calculateYRange(chartData, getHiddenIndices());
+            if (yMin !== Infinity && yMax !== -Infinity) {
+              const padding = (yMax - yMin) * 0.1;
+              u.setScale('y', { min: yMin - padding, max: yMax + padding });
             }
           }
-          const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
-          if (yMin !== Infinity && yMax !== -Infinity) {
-            const padding = (yMax - yMin) * 0.1;
-            u.setScale('y', { min: yMin - padding, max: yMax + padding });
-          }
         }
-      }
-    });
+      });
 
-    // Wheel zoom
-    u.over.addEventListener('wheel', (e) => {
-      e.preventDefault();
+      // Wheel zoom - always takes the view out of follow mode
+      u.over.addEventListener('wheel', (e) => {
+        e.preventDefault();
 
-      const factor = e.deltaY > 0 ? 1.1 : 0.9;
-      const rect = u.over.getBoundingClientRect();
-      const xPos = e.clientX - rect.left;
-      const yPos = e.clientY - rect.top;
+        const factor = e.deltaY > 0 ? 1.1 : 0.9;
+        const rect = u.over.getBoundingClientRect();
+        const xPos = e.clientX - rect.left;
+        const yPos = e.clientY - rect.top;
 
-      const xScale = u.scales.x;
-      const yScale = u.scales.y;
+        const xScale = u.scales.x;
+        const yScale = u.scales.y;
 
-      if (
-        xScale.min === undefined ||
-        xScale.max === undefined ||
-        yScale.min === undefined ||
-        yScale.max === undefined
-      )
-        return;
+        if (xScale.min == null || xScale.max == null || yScale.min == null || yScale.max == null)
+          return;
 
-      const xVal = u.posToVal(xPos, 'x');
-      const yVal = u.posToVal(yPos, 'y');
+        const xVal = u.posToVal(xPos, 'x');
+        const yVal = u.posToVal(yPos, 'y');
 
-      if (e.shiftKey) {
-        const xRange = xScale.max - xScale.min;
-        const newRange = xRange * factor;
-        const ratio = (xVal - xScale.min) / xRange;
-        const newMin = xVal - newRange * ratio;
-        const newMax = xVal + newRange * (1 - ratio);
-        u.setScale('x', { min: newMin, max: newMax });
-        manualXRangeRef.current = newRange;
-      } else {
-        const yRange = yScale.max - yScale.min;
-        const newRange = yRange * factor;
-        const ratio = (yVal - yScale.min) / yRange;
-        const newMin = yVal - newRange * ratio;
-        const newMax = yVal + newRange * (1 - ratio);
-        u.setScale('y', { min: newMin, max: newMax });
-        manualYScaleRef.current = { min: newMin, max: newMax };
-      }
-    });
-  }, []);
+        // Freeze the view on the chosen range and notify the parent (Inspect)
+        isZoomedRef.current = true;
+        onUserInteractionRef.current?.();
+
+        if (e.shiftKey) {
+          const xRange = xScale.max - xScale.min;
+          const newRange = xRange * factor;
+          const ratio = (xVal - xScale.min) / xRange;
+          const newMin = xVal - newRange * ratio;
+          const newMax = xVal + newRange * (1 - ratio);
+          if (!Number.isFinite(newMin) || !Number.isFinite(newMax)) return;
+          u.setScale('x', { min: newMin, max: newMax });
+          manualXRangeRef.current = newRange;
+        } else {
+          const yRange = yScale.max - yScale.min;
+          const newRange = yRange * factor;
+          const ratio = (yVal - yScale.min) / yRange;
+          const newMin = yVal - newRange * ratio;
+          const newMax = yVal + newRange * (1 - ratio);
+          if (!Number.isFinite(newMin) || !Number.isFinite(newMax)) return;
+          u.setScale('y', { min: newMin, max: newMax });
+          manualYScaleRef.current = { min: newMin, max: newMax };
+        }
+      });
+    },
+    [getHiddenIndices]
+  );
 
   // Build chart options with series.show for hidden channels
   const buildChartOptions = useCallback(
@@ -306,7 +438,16 @@ export default function LineChart({
         width,
         height,
         series,
-        padding: [null, null, stateTimelineHeight, null],
+        // When there are no line channels (state-only chart) the y-axis
+        // collapses to zero width, which would push the state timeline's
+        // right-aligned channel-name labels (drawn at plotLeft - 8px) off
+        // the left edge of the canvas - reserve left padding for them.
+        padding: [
+          null,
+          null,
+          stateTimelineHeight,
+          channels.length === 0 && stateRowCount > 0 ? 60 : null,
+        ],
         scales: {
           x: { time: false, auto: false },
           y: { auto: false },
@@ -315,7 +456,9 @@ export default function LineChart({
           { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
           { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
         ],
-        legend: { show: true },
+        // Built-in legend disabled: its interactive toggles bypass the
+        // hiddenChannels state and desync from the custom legend panel
+        legend: { show: false },
         cursor: {
           show: true,
           points: { show: true },
@@ -324,18 +467,21 @@ export default function LineChart({
         hooks: {
           setScale: [
             (u, key) => {
-              if (key === 'x') {
-                const xMin = u.scales.x.min;
-                const xMax = u.scales.x.max;
-                if (xMin !== undefined && xMax !== undefined) {
-                  debouncedTimeRangeChange(xMin, xMax);
-                }
+              if (key !== 'x') return;
+              // In follow mode the parent drives the x scale every frame -
+              // notifying it back would spam fetches at 60Hz.
+              if (followModeRef.current) return;
+              const xMin = u.scales.x.min;
+              const xMax = u.scales.x.max;
+              if (xMin !== undefined && xMax !== undefined) {
+                debouncedTimeRangeChange(xMin, xMax);
               }
             },
           ],
           setSelect: [
             () => {
               isZoomedRef.current = true;
+              onUserInteractionRef.current?.();
             },
           ],
           init: [(u) => setupEventHandlers(u)],
@@ -349,38 +495,52 @@ export default function LineChart({
   // Update chart scales based on current data and zoom state
   const updateChartScales = useCallback(
     (chart: uPlot, chartData: uPlot.AlignedData, currentHiddenChannels: Set<string>) => {
+      const hiddenIndices = getHiddenIndices(currentHiddenChannels);
+
+      if (followModeRef.current) {
+        // Follow mode: setXWindow() owns both scales. uPlot re-applies the
+        // current (non-auto) x/y scales on setData, so the window is kept.
+        chart.setData(chartData);
+
+        // First data for this chart instance: establish scales right away so
+        // uPlot's [-1000, 1000] default is never shown before the next frame.
+        if (yRangeRef.current === null) {
+          const xExtent = extentOf(chartData[0] as (number | null)[]);
+          if (xExtent) {
+            chart.setScale('x', {
+              min: xExtent.min,
+              max: xExtent.max > xExtent.min ? xExtent.max : xExtent.min + 1,
+            });
+          }
+          const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
+          if (yMin !== Infinity && yMax !== -Infinity) {
+            applyYRange(chart, manualYScaleRef.current ?? niceYRange(yMin, yMax));
+          }
+        }
+        return;
+      }
+
       const prevXScale = { min: chart.scales.x.min, max: chart.scales.x.max };
       const prevYScale = { min: chart.scales.y.min, max: chart.scales.y.max };
 
       chart.setData(chartData);
 
-      // Calculate hidden series indices
-      const hiddenIndices = new Set<number>();
-      for (let i = 0; i < channelsRef.current.length; i++) {
-        if (currentHiddenChannels.has(channelsRef.current[i])) {
-          hiddenIndices.add(i + 1); // +1 because index 0 is timestamps
-        }
-      }
-
       if (isZoomedRef.current) {
-        if (prevXScale.min !== undefined && prevXScale.max !== undefined) {
+        if (prevXScale.min != null && prevXScale.max != null) {
           chart.setScale('x', { min: prevXScale.min, max: prevXScale.max });
         }
-        if (prevYScale.min !== undefined && prevYScale.max !== undefined) {
+        if (prevYScale.min != null && prevYScale.max != null) {
           chart.setScale('y', { min: prevYScale.min, max: prevYScale.max });
         }
       } else {
         if (chartData[0] && chartData[0].length > 0) {
-          const xData = chartData[0].filter((v): v is number => v !== null);
-          if (xData.length > 0) {
-            const xMin = Math.min(...xData);
-            const xMax = Math.max(...xData);
-
+          const xExtent = extentOf(chartData[0] as (number | null)[]);
+          if (xExtent) {
             if (manualXRangeRef.current !== null) {
               const range = manualXRangeRef.current;
-              chart.setScale('x', { min: xMax - range, max: xMax });
+              chart.setScale('x', { min: xExtent.max - range, max: xExtent.max });
             } else {
-              chart.setScale('x', { min: xMin, max: xMax });
+              chart.setScale('x', { min: xExtent.min, max: xExtent.max });
             }
 
             const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
@@ -396,7 +556,76 @@ export default function LineChart({
         }
       }
     },
-    []
+    [applyYRange, getHiddenIndices]
+  );
+
+  // Imperative API for the parent's rAF loop - deliberately not React state:
+  // a 60Hz setState here caused a re-render storm / memory leak (see docs/07).
+  useImperativeHandle(
+    ref,
+    (): LineChartHandle => ({
+      setXWindow(minSec: number, maxSec: number) {
+        const chart = chartRef.current;
+        if (!chart) return;
+        if (!Number.isFinite(minSec) || !Number.isFinite(maxSec) || maxSec <= minSec) return;
+
+        chart.setScale('x', { min: minSec, max: maxSec });
+
+        // Manual wheel zoom on y wins until the view is reset to LIVE
+        if (manualYScaleRef.current) {
+          chart.setScale('y', manualYScaleRef.current);
+          return;
+        }
+
+        const chartData = chart.data as uPlot.AlignedData;
+        const { yMin, yMax } = calculateYRange(chartData, getHiddenIndices(), minSec, maxSec);
+        // Nothing visible (e.g. the stream died and the data slid out of the
+        // window) - keep the current y range rather than collapsing it.
+        if (yMin === Infinity || yMax === -Infinity) return;
+
+        const current = yRangeRef.current;
+
+        // Expand immediately: never clip a spike
+        if (current === null || yMin < current.min || yMax > current.max) {
+          const nice = niceYRange(yMin, yMax);
+          applyYRange(
+            chart,
+            current === null
+              ? nice
+              : { min: Math.min(nice.min, current.min), max: Math.max(nice.max, current.max) }
+          );
+          shrinkSinceRef.current = null;
+          return;
+        }
+
+        // Shrink only after the data stayed small for Y_SHRINK_DELAY_MS
+        const span = current.max - current.min;
+        const occupancy = span > 0 ? (yMax - yMin) / span : 1;
+        if (occupancy < Y_SHRINK_OCCUPANCY) {
+          const now = performance.now();
+          if (shrinkSinceRef.current === null) {
+            shrinkSinceRef.current = now;
+          } else if (now - shrinkSinceRef.current >= Y_SHRINK_DELAY_MS) {
+            applyYRange(chart, niceYRange(yMin, yMax));
+            shrinkSinceRef.current = null;
+          }
+        } else {
+          shrinkSinceRef.current = null;
+        }
+      },
+      resetView() {
+        isZoomedRef.current = false;
+        manualYScaleRef.current = null;
+        manualXRangeRef.current = null;
+        yRangeRef.current = null;
+        shrinkSinceRef.current = null;
+      },
+      resetYRange() {
+        yRangeRef.current = null;
+        shrinkSinceRef.current = null;
+      },
+    }),
+    [applyYRange, getHiddenIndices]
   );
 
   // Update series visibility when hiddenChannels changes
@@ -414,6 +643,10 @@ export default function LineChart({
       }
     }
 
+    // The visible extents changed - let the y range be recomputed at once
+    yRangeRef.current = null;
+    shrinkSinceRef.current = null;
+
     // Redraw to apply visibility changes
     chart.redraw();
   }, [hiddenChannels]);
@@ -425,8 +658,11 @@ export default function LineChart({
     // Use aligned data directly (no transformation needed!)
     const chartData = alignedData as uPlot.AlignedData;
 
-    // If no data or no channels, destroy chart
-    if (channelNames.length === 0 || chartData[0].length === 0) {
+    // If no data at all, destroy chart.
+    // (State-only payloads have channelNames.length === 0 but non-empty
+    // timestamps plus stateRows - those still need the chart for the
+    // state timeline.)
+    if (chartData[0].length === 0 || (channelNames.length === 0 && stateRows.length === 0)) {
       if (chartRef.current) {
         chartRef.current.destroy();
         chartRef.current = null;
@@ -454,6 +690,13 @@ export default function LineChart({
       stateRowsRef.current = stateRows;
       channelsRef.current = channelNames;
 
+      // The old chart's zoom/manual-scale context no longer applies
+      isZoomedRef.current = false;
+      manualYScaleRef.current = null;
+      manualXRangeRef.current = null;
+      yRangeRef.current = null;
+      shrinkSinceRef.current = null;
+
       const opts = buildChartOptions(
         channelNames,
         stateRows.length,
@@ -463,6 +706,10 @@ export default function LineChart({
       );
 
       chartRef.current = new uPlot(opts, chartData, containerRef.current);
+
+      // Establish scales immediately: with auto:false and no min/max, uPlot
+      // defaults the y scale to [-1000, 1000] until the next data update.
+      updateChartScales(chartRef.current, chartData, hiddenChannels);
     } else {
       // Just update data
       stateRowsRef.current = stateRows;
@@ -503,4 +750,6 @@ export default function LineChart({
   }, []);
 
   return <div ref={containerRef} className={`line-chart-container ${isPaused ? 'paused' : ''}`} />;
-}
+});
+
+export default LineChart;

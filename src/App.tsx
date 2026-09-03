@@ -32,59 +32,68 @@ function App() {
     try {
       const p = await invoke<string[]>('list_ports');
       setPorts(p);
-      // If selected port is no longer in the list, clear it or select first available
-      if (selectedPort && !p.includes(selectedPort)) {
-        setSelectedPort(p.length > 0 ? p[0] : '');
-      } else if (p.length > 0 && !selectedPort) {
-        setSelectedPort(p[0]);
-      }
+      // Use the functional form: this callback may run after the user changed
+      // the selection, so decide based on the CURRENT value, not a stale one.
+      setSelectedPort((current) => {
+        if (current && !p.includes(current)) {
+          return p.length > 0 ? p[0] : '';
+        }
+        if (!current && p.length > 0) {
+          return p[0];
+        }
+        return current;
+      });
     } catch (e) {
       console.error(e);
     }
   };
 
+  // updatePorts is async: setPorts fires after the invoke resolves, not
+  // synchronously within the effect (set-state-in-effect false positive).
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     updatePorts();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Listen for serial-status events (disconnection)
   useEffect(() => {
-    let unlisten: () => void;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
 
-    async function setupStatusListener() {
-      unlisten = await listen<{ connected: boolean; error: string | null }>(
-        'serial-status',
-        (event) => {
-          if (!event.payload.connected) {
-            setIsConnected(false);
-            if (event.payload.error) {
-              alert('Serial disconnected: ' + event.payload.error);
-            }
-          }
+    listen<{ connected: boolean; error: string | null }>('serial-status', (event) => {
+      if (!event.payload.connected) {
+        setIsConnected(false);
+        if (event.payload.error) {
+          alert('Serial disconnected: ' + event.payload.error);
         }
-      );
-    }
-
-    setupStatusListener();
+      }
+    }).then((fn) => {
+      // If unmounted before listen() resolved, release immediately
+      // (otherwise the listener would leak and duplicate on remount)
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, []);
 
   useEffect(() => {
-    let unlisten: () => void;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
 
-    async function setupListener() {
-      unlisten = await listen<DataUpdatePayload>('data-update', (event) => {
-        setTotalBytes(event.payload.total_bytes);
-      });
-    }
-
-    setupListener();
+    listen<DataUpdatePayload>('data-update', (event) => {
+      setTotalBytes(event.payload.total_bytes);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
 
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }, []);

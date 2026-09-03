@@ -17,11 +17,14 @@ export function parseHexString(input: string): number[] | null {
   if (cleanHex.length % 2 !== 0) {
     return null; // Invalid: odd number of characters
   }
+  // Strict validation: parseInt('4G', 16) would silently parse the '4' and
+  // send the wrong byte, so reject any non-hex character up front.
+  if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
+    return null; // Invalid hex character
+  }
   const result: number[] = [];
   for (let i = 0; i < cleanHex.length; i += 2) {
-    const byte = parseInt(cleanHex.substring(i, i + 2), 16);
-    if (isNaN(byte)) return null; // Invalid hex character
-    result.push(byte);
+    result.push(parseInt(cleanHex.substring(i, i + 2), 16));
   }
   return result;
 }

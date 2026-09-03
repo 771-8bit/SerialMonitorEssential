@@ -33,6 +33,10 @@ impl SerialPort {
             port_name, config
         );
 
+        if config.baud_rate == 0 {
+            return Err("Invalid baud rate: 0".to_string());
+        }
+
         let data_bits = match config.data_bits {
             5 => DataBits::Five,
             6 => DataBits::Six,
@@ -129,15 +133,34 @@ impl SerialPort {
 
     /// Write data to the serial port
     ///
-    /// Returns the number of bytes written.
+    /// Writes ALL bytes (a bare `write` may write only part of the buffer,
+    /// silently truncating the sent data). Returns the number of bytes written.
     pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
         debug!(
             "[SerialPort::write] {} - Writing {} bytes",
             self.port_name,
             data.len()
         );
-        self.inner
-            .write(data)
+
+        // The port timeout is shared between reads and writes (on Windows it is
+        // applied to the write path too). The 10ms read-oriented timeout set at
+        // open time is far too short for a large payload at a low baud rate:
+        // `write_all` would hit TimedOut mid-transfer and report a spurious
+        // error even though part of the data already went out. Widen the
+        // timeout to a payload-aware estimate (~10 bits per byte on the wire,
+        // plus slack) for the duration of this write, then restore it so reads
+        // stay responsive.
+        let baud = self.inner.baud_rate().unwrap_or(9600).max(1200) as u64;
+        let est_ms = (data.len() as u64 * 10 * 1000) / baud + 250;
+
+        let old_timeout = self.inner.timeout();
+        let _ = self.inner.set_timeout(Duration::from_millis(est_ms));
+        let result = self.inner.write_all(data);
+        // Always restore, including on the error path.
+        let _ = self.inner.set_timeout(old_timeout);
+
+        result
+            .map(|_| data.len())
             .map_err(|e| format!("Failed to write to port: {:?}", e))
     }
 

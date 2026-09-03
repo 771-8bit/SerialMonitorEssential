@@ -1,4 +1,4 @@
-import { useState, KeyboardEvent } from 'react';
+import { useState, useRef, KeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   parseHexString,
@@ -24,6 +24,8 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
   // History
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  // Unsent draft, stashed when entering history navigation
+  const draftRef = useRef('');
 
   const handleSend = async () => {
     if (!connected || !inputText) return;
@@ -69,21 +71,31 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
         handleSend();
       }
     } else if (e.key === 'ArrowUp') {
+      // Only navigate history when the caret is on the FIRST line, so caret
+      // movement inside a multi-line draft keeps working.
+      const ta = e.currentTarget;
+      if (ta.value.slice(0, ta.selectionStart ?? 0).includes('\n')) return;
+      if (history.length === 0) return;
       e.preventDefault();
-      if (history.length > 0) {
-        const nextIndex = Math.min(historyIndex + 1, history.length - 1);
-        setHistoryIndex(nextIndex);
-        setInputText(history[nextIndex]);
+      if (historyIndex === -1) {
+        draftRef.current = inputText; // Stash the unsent draft
       }
+      const nextIndex = Math.min(historyIndex + 1, history.length - 1);
+      setHistoryIndex(nextIndex);
+      setInputText(history[nextIndex]);
     } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
+      // Only navigate history when the caret is on the LAST line
+      const ta = e.currentTarget;
+      if (ta.value.slice(ta.selectionEnd ?? ta.value.length).includes('\n')) return;
       if (historyIndex > 0) {
+        e.preventDefault();
         const nextIndex = historyIndex - 1;
         setHistoryIndex(nextIndex);
         setInputText(history[nextIndex]);
       } else if (historyIndex === 0) {
+        e.preventDefault();
         setHistoryIndex(-1);
-        setInputText('');
+        setInputText(draftRef.current); // Restore the stashed draft
       }
     }
   };

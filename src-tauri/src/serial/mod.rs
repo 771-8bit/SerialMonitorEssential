@@ -13,9 +13,26 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
 /// シリアル通信の状態を管理する構造体
+///
+/// `data_store` は外側も `Arc` で包み、プロッタスレッドが「現在の」DataStore を
+/// 毎ポーリングで解決できるようハンドルを共有する（ポート再オープンや
+/// クリアで内側の `Arc<DataStore>` は差し替わるため）。
 pub struct SerialState {
     pub port: Mutex<Option<Arc<Mutex<port::SerialPort>>>>,
-    pub data_store: Mutex<Option<Arc<DataStore>>>,
+    pub data_store: Arc<Mutex<Option<Arc<DataStore>>>>,
+}
+
+/// フレンドリー名からデバイスパスを取り出す
+///
+/// `list_ports` は USB 機器などを "Product (COM7)" / "Product (/dev/ttyUSB0)"
+/// の形で返すため、**最後の括弧の中身**をデバイスパスとして採用する。
+/// 括弧がない場合（Linux の Unknown タイプ等はパスがそのまま来る）は全体を使う。
+/// 旧実装は "(COM" 前提で Linux のパスを抽出できなかった（移植バグ）。
+fn extract_port_path(port_name: &str) -> &str {
+    match (port_name.rfind('('), port_name.rfind(')')) {
+        (Some(start), Some(end)) if start < end => &port_name[start + 1..end],
+        _ => port_name,
+    }
 }
 
 #[tauri::command]
@@ -28,12 +45,12 @@ pub fn open_port(
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
-    // Close existing port and DataStore if open
-    // This will drop the old DataStore and delete its temp files
-    if let Some(existing_store) = store_guard.take() {
-        log::info!("[open_port] Stopping and dropping existing DataStore");
+    // Stop the old session's reception FIRST (without destroying its capture):
+    // the worker thread holds an Arc to the old SerialPort, so the OS COM
+    // handle is only released once the worker joins. Without this, reopening
+    // the same COM port fails with an exclusive-access error.
+    if let Some(ref existing_store) = *store_guard {
         existing_store.stop_reception();
-        // existing_store is dropped here, temp files deleted
     }
     if let Some(existing) = port_guard.take() {
         if let Ok(mut p) = existing.lock() {
@@ -41,21 +58,22 @@ pub fn open_port(
         }
     }
 
-    // Parse port name from friendly name "Device (COMx)" -> "COMx"
-    let port_path = if let Some(start) = port_name.rfind("(COM") {
-        if let Some(end) = port_name[start..].find(')') {
-            &port_name[start + 1..start + end]
-        } else {
-            &port_name
-        }
-    } else {
-        &port_name
-    };
+    // Parse the device path out of the friendly name
+    let port_path = extract_port_path(&port_name);
 
-    // Create SerialPort
+    // Try to open the new port BEFORE destroying the previous session's data.
+    // If the open fails (port busy, device absent, bad config), the previous
+    // capture stays intact and browsable/exportable.
     let port = port::SerialPort::new(port_path, config)?;
     let port_arc = Arc::new(Mutex::new(port));
     *port_guard = Some(port_arc.clone());
+
+    // Now it is safe to drop the old DataStore (deletes its temp files)
+    if let Some(existing_store) = store_guard.take() {
+        log::info!("[open_port] Stopping and dropping existing DataStore");
+        existing_store.stop_reception();
+        // existing_store is dropped here, temp files deleted
+    }
 
     // Create NEW DataStore and start reception with UI event notification
     log::info!("[open_port] Creating new DataStore");
@@ -523,11 +541,10 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
 
         // Limit for clipboard to avoid crash?
         // User handles confirmation. We just try to read.
-        // Fetch all data
         // WARNING: If total is huge (e.g. 100MB), Vec<u8> is 100MB, String is another 100MB+.
-        // Ideally we stream, but we return a String.
-        // For now, read all.
-        let to_read = total as u32; // Limit to u32
+        // Cap at u32::MAX instead of wrapping (`total as u32` would silently
+        // truncate/wrap for > 4GB captures).
+        let to_read = total.min(u32::MAX as u64) as u32;
         let data = data_store.get_data(0, to_read)?;
 
         if mode == "hex" {
@@ -545,6 +562,27 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extract_port_path() {
+        // Windows friendly names
+        assert_eq!(extract_port_path("USB Serial Device (COM7)"), "COM7");
+        assert_eq!(extract_port_path("PCI Device (COM3)"), "COM3");
+        assert_eq!(extract_port_path("Bluetooth (COM12)"), "COM12");
+        // Bare names (Unknown port type, or user-provided)
+        assert_eq!(extract_port_path("COM1"), "COM1");
+        // Linux friendly names (the old "(COM"-anchored parser broke these)
+        assert_eq!(
+            extract_port_path("CP2102 USB to UART (/dev/ttyUSB0)"),
+            "/dev/ttyUSB0"
+        );
+        assert_eq!(extract_port_path("/dev/ttyACM0"), "/dev/ttyACM0");
+        // Product name itself contains parentheses: LAST pair wins
+        assert_eq!(extract_port_path("FTDI (rev 2) Adapter (COM9)"), "COM9");
+        // Degenerate inputs fall back to the whole string
+        assert_eq!(extract_port_path("weird ) ( order"), "weird ) ( order");
+        assert_eq!(extract_port_path(""), "");
+    }
 
     #[test]
     fn test_byte_to_ascii_printable() {

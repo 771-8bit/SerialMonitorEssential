@@ -7,7 +7,7 @@
 
 use crate::plotter::parser::ChannelValue;
 // Note: serde traits are unused here as types are re-exported from data_store
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
 // Re-export common types from data_store
@@ -62,6 +62,7 @@ impl AggregatedBucket {
                 ts: self.ts,
                 min: self.min,
                 max: self.max,
+                avg: self.avg,
             },
         }
     }
@@ -172,6 +173,83 @@ fn lttb_downsample(data: &[AggregatedBucket], target_points: usize) -> Vec<usize
     selected
 }
 
+/// Quantize a bucket width to the 1-2-5 series (1,2,5,10,20,50,... ms),
+/// rounding UP, minimum 1 ms. A quantized width keeps grid boundaries stable
+/// while the sliding window's exact span jitters by a few ms.
+fn quantize_bucket_width_125(raw_width_ms: u64) -> u64 {
+    if raw_width_ms <= 1 {
+        return 1;
+    }
+
+    let mut decade: u64 = 1;
+    loop {
+        for mantissa in [1u64, 2, 5] {
+            let candidate = mantissa.saturating_mul(decade);
+            if candidate >= raw_width_ms {
+                return candidate;
+            }
+        }
+        decade = match decade.checked_mul(10) {
+            Some(next) => next,
+            // Absurdly large width (would overflow u64): keep it as-is.
+            None => return raw_width_ms,
+        };
+    }
+}
+
+/// Accumulator for one absolute-time-aligned cell.
+struct AlignedCell {
+    min: f64,
+    max: f64,
+    weighted_sum: f64,
+    count: usize,
+}
+
+/// Aggregate buckets into ABSOLUTE-TIME-ALIGNED cells of the given width.
+///
+/// Cell index = ts / width (integer division on absolute ms), cell timestamp =
+/// idx*width + width/2. Because the grid is anchored to absolute time (not to
+/// time_min), a cell's contents and timestamp are identical across successive
+/// sliding-window requests - only the newest cell changes as data arrives.
+///
+/// Stats are merged exactly like `aggregate_buckets_preserving`: min of mins,
+/// max of maxs, count-weighted average, sum of counts.
+fn aggregate_buckets_aligned(data: &[AggregatedBucket], width_ms: u64) -> Vec<AggregatedBucket> {
+    let width = width_ms.max(1);
+
+    // BTreeMap keyed by cell index => output is sorted by ts for free.
+    let mut cells: BTreeMap<u64, AlignedCell> = BTreeMap::new();
+
+    for bucket in data {
+        let idx = bucket.ts / width;
+        let cell = cells.entry(idx).or_insert(AlignedCell {
+            min: f64::INFINITY,
+            max: f64::NEG_INFINITY,
+            weighted_sum: 0.0,
+            count: 0,
+        });
+        cell.min = cell.min.min(bucket.min);
+        cell.max = cell.max.max(bucket.max);
+        cell.weighted_sum += bucket.avg * bucket.count as f64;
+        cell.count += bucket.count;
+    }
+
+    cells
+        .into_iter()
+        .map(|(idx, cell)| AggregatedBucket {
+            ts: idx * width + width / 2,
+            min: cell.min,
+            max: cell.max,
+            avg: if cell.count > 0 {
+                cell.weighted_sum / cell.count as f64
+            } else {
+                0.0
+            },
+            count: cell.count,
+        })
+        .collect()
+}
+
 /// Inner data structure (protected by RwLock)
 ///
 /// Uses 3-buffer design for uniform aggregation levels:
@@ -221,6 +299,20 @@ struct PlotterAggregatorInner {
 
     /// Debug call counter for periodic logging
     debug_call_count: usize,
+
+    /// Data version counter (incremented on every data change)
+    data_version: u64,
+
+    /// Timestamp of the most recently received data point (any channel,
+    /// including unchanged-state repeats that don't append a StateChange)
+    last_data_ts: u64,
+}
+
+/// Version info for lightweight polling
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlotterVersionInfo {
+    pub version: u64,
+    pub has_data: bool,
 }
 
 /// Plotter aggregator - stores all parsed data with dynamic aggregation
@@ -266,6 +358,8 @@ impl PlotterAggregator {
                 enabled: false,
                 view_cache: None,
                 debug_call_count: 0,
+                data_version: 0,
+                last_data_ts: 0,
             })),
         }
     }
@@ -283,6 +377,22 @@ impl PlotterAggregator {
             .read()
             .map(|inner| inner.enabled)
             .unwrap_or(false)
+    }
+
+    /// Lightweight check: returns version and whether data exists
+    /// This is O(1) and doesn't require any data processing
+    pub fn check_version(&self) -> PlotterVersionInfo {
+        match self.inner.read() {
+            Ok(inner) => PlotterVersionInfo {
+                version: inner.data_version,
+                has_data: !inner.channel_names.is_empty(),
+            },
+            // Poisoned lock: report "no data" instead of panicking at 60Hz
+            Err(_) => PlotterVersionInfo {
+                version: 0,
+                has_data: false,
+            },
+        }
     }
 
     /// Ensure channel exists, creating it if needed
@@ -356,6 +466,15 @@ impl PlotterAggregator {
                         end_ms: None,
                         state,
                     });
+
+                    // Bound memory: drop the oldest changes once the list grows
+                    // past the cap (long sessions with fast-toggling states
+                    // would otherwise grow without limit).
+                    const MAX_STATE_CHANGES: usize = 10_000;
+                    if state_list.len() > MAX_STATE_CHANGES {
+                        let overflow = state_list.len() - MAX_STATE_CHANGES;
+                        state_list.drain(..overflow);
+                    }
                 }
             }
             inner
@@ -376,6 +495,10 @@ impl PlotterAggregator {
         }
 
         Self::ensure_channel_exists(&mut inner, channel);
+
+        // Track the latest received timestamp even when the value doesn't
+        // append anything (e.g. an unchanged state repeat).
+        inner.last_data_ts = inner.last_data_ts.max(timestamp_ms);
 
         match value {
             ChannelValue::Numeric(v) => {
@@ -406,6 +529,10 @@ impl PlotterAggregator {
         }
 
         for point in data_points {
+            // Track the latest received timestamp even when a point doesn't
+            // append anything (e.g. an unchanged state repeat).
+            inner.last_data_ts = inner.last_data_ts.max(point.timestamp_ms);
+
             // Iterate in channel_order to preserve CSV header order
             for channel in &point.channel_order {
                 if let Some(value) = point.channels.get(channel) {
@@ -481,6 +608,9 @@ impl PlotterAggregator {
                 inner.bucket_size
             );
         }
+
+        // Increment version on any data change
+        inner.data_version = inner.data_version.wrapping_add(1);
     }
 
     /// Aggregate raw_buffer data into buffer at current_level
@@ -844,70 +974,136 @@ impl PlotterAggregator {
             // so we need to iterate, but raw_buffer is typically small)
             if let Some(raw_buf) = raw_buf {
                 // Collect raw points in range - raw_buffer is small, O(n) is acceptable
-                let display_bucket = inner.current_level.max(1);
-                let mut chunk_buffer: Vec<(u64, f64)> = Vec::with_capacity(display_bucket);
-
-                for &(ts, v) in raw_buf.iter() {
-                    if ts >= time_min_ms && ts <= time_max_ms {
-                        chunk_buffer.push((ts, v));
-                        if chunk_buffer.len() >= display_bucket {
-                            all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
-                            chunk_buffer.clear();
+                if req.is_realtime {
+                    // Realtime: keep raw points as individual count-1 buckets.
+                    // Chunking by count is order/offset dependent (the chunk a
+                    // point lands in shifts as the window slides and as points
+                    // drain into `buffer`), which makes the resulting bucket
+                    // timestamps wobble. Individual points feed the
+                    // absolute-time-aligned grid below deterministically.
+                    for &(ts, v) in raw_buf.iter() {
+                        if ts >= time_min_ms && ts <= time_max_ms {
+                            all_buckets.push(AggregatedBucket {
+                                ts,
+                                min: v,
+                                max: v,
+                                avg: v,
+                                count: 1,
+                            });
                         }
                     }
-                }
-                // Handle remaining points
-                if !chunk_buffer.is_empty() {
-                    all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                } else {
+                    let display_bucket = inner.current_level.max(1);
+                    let mut chunk_buffer: Vec<(u64, f64)> = Vec::with_capacity(display_bucket);
+
+                    for &(ts, v) in raw_buf.iter() {
+                        if ts >= time_min_ms && ts <= time_max_ms {
+                            chunk_buffer.push((ts, v));
+                            if chunk_buffer.len() >= display_bucket {
+                                all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                                chunk_buffer.clear();
+                            }
+                        }
+                    }
+                    // Handle remaining points
+                    if !chunk_buffer.is_empty() {
+                        all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                    }
                 }
             }
 
             // No sorting needed - data is already in timestamp order
 
-            // Check if further aggregation is needed for display
-            let needs_aggregation = all_buckets.len() > target_points * threshold;
+            // Convert buckets to points based on current aggregation mode.
+            //
+            // Realtime uses a DIFFERENT downsampling strategy from frozen/zoomed
+            // views, for display stability:
+            //
+            // Both `aggregate_buckets_preserving` (bucket_idx = (ts - time_min) /
+            // width, width derived from the current span) and LTTB (which re-picks
+            // representative points from whatever is currently in range) produce
+            // output that depends on the window's exact position. In a sliding
+            // realtime window that position changes every frame, so ALL historical
+            // buckets re-form and the whole waveform shimmers.
+            //
+            // Instead, realtime aggregates onto an ABSOLUTE-TIME-ALIGNED grid with
+            // a 1-2-5 quantized width (Grafana/RRDtool style). A cell's boundaries
+            // depend only on absolute time, so once formed it is byte-for-byte
+            // identical on every later fetch; only the newest, still-filling cell
+            // changes as data arrives. The quantized width also absorbs the few-ms
+            // jitter in the window span, keeping the grid itself constant.
+            //
+            // Non-realtime (frozen / zoomed) requests keep the original behaviour:
+            // the range is static there, so LTTB / preserving aggregation is stable
+            // and gives better feature preservation.
+            let points: Vec<AggregatedPoint> = if req.is_realtime {
+                let span = time_max_ms.saturating_sub(time_min_ms);
+                let width = quantize_bucket_width_125(span / target_points.max(1) as u64);
 
-            // Convert buckets to points based on current aggregation mode
-            let points: Vec<AggregatedPoint> = if needs_aggregation && time_max_ms > time_min_ms {
-                any_aggregated = true;
-                match aggregation_mode {
-                    AggregationMode::Lttb => {
-                        // Use true LTTB algorithm for feature-preserving downsampling
-                        let selected_indices = lttb_downsample(&all_buckets, target_points);
-                        selected_indices
-                            .iter()
-                            .map(|&idx| all_buckets[idx].to_point(&aggregation_mode))
-                            .collect()
-                    }
-                    AggregationMode::Average => {
-                        // Use preserving aggregation for Average mode (keeps min/max bands)
-                        let aggregated_buckets =
-                            Self::aggregate_buckets_preserving(&all_buckets, target_points);
-                        aggregated_buckets
-                            .iter()
-                            .map(|b| b.to_point(&aggregation_mode))
-                            .collect()
-                    }
+                // No threshold multiplier here: realtime favours a stable grid
+                // over maximum point density.
+                if span > 0 && all_buckets.len() > target_points {
+                    any_aggregated = true;
+                    aggregate_buckets_aligned(&all_buckets, width)
+                        .iter()
+                        .map(|b| b.to_point(&aggregation_mode))
+                        .collect()
+                } else {
+                    all_buckets
+                        .iter()
+                        .map(|b| b.to_point(&aggregation_mode))
+                        .collect()
                 }
             } else {
-                // Just convert to points based on mode
-                all_buckets
-                    .iter()
-                    .map(|b| b.to_point(&aggregation_mode))
-                    .collect()
+                // Check if further aggregation is needed for display
+                let needs_aggregation = all_buckets.len() > target_points * threshold;
+
+                if needs_aggregation && time_max_ms > time_min_ms {
+                    any_aggregated = true;
+                    match aggregation_mode {
+                        AggregationMode::Lttb => {
+                            // Use true LTTB algorithm for feature-preserving downsampling
+                            let selected_indices = lttb_downsample(&all_buckets, target_points);
+                            selected_indices
+                                .iter()
+                                .map(|&idx| all_buckets[idx].to_point(&aggregation_mode))
+                                .collect()
+                        }
+                        AggregationMode::Average => {
+                            // Use preserving aggregation for Average mode (keeps min/max bands)
+                            let aggregated_buckets =
+                                Self::aggregate_buckets_preserving(&all_buckets, target_points);
+                            aggregated_buckets
+                                .iter()
+                                .map(|b| b.to_point(&aggregation_mode))
+                                .collect()
+                        }
+                    }
+                } else {
+                    // Just convert to points based on mode
+                    all_buckets
+                        .iter()
+                        .map(|b| b.to_point(&aggregation_mode))
+                        .collect()
+                }
             };
 
             aggregated_data.insert(channel.clone(), points);
         }
 
-        // Update cache
-        let cache_data = aggregated_data.clone();
-        inner.view_cache = Some(ViewCache {
-            time_range: (time_min_ms, time_max_ms),
-            pixel_width: req.pixel_width,
-            data: cache_data,
-            was_realtime: req.is_realtime,
-        });
+        // Update cache.
+        // Skip in realtime mode: the next poll always advances time_max_ms and
+        // invalidates the cache, so storing it would only add a full deep copy
+        // of the multi-channel result on every fetch for zero hits.
+        if !req.is_realtime {
+            let cache_data = aggregated_data.clone();
+            inner.view_cache = Some(ViewCache {
+                time_range: (time_min_ms, time_max_ms),
+                pixel_width: req.pixel_width,
+                data: cache_data,
+                was_realtime: req.is_realtime,
+            });
+        }
 
         // Filter state data by time range
         let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
@@ -983,10 +1179,28 @@ impl PlotterAggregator {
             })
             .unwrap_or_else(|_| ranged.line_data.keys().cloned().collect());
 
-        // If no data, return empty payload
+        // If no line data, return payload without line series.
+        // State-only streams still get an x-range (as two timestamps) so the
+        // frontend can establish a time scale for the state timeline.
         if channel_names.is_empty() {
+            let has_states = ranged.state_data.values().any(|v| !v.is_empty());
+            let aligned_data = if has_states && ranged.end_ms >= ranged.start_ms {
+                // A zero-span range (single state change, nothing since) would
+                // give uPlot a degenerate x scale; widen it by 1s instead.
+                let end_ms = if ranged.end_ms == ranged.start_ms {
+                    ranged.start_ms + 1000
+                } else {
+                    ranged.end_ms
+                };
+                vec![vec![
+                    Some(ranged.start_ms as f64 / 1000.0),
+                    Some(end_ms as f64 / 1000.0),
+                ]]
+            } else {
+                vec![vec![]] // Empty timestamps array
+            };
             return PlotterChartPayload {
-                aligned_data: vec![vec![]], // Empty timestamps array
+                aligned_data,
                 channel_names: vec![],
                 band_data: None,
                 state_data: ranged.state_data,
@@ -1072,9 +1286,9 @@ impl PlotterAggregator {
                             maxs.push(Some(*value));
                         }
                     }
-                    Some(AggregatedPoint::MinMax { min, max, .. }) => {
-                        // Use midpoint (average) as the line value
-                        values.push(Some((min + max) / 2.0));
+                    Some(AggregatedPoint::MinMax { min, max, avg, .. }) => {
+                        // Use the true weighted average as the center line
+                        values.push(Some(*avg));
                         mins.push(Some(*min));
                         maxs.push(Some(*max));
                     }
@@ -1160,6 +1374,11 @@ impl PlotterAggregator {
                 max_ms = max_ms.max(last.end_ms.unwrap_or(last.start_ms));
             }
         }
+
+        // Extend to the latest line actually received. Without this, a stream
+        // whose only open state segment has end_ms=None would report a range
+        // ending at that segment's start, rendering it zero-width.
+        let max_ms = max_ms.max(inner.last_data_ts);
 
         if min_ms == u64::MAX {
             min_ms = 0;
@@ -1272,6 +1491,9 @@ impl PlotterAggregator {
             inner.bucket_size = inner.config.bucket_size;
             inner.state_data.clear();
             inner.view_cache = None;
+            inner.last_data_ts = 0;
+            // Increment version to notify frontend of data change
+            inner.data_version = inner.data_version.wrapping_add(1);
         }
     }
 
@@ -2217,6 +2439,59 @@ mod tests {
         );
     }
 
+    /// P-4 (docs/24 3.3) - count conservation, worked example.
+    ///
+    /// Every raw point stays represented exactly once: either inside a stored
+    /// bucket's `count` (history or buffer) or still in `raw_buffer`. This
+    /// must survive repeated level-ups, which re-aggregate history+buffer.
+    /// The min/max envelope must survive them bit-for-bit as well.
+    #[test]
+    fn test_count_conservation_across_level_ups() {
+        const N: usize = 2000;
+
+        // Baseline: the default config never levels up for this many points.
+        let flat = PlotterAggregator::new();
+        flat.set_enabled(true);
+        for i in 0..N {
+            flat.add_data_point("ch0", i as u64 * 10, ChannelValue::Numeric(i as f64));
+            flat.add_data_point("ch1", i as u64 * 10, ChannelValue::Numeric(-(i as f64)));
+        }
+        assert_eq!(current_level(&flat), 1, "no level-up expected at defaults");
+        assert_eq!(represented_count(&flat, "ch0"), N);
+        assert_eq!(represented_count(&flat, "ch1"), N);
+        assert_eq!(stored_extremes(&flat, "ch0"), (0.0, (N - 1) as f64));
+        assert_eq!(stored_extremes(&flat, "ch1"), (-((N - 1) as f64), 0.0));
+
+        // Same stream through a tiny `max_points`, forcing several level-ups.
+        let levelled = PlotterAggregator::with_config(PlotterConfig {
+            max_points: 20,
+            aggregation_mode: AggregationMode::Average,
+            ..Default::default()
+        });
+        levelled.set_enabled(true);
+        for i in 0..N {
+            levelled.add_data_point("ch0", i as u64 * 10, ChannelValue::Numeric(i as f64));
+            levelled.add_data_point("ch1", i as u64 * 10, ChannelValue::Numeric(-(i as f64)));
+        }
+
+        assert!(
+            current_level(&levelled) >= 4,
+            "expected several level-ups, level is {}",
+            current_level(&levelled)
+        );
+        assert_eq!(
+            represented_count(&levelled, "ch0"),
+            N,
+            "level-up must not lose or duplicate raw points"
+        );
+        assert_eq!(represented_count(&levelled, "ch1"), N);
+
+        // Extremes are stored exactly (min of mins / max of maxs), so no
+        // epsilon is allowed here.
+        assert_eq!(stored_extremes(&levelled, "ch0"), (0.0, (N - 1) as f64));
+        assert_eq!(stored_extremes(&levelled, "ch1"), (-((N - 1) as f64), 0.0));
+    }
+
     // ==================== get_chart_data tests ====================
 
     #[test]
@@ -2581,5 +2856,1008 @@ mod tests {
             "LTTB should preserve some peak values, max was {}",
             max_value
         );
+    }
+
+    #[test]
+    fn test_version_increments_on_data_add() {
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        let v1 = agg.check_version();
+        assert_eq!(v1.version, 0);
+        assert!(!v1.has_data);
+
+        agg.add_data_point("ch0", 1000, ChannelValue::Numeric(10.0));
+
+        let v2 = agg.check_version();
+        assert!(
+            v2.version > v1.version,
+            "Version should increment on data add"
+        );
+        assert!(v2.has_data, "has_data should be true after adding data");
+    }
+
+    #[test]
+    fn test_version_increments_on_clear() {
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        agg.add_data_point("ch0", 1000, ChannelValue::Numeric(10.0));
+        let v1 = agg.check_version();
+        assert!(v1.has_data);
+
+        agg.clear();
+        let v2 = agg.check_version();
+
+        assert!(v2.version > v1.version, "Version should increment on clear");
+        assert!(!v2.has_data, "has_data should be false after clear");
+    }
+
+    #[test]
+    fn test_check_version_is_lightweight() {
+        use std::time::Instant;
+
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        // Add 10K points
+        for i in 0..10_000 {
+            agg.add_data_point("ch0", i, ChannelValue::Numeric(i as f64));
+        }
+
+        // check_version should be O(1) - verify by timing many calls
+        let start = Instant::now();
+        for _ in 0..10_000 {
+            let _ = agg.check_version();
+        }
+        let elapsed = start.elapsed();
+
+        // 10K calls should complete in well under 100ms (generous bound)
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "check_version too slow: {:?}",
+            elapsed
+        );
+    }
+
+    // ==================== Realtime aligned-grid tests ====================
+
+    /// Extract (ts, min, max, avg) from either point variant.
+    fn point_fields(point: &AggregatedPoint) -> (u64, f64, f64, f64) {
+        match point {
+            AggregatedPoint::Single { ts, value } => (*ts, *value, *value, *value),
+            AggregatedPoint::MinMax { ts, min, max, avg } => (*ts, *min, *max, *avg),
+        }
+    }
+
+    /// Map of ts -> (min, max, avg) for every point except the first and last.
+    ///
+    /// The first and last cells of a window are the only ones that can be
+    /// clipped by the window boundary, so they are excluded when comparing
+    /// two overlapping windows.
+    fn interior_cells(points: &[AggregatedPoint]) -> BTreeMap<u64, (f64, f64, f64)> {
+        if points.len() <= 2 {
+            return BTreeMap::new();
+        }
+        points[1..points.len() - 1]
+            .iter()
+            .map(|p| {
+                let (ts, min, max, avg) = point_fields(p);
+                (ts, (min, max, avg))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_quantize_bucket_width_125() {
+        let cases: &[(u64, u64)] = &[
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 5),
+            (5, 5),
+            (6, 10),
+            (7, 10),
+            (10, 10),
+            (11, 20),
+            (20, 20),
+            (21, 50),
+            (50, 50),
+            (51, 100),
+            (90, 100),
+            (100, 100),
+            (101, 200),
+            (200, 200),
+            (201, 500),
+            (999, 1000),
+            (1000, 1000),
+            (1001, 2000),
+            (123_456, 200_000),
+        ];
+
+        for &(input, expected) in cases {
+            assert_eq!(
+                quantize_bucket_width_125(input),
+                expected,
+                "quantize_bucket_width_125({}) should be {}",
+                input,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_aligned_buckets_are_stable_across_sliding_windows() {
+        // THE key property: in realtime mode, a cell that is fully inside two
+        // overlapping sliding windows must be byte-for-byte identical in both.
+        let config = PlotterConfig {
+            aggregation_mode: AggregationMode::Average,
+            ..Default::default()
+        };
+        let agg = PlotterAggregator::with_config(config);
+        agg.set_enabled(true);
+
+        const T0: u64 = 1_000_000;
+        // ~2000 points at one point / 7 ms
+        for i in 0..2000u64 {
+            let ts = T0 + i * 7;
+            let value = (i as f64 * 0.13).sin() * 50.0 + (i as f64) * 0.01;
+            agg.add_data_point("ch0", ts, ChannelValue::Numeric(value));
+        }
+
+        // Window A and window B: same span (10 s), B slid by 143 ms.
+        let req_a = PlotterDataRequest {
+            time_min_ms: Some(T0),
+            time_max_ms: Some(T0 + 10_000),
+            pixel_width: 100,
+            is_realtime: true,
+        };
+        let req_b = PlotterDataRequest {
+            time_min_ms: Some(T0 + 143),
+            time_max_ms: Some(T0 + 10_143),
+            pixel_width: 100,
+            is_realtime: true,
+        };
+
+        let payload_a = agg.get_ranged_data(&req_a);
+        let payload_b = agg.get_ranged_data(&req_b);
+
+        assert!(
+            payload_a.is_aggregated,
+            "window A should have triggered aggregation"
+        );
+        assert!(
+            payload_b.is_aggregated,
+            "window B should have triggered aggregation"
+        );
+
+        let points_a = payload_a.line_data.get("ch0").unwrap();
+        let points_b = payload_b.line_data.get("ch0").unwrap();
+        assert!(points_a.len() > 2, "A should have several cells");
+        assert!(points_b.len() > 2, "B should have several cells");
+
+        let cells_a = interior_cells(points_a);
+        let cells_b = interior_cells(points_b);
+
+        let mut shared = 0usize;
+        for (ts, stats_a) in &cells_a {
+            if let Some(stats_b) = cells_b.get(ts) {
+                shared += 1;
+                assert_eq!(
+                    stats_a, stats_b,
+                    "cell at ts={} changed between sliding windows (A={:?}, B={:?})",
+                    ts, stats_a, stats_b
+                );
+            }
+        }
+
+        assert!(
+            shared > 50,
+            "expected substantial overlap between the two windows, got {} shared cells",
+            shared
+        );
+    }
+
+    #[test]
+    fn test_aligned_cells_on_absolute_grid() {
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        const T0: u64 = 1_000_000;
+        for i in 0..2000u64 {
+            let ts = T0 + i * 7;
+            agg.add_data_point("ch0", ts, ChannelValue::Numeric(i as f64));
+        }
+
+        let pixel_width: u32 = 100;
+        let span: u64 = 10_000;
+        let req = PlotterDataRequest {
+            time_min_ms: Some(T0),
+            time_max_ms: Some(T0 + span),
+            pixel_width,
+            is_realtime: true,
+        };
+
+        let payload = agg.get_ranged_data(&req);
+        assert!(payload.is_aggregated, "should have been aggregated");
+
+        // Replicate the width computation used by the realtime path.
+        let target_points = pixel_width as u64;
+        let width = quantize_bucket_width_125(span / target_points);
+        assert_eq!(width, 100, "expected a 100 ms quantized width");
+
+        let points = payload.line_data.get("ch0").unwrap();
+        assert!(!points.is_empty(), "should have points");
+
+        for point in points {
+            let (ts, _, _, _) = point_fields(point);
+            assert!(ts >= width / 2, "ts {} is below the first cell center", ts);
+            assert_eq!(
+                (ts - width / 2) % width,
+                0,
+                "cell center {} is not on the absolute {} ms grid",
+                ts,
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn test_realtime_raw_points_not_lost() {
+        // Below the aggregation threshold, realtime must return every raw point
+        // individually (no count-chunking, no downsampling).
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+
+        let raw: Vec<(u64, f64)> = vec![
+            (1000, 10.0),
+            (1500, 20.0),
+            (2000, 30.0),
+            (2500, 40.0),
+            (3000, 50.0),
+        ];
+        for &(ts, v) in &raw {
+            agg.add_data_point("ch0", ts, ChannelValue::Numeric(v));
+        }
+
+        let req = PlotterDataRequest {
+            time_min_ms: Some(1000),
+            time_max_ms: Some(3000),
+            pixel_width: 1000, // way above the point count -> no aggregation
+            is_realtime: true,
+        };
+
+        let payload = agg.get_ranged_data(&req);
+        assert!(
+            !payload.is_aggregated,
+            "should not aggregate below the threshold"
+        );
+
+        let points = payload.line_data.get("ch0").unwrap();
+        assert_eq!(points.len(), raw.len(), "every raw point should survive");
+
+        for (point, &(ts, v)) in points.iter().zip(raw.iter()) {
+            match point {
+                AggregatedPoint::Single { ts: p_ts, value } => {
+                    assert_eq!(*p_ts, ts, "timestamp should be preserved");
+                    assert_eq!(*value, v, "value should be preserved");
+                }
+                other => panic!("expected Single point, got {:?}", other),
+            }
+        }
+    }
+
+    // ================================================================
+    // Property-based tests (proptest)
+    // ================================================================
+
+    use proptest::prelude::*;
+
+    /// Deterministic 64-bit mixer (splitmix64 finalizer).
+    ///
+    /// The generated streams are derived from a handful of scalar seeds rather
+    /// than from thousands of individually generated f64s. That keeps proptest
+    /// generation AND shrinking cheap (shrinking a 9000-element float vector is
+    /// pathologically slow) while still covering the input space: shrinking
+    /// reduces point count / channel count / start time, which is what actually
+    /// helps when minimizing a counterexample.
+    fn mix64(x: u64) -> u64 {
+        let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Description of a generated input stream shared by the aggregator
+    /// properties: monotonically NON-decreasing timestamps (increments
+    /// 0..=50 ms) starting at 0..10_000, 1-3 channels, 100..=3000 points, and
+    /// values mixing a smooth sine baseline with occasional +/-1e3 spikes.
+    #[derive(Debug, Clone)]
+    struct StreamSpec {
+        start_ms: u64,
+        n: usize,
+        channels: usize,
+        ts_seed: u64,
+        val_seed: u64,
+    }
+
+    impl StreamSpec {
+        fn channel_name(ch: usize) -> String {
+            format!("ch{}", ch)
+        }
+
+        fn timestamps(&self) -> Vec<u64> {
+            let mut out = Vec::with_capacity(self.n);
+            let mut t = self.start_ms;
+            for i in 0..self.n {
+                if i > 0 {
+                    t += mix64(self.ts_seed ^ (i as u64)) % 51;
+                }
+                out.push(t);
+            }
+            out
+        }
+
+        fn value(&self, i: usize, ch: usize) -> f64 {
+            let t = i as f64 * 0.07 + ch as f64 * 1.3;
+            let base = t.sin() * 50.0 + (t * 0.31).cos() * 20.0;
+            let h = mix64(self.val_seed ^ ((i as u64) << 3) ^ (ch as u64 + 1));
+            if h.is_multiple_of(41) {
+                if h & 0x100 == 0 {
+                    base + 1.0e3
+                } else {
+                    base - 1.0e3
+                }
+            } else {
+                base
+            }
+        }
+
+        /// Feed the whole stream through `add_data_point`, returning every
+        /// value that was fed, per channel.
+        fn feed(&self, agg: &PlotterAggregator) -> Vec<Vec<f64>> {
+            let ts = self.timestamps();
+            let mut fed: Vec<Vec<f64>> = vec![Vec::with_capacity(self.n); self.channels];
+            for (i, &t) in ts.iter().enumerate() {
+                for (ch, values) in fed.iter_mut().enumerate() {
+                    let v = self.value(i, ch);
+                    values.push(v);
+                    agg.add_data_point(&Self::channel_name(ch), t, ChannelValue::Numeric(v));
+                }
+            }
+            fed
+        }
+
+        /// The very same stream `feed` sends point-by-point, packaged as one
+        /// batch of `ParsedDataPoint`s (one point per timestamp, every channel
+        /// listed in `channel_order`).
+        fn as_batch(&self) -> Vec<crate::plotter::parser::ParsedDataPoint> {
+            self.timestamps()
+                .into_iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut channels = HashMap::new();
+                    let mut channel_order = Vec::with_capacity(self.channels);
+                    for ch in 0..self.channels {
+                        let name = Self::channel_name(ch);
+                        channels.insert(name.clone(), ChannelValue::Numeric(self.value(i, ch)));
+                        channel_order.push(name);
+                    }
+                    crate::plotter::parser::ParsedDataPoint {
+                        timestamp_ms: t,
+                        channels,
+                        channel_order,
+                    }
+                })
+                .collect()
+        }
+    }
+
+    fn stream_spec() -> impl Strategy<Value = StreamSpec> {
+        (
+            0u64..10_000,
+            100usize..=3000,
+            1usize..=3,
+            any::<u64>(),
+            any::<u64>(),
+        )
+            .prop_map(|(start_ms, n, channels, ts_seed, val_seed)| StreamSpec {
+                start_ms,
+                n,
+                channels,
+                ts_seed,
+                val_seed,
+            })
+    }
+
+    fn aggregator_with(mode: AggregationMode, max_points: usize) -> PlotterAggregator {
+        let agg = PlotterAggregator::with_config(PlotterConfig {
+            aggregation_mode: mode,
+            max_points,
+            ..Default::default()
+        });
+        agg.set_enabled(true);
+        agg
+    }
+
+    fn average_aggregator() -> PlotterAggregator {
+        aggregator_with(
+            AggregationMode::Average,
+            PlotterConfig::default().max_points,
+        )
+    }
+
+    // ---- internal-state probes (P-4 / P-7) ----------------------------
+    //
+    // `count` is deliberately not exposed on `AggregatedPoint`, and
+    // `current_level` is an implementation detail, so these properties read
+    // the private inner state directly (docs/24 3.3, P-4).
+
+    /// Number of RAW points a channel currently represents: the `count` of
+    /// every stored bucket (history + buffer) plus the points still queued in
+    /// `raw_buffer`.
+    fn represented_count(agg: &PlotterAggregator, channel: &str) -> usize {
+        let inner = agg.inner.read().expect("inner lock");
+        let mut total = 0usize;
+        if let Some(hist) = inner.history.get(channel) {
+            total += hist.iter().map(|b| b.count).sum::<usize>();
+        }
+        if let Some(buf) = inner.buffer.get(channel) {
+            total += buf.iter().map(|b| b.count).sum::<usize>();
+        }
+        if let Some(raw) = inner.raw_buffer.get(channel) {
+            total += raw.len();
+        }
+        total
+    }
+
+    /// Exact (min, max) over everything a channel stores, bucket statistics
+    /// and not-yet-aggregated raw points alike.
+    fn stored_extremes(agg: &PlotterAggregator, channel: &str) -> (f64, f64) {
+        let inner = agg.inner.read().expect("inner lock");
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for source in [inner.history.get(channel), inner.buffer.get(channel)]
+            .into_iter()
+            .flatten()
+        {
+            for bucket in source {
+                min = min.min(bucket.min);
+                max = max.max(bucket.max);
+            }
+        }
+        if let Some(raw) = inner.raw_buffer.get(channel) {
+            for &(_, v) in raw.iter() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        (min, max)
+    }
+
+    /// Current aggregation level (1 = no level-up has happened yet).
+    fn current_level(agg: &PlotterAggregator) -> usize {
+        agg.inner.read().expect("inner lock").current_level
+    }
+
+    /// Comparable projection of `band_data` (`BandSeriesData` has no
+    /// `PartialEq`, and `HashMap` iteration order is not stable).
+    #[allow(clippy::type_complexity)]
+    fn band_shape(
+        payload: &PlotterChartPayload,
+    ) -> Option<BTreeMap<String, (Vec<Option<f64>>, Vec<Option<f64>>)>> {
+        payload.band_data.as_ref().map(|bands| {
+            bands
+                .iter()
+                .map(|(name, band)| (name.clone(), (band.min.clone(), band.max.clone())))
+                .collect()
+        })
+    }
+
+    /// `max_points` controls when the 3-buffer design performs a `level_up`
+    /// (merge history+buffer and re-aggregate). Small values exercise repeated
+    /// re-aggregation - the path where an extreme is most likely to be lost -
+    /// while the default keeps everything in `buffer`.
+    fn max_points_strategy() -> impl Strategy<Value = usize> {
+        prop_oneof![
+            2 => Just(50usize),
+            2 => Just(200usize),
+            1 => Just(1_000usize),
+            1 => Just(10_000usize),
+        ]
+    }
+
+    /// Chart width in pixels, weighted toward narrow charts.
+    ///
+    /// Display aggregation only kicks in when `bucket_count > pixel_width *
+    /// threshold`, so a uniform 50..=2000 draw would almost always land on the
+    /// pass-through branch and leave the interesting code untested.
+    fn pixel_width_strategy() -> impl Strategy<Value = u32> {
+        prop_oneof![
+            3 => 50u32..=150,
+            1 => 150u32..=2_000,
+        ]
+    }
+
+    /// Ops for the version-monotonicity property.
+    #[derive(Debug, Clone)]
+    enum AggOp {
+        AddPoint {
+            channel: usize,
+            ts: u64,
+            value: f64,
+        },
+        AddBatch {
+            channel: usize,
+            base_ts: u64,
+            count: usize,
+        },
+        Clear,
+        SetAverageMode(bool),
+        GetChart {
+            pixel_width: u32,
+        },
+    }
+
+    fn agg_op() -> impl Strategy<Value = AggOp> {
+        prop_oneof![
+            6 => (0usize..3, 0u64..100_000, -1.0e3f64..1.0e3).prop_map(
+                |(channel, ts, value)| AggOp::AddPoint { channel, ts, value }),
+            3 => (0usize..3, 0u64..100_000, 1usize..40).prop_map(
+                |(channel, base_ts, count)| AggOp::AddBatch { channel, base_ts, count }),
+            1 => Just(AggOp::Clear),
+            2 => any::<bool>().prop_map(AggOp::SetAverageMode),
+            2 => (50u32..2000).prop_map(|pixel_width| AggOp::GetChart { pixel_width }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        /// A1 - the min/max envelope is never lost.
+        ///
+        /// Guards: "a spike can never disappear". Over a full-range Average-mode
+        /// request, the extremes reported across all returned points must be
+        /// EXACTLY the extremes of the raw input for that channel - aggregation
+        /// stores exact min/max, so no epsilon is allowed here.
+        #[test]
+        fn prop_minmax_envelope_preserved(
+            spec in stream_spec(),
+            pixel_width in pixel_width_strategy(),
+            max_points in max_points_strategy(),
+        ) {
+            let agg = aggregator_with(AggregationMode::Average, max_points);
+            let fed = spec.feed(&agg);
+
+            let req = PlotterDataRequest {
+                time_min_ms: None,
+                time_max_ms: None,
+                pixel_width,
+                is_realtime: false,
+            };
+            let payload = agg.get_ranged_data(&req);
+
+            for (ch, values) in fed.iter().enumerate() {
+                let name = StreamSpec::channel_name(ch);
+                let points = payload
+                    .line_data
+                    .get(&name)
+                    .unwrap_or_else(|| panic!("channel {} missing from payload", name));
+                prop_assert!(!points.is_empty(), "channel {} returned no points", name);
+
+                let (got_min, got_max) = points.iter().fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |acc, p| {
+                        let (_, min, max, _) = point_fields(p);
+                        (acc.0.min(min), acc.1.max(max))
+                    },
+                );
+                let want_min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                let want_max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+                prop_assert_eq!(
+                    got_max, want_max,
+                    "channel {} lost its maximum (n={}, pixel_width={}, max_points={})",
+                    name, spec.n, pixel_width, max_points
+                );
+                prop_assert_eq!(
+                    got_min, want_min,
+                    "channel {} lost its minimum (n={}, pixel_width={}, max_points={})",
+                    name, spec.n, pixel_width, max_points
+                );
+            }
+        }
+
+        /// A2 - per-point statistical sanity.
+        ///
+        /// Guards: every MinMax point satisfies min <= avg <= max (a tiny
+        /// relative epsilon absorbs the float error of the count-weighted
+        /// average accumulation), and every returned timestamp lies inside the
+        /// range the payload claims to cover.
+        #[test]
+        fn prop_invariant_min_le_avg_le_max(
+            spec in stream_spec(),
+            pixel_width in pixel_width_strategy(),
+            max_points in max_points_strategy(),
+        ) {
+            let agg = aggregator_with(AggregationMode::Average, max_points);
+            spec.feed(&agg);
+
+            let req = PlotterDataRequest {
+                time_min_ms: None,
+                time_max_ms: None,
+                pixel_width,
+                is_realtime: false,
+            };
+            let payload = agg.get_ranged_data(&req);
+
+            for (name, points) in &payload.line_data {
+                for point in points {
+                    let (ts, min, max, avg) = point_fields(point);
+                    prop_assert!(
+                        ts >= payload.start_ms && ts <= payload.end_ms,
+                        "channel {}: ts {} outside payload range [{}, {}]",
+                        name, ts, payload.start_ms, payload.end_ms
+                    );
+
+                    if let AggregatedPoint::MinMax { .. } = point {
+                        prop_assert!(min <= max, "channel {}: min {} > max {}", name, min, max);
+                        let eps = 1.0e-9 * min.abs().max(max.abs()).max(1.0);
+                        prop_assert!(
+                            avg >= min - eps && avg <= max + eps,
+                            "channel {}: avg {} outside [{}, {}]",
+                            name, avg, min, max
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A3 - ordering and alignment of the chart payload.
+        ///
+        /// Guards: per-channel timestamps are non-decreasing, `aligned_data[0]`
+        /// is STRICTLY increasing, and every channel column has exactly the
+        /// same length as the timestamp column (a length mismatch would
+        /// silently mis-associate values with timestamps in uPlot).
+        #[test]
+        fn prop_timestamps_sorted(
+            spec in stream_spec(),
+            pixel_width in pixel_width_strategy(),
+            max_points in max_points_strategy(),
+            use_average in any::<bool>(),
+        ) {
+            let mode = if use_average {
+                AggregationMode::Average
+            } else {
+                AggregationMode::Lttb
+            };
+            let agg = aggregator_with(mode, max_points);
+            spec.feed(&agg);
+
+            let req = PlotterDataRequest {
+                time_min_ms: None,
+                time_max_ms: None,
+                pixel_width,
+                is_realtime: false,
+            };
+
+            let payload = agg.get_ranged_data(&req);
+            for (name, points) in &payload.line_data {
+                let mut prev = 0u64;
+                for point in points {
+                    let (ts, _, _, _) = point_fields(point);
+                    prop_assert!(
+                        ts >= prev,
+                        "channel {}: timestamps not sorted ({} after {})",
+                        name, ts, prev
+                    );
+                    prev = ts;
+                }
+            }
+
+            let chart = agg.get_chart_data(&req);
+            prop_assert!(!chart.aligned_data.is_empty(), "aligned_data must have an x column");
+            prop_assert_eq!(
+                chart.aligned_data.len(),
+                chart.channel_names.len() + 1,
+                "aligned_data must be [timestamps, ...one column per channel]"
+            );
+
+            let ts_col = &chart.aligned_data[0];
+            for w in ts_col.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                prop_assert!(a.is_some() && b.is_some(), "timestamp column must not contain nulls");
+                prop_assert!(
+                    a.unwrap() < b.unwrap(),
+                    "aligned_data[0] not strictly increasing: {:?} then {:?}",
+                    a, b
+                );
+            }
+            for (i, col) in chart.aligned_data.iter().enumerate().skip(1) {
+                prop_assert_eq!(
+                    col.len(),
+                    ts_col.len(),
+                    "channel column {} has {} rows but there are {} timestamps",
+                    i, col.len(), ts_col.len()
+                );
+            }
+        }
+
+        /// A4 - the data version counter never goes backwards.
+        ///
+        /// Guards: the frontend polls `check_version()` and re-fetches only when
+        /// the number changes; a decrease (or a reset on `clear`) would strand
+        /// it on stale data.
+        #[test]
+        fn prop_version_monotonic(ops in prop::collection::vec(agg_op(), 1..80)) {
+            let agg = PlotterAggregator::new();
+            agg.set_enabled(true);
+
+            let mut last = agg.check_version().version;
+            for op in &ops {
+                match op {
+                    AggOp::AddPoint { channel, ts, value } => {
+                        agg.add_data_point(
+                            &StreamSpec::channel_name(*channel),
+                            *ts,
+                            ChannelValue::Numeric(*value),
+                        );
+                    }
+                    AggOp::AddBatch { channel, base_ts, count } => {
+                        let name = StreamSpec::channel_name(*channel);
+                        let batch: Vec<crate::plotter::parser::ParsedDataPoint> = (0..*count)
+                            .map(|i| {
+                                let mut channels = HashMap::new();
+                                channels.insert(
+                                    name.clone(),
+                                    ChannelValue::Numeric(i as f64),
+                                );
+                                crate::plotter::parser::ParsedDataPoint {
+                                    timestamp_ms: base_ts + i as u64 * 10,
+                                    channels,
+                                    channel_order: vec![name.clone()],
+                                }
+                            })
+                            .collect();
+                        agg.add_data_points_batch(batch);
+                    }
+                    AggOp::Clear => agg.clear(),
+                    AggOp::SetAverageMode(average) => {
+                        agg.set_aggregation_mode(if *average {
+                            AggregationMode::Average
+                        } else {
+                            AggregationMode::Lttb
+                        });
+                    }
+                    AggOp::GetChart { pixel_width } => {
+                        let _ = agg.get_chart_data(&PlotterDataRequest {
+                            time_min_ms: None,
+                            time_max_ms: None,
+                            pixel_width: *pixel_width,
+                            is_realtime: false,
+                        });
+                    }
+                }
+
+                let now = agg.check_version().version;
+                prop_assert!(
+                    now >= last,
+                    "version decreased ({} -> {}) after {:?}",
+                    last, now, op
+                );
+                last = now;
+            }
+        }
+
+        /// P-4 (docs/24 3.3) - count conservation, generated streams.
+        ///
+        /// Guards: aggregation never invents or loses raw points. The `count`
+        /// carried by the stored buckets, plus whatever is still sitting in
+        /// `raw_buffer`, must equal the number of points fed - at any
+        /// `max_points`, i.e. after any number of level-ups. The min/max
+        /// envelope must be preserved exactly at the same time (level-up
+        /// merges min-of-mins / max-of-maxs, so no epsilon is allowed).
+        #[test]
+        fn prop_count_conservation(
+            spec in stream_spec(),
+            max_points in max_points_strategy(),
+        ) {
+            let agg = aggregator_with(AggregationMode::Average, max_points);
+            let fed = spec.feed(&agg);
+
+            for (ch, values) in fed.iter().enumerate() {
+                let name = StreamSpec::channel_name(ch);
+                prop_assert_eq!(
+                    represented_count(&agg, &name),
+                    values.len(),
+                    "channel {} lost points (n={}, max_points={}, level={})",
+                    name, spec.n, max_points, current_level(&agg)
+                );
+
+                let (got_min, got_max) = stored_extremes(&agg, &name);
+                let want_min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                let want_max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                prop_assert_eq!(
+                    got_min, want_min,
+                    "channel {} lost its stored minimum (max_points={})", name, max_points
+                );
+                prop_assert_eq!(
+                    got_max, want_max,
+                    "channel {} lost its stored maximum (max_points={})", name, max_points
+                );
+            }
+        }
+
+        /// P-7 (docs/24 3.3) - batch equivalence.
+        ///
+        /// Guards: `add_data_points_batch` is only a performance shortcut for
+        /// N x `add_data_point`, so the chart the frontend receives must not
+        /// depend on which one the reader thread used.
+        ///
+        /// WEAKENED IN THE LEVEL-UP REGIME - mechanism: `add_data_point` runs
+        /// `maybe_aggregate` after EVERY point while `add_data_points_batch`
+        /// runs it once at the end. While no level-up occurs that difference
+        /// is unobservable (bucket forming only drains fixed-size FIFO chunks
+        /// from `raw_buffer`, so the drain cadence cannot change the chunks),
+        /// and the property demands FULL equality of `aligned_data`,
+        /// `channel_names` and `band_data`. Once `history + buffer` exceeds
+        /// `max_points` the cadence does become observable and the two results
+        /// legitimately differ: the point-by-point aggregator levels up
+        /// repeatedly, doubling `current_level`/`bucket_size` each time (so
+        /// its later buckets cover more raw points), whereas the batch
+        /// aggregator forms every bucket at the INITIAL `bucket_size` and then
+        /// performs exactly ONE level-up over the whole set. Different bucket
+        /// boundaries mean different timestamps, so exact chart equality
+        /// cannot hold. For that regime the property asserts the strongest
+        /// statement that remains true: same channels, same x-range, exact
+        /// conservation of the represented raw-point count, and an exactly
+        /// preserved min/max envelope.
+        #[test]
+        fn prop_batch_equivalence(
+            spec in stream_spec(),
+            pixel_width in pixel_width_strategy(),
+            max_points in max_points_strategy(),
+            use_average in any::<bool>(),
+        ) {
+            let mode = if use_average {
+                AggregationMode::Average
+            } else {
+                AggregationMode::Lttb
+            };
+
+            let one_by_one = aggregator_with(mode.clone(), max_points);
+            let fed = spec.feed(&one_by_one);
+
+            let batched = aggregator_with(mode, max_points);
+            batched.add_data_points_batch(spec.as_batch());
+
+            let req = PlotterDataRequest {
+                time_min_ms: None,
+                time_max_ms: None,
+                pixel_width,
+                is_realtime: false,
+            };
+            let chart_a = one_by_one.get_chart_data(&req);
+            let chart_b = batched.get_chart_data(&req);
+
+            // Both routes must agree on the channel set and the x-range in
+            // every regime.
+            prop_assert_eq!(&chart_a.channel_names, &chart_b.channel_names);
+            prop_assert_eq!(chart_a.start_ms, chart_b.start_ms);
+            prop_assert_eq!(chart_a.end_ms, chart_b.end_ms);
+
+            let levelled_up =
+                current_level(&one_by_one) != 1 || current_level(&batched) != 1;
+            if !levelled_up {
+                // Strong form: the displayed payloads are identical.
+                // (Non-vacuity: there is always something to compare - the
+                // generator feeds at least 100 points.)
+                prop_assert!(
+                    !chart_a.aligned_data[0].is_empty(),
+                    "nothing was plotted, the comparison would be vacuous"
+                );
+                prop_assert_eq!(
+                    &chart_a.aligned_data,
+                    &chart_b.aligned_data,
+                    "batch vs point-by-point diverged (n={}, channels={}, \
+                     pixel_width={}, max_points={})",
+                    spec.n, spec.channels, pixel_width, max_points
+                );
+                prop_assert_eq!(band_shape(&chart_a), band_shape(&chart_b));
+            } else {
+                // Weakened form (see the mechanism above).
+                for (ch, values) in fed.iter().enumerate() {
+                    let name = StreamSpec::channel_name(ch);
+                    prop_assert_eq!(
+                        represented_count(&one_by_one, &name),
+                        values.len(),
+                        "point-by-point lost points on {}", name
+                    );
+                    prop_assert_eq!(
+                        represented_count(&batched, &name),
+                        values.len(),
+                        "batch lost points on {}", name
+                    );
+                    prop_assert_eq!(
+                        stored_extremes(&one_by_one, &name),
+                        stored_extremes(&batched, &name),
+                        "batch and point-by-point disagree on the {} envelope", name
+                    );
+                }
+            }
+        }
+
+        /// A5 - the realtime aligned grid is stable while the window slides.
+        ///
+        /// Generalizes `test_aligned_buckets_are_stable_across_sliding_windows`:
+        /// for two realtime requests of the SAME span whose starts differ by an
+        /// arbitrary slide, every cell that is interior to both results must be
+        /// byte-for-byte identical (ts, min, max, avg). Interior = not the first
+        /// or last returned cell, which are the only ones a window boundary can
+        /// clip.
+        ///
+        /// GENERATOR CONSTRAINT: if one window lands above the aggregation
+        /// threshold and the other below it, the two results are in different
+        /// representations by design (aligned grid cells vs. pass-through
+        /// buckets), so that pairing is excluded rather than compared.
+        #[test]
+        fn prop_aligned_realtime_stability(
+            cadence in 1u64..=20,
+            val_seed in any::<u64>(),
+            span in 2_000u64..=20_000,
+            pixel_width in 50u32..=400,
+            slide in 1u64..=500,
+            start_offset in 0u64..1_000,
+        ) {
+            const T0: u64 = 1_000_000;
+            const N: usize = 2500;
+
+            let agg = average_aggregator();
+            for i in 0..N {
+                let ts = T0 + i as u64 * cadence;
+                let h = mix64(val_seed ^ (i as u64));
+                let base = (i as f64 * 0.11).sin() * 50.0;
+                let v = if h.is_multiple_of(53) { base + 1.0e3 } else { base };
+                agg.add_data_point("ch0", ts, ChannelValue::Numeric(v));
+            }
+
+            let a_min = T0 + start_offset;
+            let req_a = PlotterDataRequest {
+                time_min_ms: Some(a_min),
+                time_max_ms: Some(a_min + span),
+                pixel_width,
+                is_realtime: true,
+            };
+            let req_b = PlotterDataRequest {
+                time_min_ms: Some(a_min + slide),
+                time_max_ms: Some(a_min + slide + span),
+                pixel_width,
+                is_realtime: true,
+            };
+
+            let payload_a = agg.get_ranged_data(&req_a);
+            let payload_b = agg.get_ranged_data(&req_b);
+
+            // Excluded pairing (see doc comment): mixed representations.
+            if payload_a.is_aggregated == payload_b.is_aggregated {
+                let empty: Vec<AggregatedPoint> = Vec::new();
+                let points_a = payload_a.line_data.get("ch0").unwrap_or(&empty);
+                let points_b = payload_b.line_data.get("ch0").unwrap_or(&empty);
+
+                let cells_a = interior_cells(points_a);
+                let cells_b = interior_cells(points_b);
+
+                for (ts, stats_a) in &cells_a {
+                    if let Some(stats_b) = cells_b.get(ts) {
+                        prop_assert_eq!(
+                            stats_a, stats_b,
+                            "cell at ts={} changed when the window slid by {} ms \
+                             (span={}, pixel_width={}, cadence={})",
+                            ts, slide, span, pixel_width, cadence
+                        );
+                    }
+                }
+            }
+        }
     }
 }

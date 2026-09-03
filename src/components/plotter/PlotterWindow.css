@@ -56,6 +56,16 @@
   background: #16a34a;
 }
 
+.control-button.live {
+  background: #22c55e;
+  color: #000;
+  font-weight: 600;
+}
+
+.control-button.live:hover {
+  background: #16a34a;
+}
+
 /* Error display */
 .plotter-error {
   padding: 8px 16px;
@@ -171,6 +181,8 @@
 .plotter-footer {
   display: flex;
   justify-content: space-between;
+  align-items: center;
+  gap: 12px;
   padding: 8px 16px;
   background: #252526;
   border-top: 1px solid #3c3c3c;
@@ -180,24 +192,41 @@
 
 .status-text {
   color: #22c55e;
+  white-space: nowrap;
+}
+
+/* View states: LIVE (following) / Inspect (frozen) / Paused */
+.status-text.live {
+  color: #22c55e;
+}
+
+.status-text.inspect {
+  color: #60a5fa;
+}
+
+.status-text.paused {
+  color: #f59e0b;
 }
 
 .status-text:first-child::before {
   content: '';
 }
 
-/* Aggregation mode dropdown */
-.aggregation-control {
+/* Footer dropdowns (time window + aggregation mode) */
+.aggregation-control,
+.window-control {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.aggregation-label {
+.aggregation-label,
+.window-label {
   color: #888;
 }
 
-.aggregation-select {
+.aggregation-select,
+.window-select {
   background: #1e1e1e;
   color: #d4d4d4;
   border: 1px solid #3c3c3c;
@@ -207,11 +236,13 @@
   cursor: pointer;
 }
 
-.aggregation-select:hover {
+.aggregation-select:hover,
+.window-select:hover {
   border-color: #555;
 }
 
-.aggregation-select:focus {
+.aggregation-select:focus,
+.window-select:focus {
   outline: none;
   border-color: #3b82f6;
 }

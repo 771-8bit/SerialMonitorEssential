@@ -37,6 +37,8 @@ export default function HexViewer({
   // Fetching guard and queue
   const isFetchingRef = useRef(false);
   const pendingStartRowRef = useRef<number | null>(null);
+  // Force flag for queued requests (survives the in-flight early return)
+  const pendingForceRef = useRef(false);
   const lastFetchRowRef = useRef(-Infinity);
   const totalRowsRef = useRef(0);
   const lastTotalBytesRef = useRef(0);
@@ -58,11 +60,18 @@ export default function HexViewer({
       onScrollChange,
     });
 
+  // Track visible-row count as of the last fetch, to detect viewport growth
+  // (e.g. window resize) that should trigger a refetch of newly exposed rows.
+  const prevVisibleRowsRef = useRef(visibleRows);
+
   // Fetch rows from backend
   const fetchRows = useCallback(
     async (startRow: number, force: boolean = false) => {
-      // Always update the pending request
+      // Always update the pending request. Keep the force flag alongside it
+      // (OR-ed) so a forced refetch queued during an in-flight fetch is not
+      // lost when re-evaluated by the loop below.
       pendingStartRowRef.current = startRow;
+      if (force) pendingForceRef.current = true;
 
       // If already fetching, the loop will pick up this new pendingStartRowRef
       if (isFetchingRef.current) return;
@@ -73,6 +82,9 @@ export default function HexViewer({
         // Process requests until we catch up
         while (pendingStartRowRef.current !== null) {
           const targetStartRow: number = pendingStartRowRef.current;
+          // Consume the queued force flag for this iteration
+          const effectiveForce = force || pendingForceRef.current;
+          pendingForceRef.current = false;
 
           // Optimization: If we already fetched this row (or close enough) and not forced, skip
           // Check needs to be rigorous: if we are "close enough" but new data arrived (force), we must fetch.
@@ -87,7 +99,7 @@ export default function HexViewer({
           const isAtTop = targetStartRow === 0;
           const wasAtTop = lastFetchRowRef.current === 0;
 
-          if (!force) {
+          if (!effectiveForce) {
             // If we are at 0, only skip if we were ALREADY at 0.
             if (isAtTop && wasAtTop) {
               if (pendingStartRowRef.current === targetStartRow) {
@@ -160,13 +172,21 @@ export default function HexViewer({
     const forceRefetch = totalBytes !== lastTotalBytesRef.current;
     lastTotalBytesRef.current = totalBytes;
 
-    fetchRows(startRow, forceRefetch);
-  }, [totalBytes, scrollTop, scrollHeight, fetchRows, effectiveTotalRows]);
+    // Refetch when the viewport grew (more rows visible than last fetch covered)
+    const viewportGrew = visibleRows > prevVisibleRowsRef.current;
+    prevVisibleRowsRef.current = visibleRows;
 
-  // Handle Ctrl+A to warn user about partial selection
+    fetchRows(startRow, forceRefetch || viewportGrew);
+  }, [totalBytes, scrollTop, scrollHeight, fetchRows, effectiveTotalRows, visibleRows]);
+
+  // Handle Ctrl+A to warn user about partial selection.
+  // Skip when focus is in an editable element (Send textarea, search input,
+  // etc.) so their native select-all keeps working.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('input, textarea, select, [contenteditable]')) return;
         e.preventDefault();
         alert(
           'To copy all data, please use the export function or copy button in the toolbar.\n(Standard selection only copies visible data due to performance optimizations)'
@@ -225,13 +245,16 @@ export default function HexViewer({
         <span>
           Total: {totalBytes.toLocaleString()} bytes ({totalRows.toLocaleString()} rows)
         </span>
-        <span className="hex-debug">
-          scrollTop={scrollTop.toFixed(0)} | scrollHeight={scrollHeight.toLocaleString()} |
-          byteOffset={byteOffset.toLocaleString()} | displayTop={displayTop.toLocaleString()} |
-          startRow={currentStartRow.toLocaleString()} | targetRow={targetRow.toLocaleString()} |
-          fetched={rows.length} | isScaled={scale < 1 ? 'YES' : 'no'} | scale=
-          {scale.toFixed(4)}
-        </span>
+        {/* Internal scroll diagnostics - dev builds only, never shipped */}
+        {import.meta.env.DEV && (
+          <span className="hex-debug">
+            scrollTop={scrollTop.toFixed(0)} | scrollHeight={scrollHeight.toLocaleString()} |
+            byteOffset={byteOffset.toLocaleString()} | displayTop={displayTop.toLocaleString()} |
+            startRow={currentStartRow.toLocaleString()} | targetRow={targetRow.toLocaleString()} |
+            fetched={rows.length} | isScaled={scale < 1 ? 'YES' : 'no'} | scale=
+            {scale.toFixed(4)}
+          </span>
+        )}
       </div>
     </div>
   );

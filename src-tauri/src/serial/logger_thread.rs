@@ -129,16 +129,20 @@ pub fn process_buffer(
         return Ok((0, 0));
     }
 
-    // 3. Prepare for write
-    let mut chunks_to_write = Vec::new();
-    {
-        // Acquire write lock to pop chunks
-        let mut list = finished_list.write().unwrap();
-        // Pop all chunks
-        while let Some(chunk) = list.pop_front() {
-            chunks_to_write.push(chunk);
-        }
-    }
+    // 3. Snapshot the chunks WITHOUT removing them from finished_list.
+    //
+    // 重要: 先に pop してから書き込むと、書き込み〜index 反映の間そのデータが
+    // finished_list にも archived_index にも存在しない瞬間ができ、
+    // get_data / total_bytes が一時的に失敗・後退する。また I/O エラー時には
+    // pop 済みチャンクが失われ、恒久的なデータ欠損になる。
+    // そのため「チャンクごとに 書き込み → index 公開 → pop」の順序を守る。
+    // チャンク単位で確定させることで、途中で I/O エラーが起きても
+    // 成功済みのチャンクは再送されず、再試行はバッチ全体ではなく
+    // 残りのチャンクのみを対象にできる。
+    let chunks_to_write: Vec<Arc<Chunk>> = {
+        let list = finished_list.read().unwrap();
+        list.iter().cloned().collect()
+    };
 
     if chunks_to_write.is_empty() {
         return Ok((0, 0));
@@ -149,29 +153,49 @@ pub fn process_buffer(
     let chunks_count_in_batch = chunks_to_write.len();
 
     if let Some(f) = file {
-        let current_file_offset = f.metadata()?.len();
+        let mut file_offset = f.metadata()?.len();
 
         for chunk in &chunks_to_write {
             let data = chunk.data();
-            if data.is_empty() {
-                continue;
+            if !data.is_empty() {
+                if let Err(e) = f.write_all(data) {
+                    // Roll the file back to the last indexed offset so a partial
+                    // write doesn't leave orphaned bytes (a retry would otherwise
+                    // duplicate them).
+                    let _ = f.set_len(file_offset);
+                    return Err(e);
+                }
+
+                // Record metadata for EACH chunk to maintain granular seeking
+                let metadata = PageMetadata {
+                    file_path: file_path.to_path_buf(),
+                    file_offset,
+                    data_length: data.len(),
+                    global_offset: chunk.global_offset(),
+                };
+
+                // Publish metadata BEFORE removing the chunk so readers always
+                // find the data in at least one source (get_data scans
+                // archived_index first).
+                match archived_index.write() {
+                    Ok(mut index) => index.push(metadata),
+                    Err(e) => {
+                        let _ = f.set_len(file_offset);
+                        return Err(std::io::Error::other(format!(
+                            "archived_index lock poisoned: {e}"
+                        )));
+                    }
+                }
+
+                file_offset += data.len() as u64;
+                bytes_written_in_batch += data.len() as u64;
             }
 
-            f.write_all(data)?;
-            bytes_written_in_batch += data.len() as u64;
-
-            // Record metadata for EACH chunk to maintain granular seeking
-            // (merging metadata is possible but complex for binary search if offsets are not aligned)
-            // Keeping granular metadata is safer for now.
-            let metadata = PageMetadata {
-                file_path: file_path.to_path_buf(),
-                file_offset: current_file_offset + bytes_written_in_batch - data.len() as u64,
-                data_length: data.len(),
-                global_offset: chunk.global_offset(),
-            };
-
-            if let Ok(mut index) = archived_index.write() {
-                index.push(metadata);
+            // This chunk is durable (or empty) — remove it from finished_list now.
+            // Worker thread only push_backs, so the front entry is still the
+            // chunk we just archived.
+            if let Ok(mut list) = finished_list.write() {
+                list.pop_front();
             }
         }
         f.flush()?;
@@ -179,6 +203,10 @@ pub fn process_buffer(
         // Test mode or dry run
         for chunk in &chunks_to_write {
             bytes_written_in_batch += chunk.len() as u64;
+        }
+        let mut list = finished_list.write().unwrap();
+        for _ in 0..chunks_to_write.len() {
+            list.pop_front();
         }
     }
 

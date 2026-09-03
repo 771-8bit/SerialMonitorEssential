@@ -7,7 +7,7 @@ mod data_store;
 mod parser;
 mod thread;
 
-pub use aggregator::PlotterAggregator;
+pub use aggregator::{PlotterAggregator, PlotterVersionInfo};
 pub use data_store::{AggregationMode, PlotterChartPayload, PlotterDataRequest};
 pub use parser::PlotterParser;
 pub use thread::PlotterThread;

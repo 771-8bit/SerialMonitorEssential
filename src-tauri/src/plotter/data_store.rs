@@ -133,8 +133,14 @@ pub struct PlotterDataRequest {
 pub enum AggregatedPoint {
     /// Single value (LTTB mode)
     Single { ts: u64, value: f64 },
-    /// Min-Max pair for waveform peaks
-    MinMax { ts: u64, min: f64, max: f64 },
+    /// Min-Max pair for waveform peaks (avg is the true weighted average,
+    /// used as the center line in Average mode)
+    MinMax {
+        ts: u64,
+        min: f64,
+        max: f64,
+        avg: f64,
+    },
 }
 
 /// Ranged plotter data payload for frontend
