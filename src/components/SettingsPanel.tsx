@@ -1,5 +1,38 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import './SettingsPanel.css';
+
+/** バックエンド `BridgeActivity` に対応（直近の活動） */
+interface BridgeActivity {
+  kind: string;
+  bytes: number;
+  at_ms: number;
+}
+
+/** `bridge_status` / `bridge_set` の戻り値 */
+interface BridgeStatusInfo {
+  enabled: boolean;
+  port: number;
+  connections: number;
+  last_activity: BridgeActivity | null;
+}
+
+/** `bridge-activity` イベントのペイロード */
+interface BridgeActivityEvent {
+  kind: string;
+  bytes: number;
+  preview: string;
+}
+
+const BRIDGE_DEFAULT_PORT = 57320;
+const BRIDGE_POLL_MS = 2000;
+const BRIDGE_TOOLTIP = 'ローカルのAIエージェント用ブリッジ（127.0.0.1のみ・既定OFF）';
+
+/** 活動時刻の表示（時刻のみ） */
+function formatBridgeTime(atMs: number): string {
+  return new Date(atMs).toLocaleTimeString();
+}
 
 export interface SerialConfig {
   baud_rate: number;
@@ -40,6 +73,77 @@ export default function SettingsPanel({
   // blur/Enter so invalid values (empty, 0, negative, decimal) never reach
   // the config / backend.
   const [baudDraft, setBaudDraft] = useState('');
+
+  // --- AI Bridge -----------------------------------------------------------
+  // 状態は SettingsPanel 内で完結させる（App.tsx には触れない）。
+  const [bridgeEnabled, setBridgeEnabled] = useState(false);
+  const [bridgePort, setBridgePort] = useState(BRIDGE_DEFAULT_PORT);
+  const [bridgeConnections, setBridgeConnections] = useState(0);
+  const [bridgeActivity, setBridgeActivity] = useState<BridgeActivity | null>(null);
+
+  const applyBridgeStatus = useCallback((info: BridgeStatusInfo) => {
+    setBridgeEnabled(info.enabled);
+    setBridgePort(info.port);
+    setBridgeConnections(info.connections);
+    // イベントで先に受け取った活動の方が新しい場合は上書きしない
+    setBridgeActivity((prev) => {
+      const next = info.last_activity;
+      if (!next) return prev;
+      return !prev || next.at_ms >= prev.at_ms ? next : prev;
+    });
+  }, []);
+
+  const handleBridgeToggle = async (enabled: boolean) => {
+    setBridgeEnabled(enabled); // 楽観的更新（失敗時に戻す）
+    try {
+      const info = await invoke<BridgeStatusInfo>('bridge_set', { enabled, port: null });
+      if (info) applyBridgeStatus(info);
+    } catch (e) {
+      console.error(e);
+      setBridgeEnabled(false);
+      setBridgeConnections(0);
+    }
+  };
+
+  // 有効な間だけ 2 秒ごとに状態をポーリングする
+  useEffect(() => {
+    if (!bridgeEnabled) return;
+    let cancelled = false;
+    const timer = setInterval(() => {
+      invoke<BridgeStatusInfo>('bridge_status')
+        .then((info) => {
+          if (!cancelled && info) applyBridgeStatus(info);
+        })
+        .catch((e) => console.error(e));
+    }, BRIDGE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [bridgeEnabled, applyBridgeStatus]);
+
+  // 送信は即座に見えてほしいのでイベントも購読する
+  // （unmount 前に listen() が解決しなかった場合に備えた cancelled パターン）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<BridgeActivityEvent>('bridge-activity', (event) => {
+      setBridgeActivity({
+        kind: event.payload.kind,
+        bytes: event.payload.bytes,
+        at_ms: Date.now(),
+      });
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   const handleChange = <K extends keyof SerialConfig>(key: K, value: SerialConfig[K]) => {
     onConfigChange({ ...config, [key]: value });
@@ -226,6 +330,30 @@ export default function SettingsPanel({
             ))}
           </select>
         </div>
+      </div>
+
+      <div className="settings-advanced">
+        <label className="checkbox-label" title={BRIDGE_TOOLTIP}>
+          <input
+            type="checkbox"
+            checked={bridgeEnabled}
+            onChange={(e) => {
+              void handleBridgeToggle(e.target.checked);
+            }}
+          />
+          AI Bridge
+        </label>
+
+        {bridgeEnabled && (
+          <>
+            <span className="bridge-endpoint">127.0.0.1:{bridgePort}</span>
+            <span className="bridge-hint">
+              {bridgeConnections > 0 ? `接続 ${bridgeConnections}` : '待機中'}
+              {bridgeActivity &&
+                ` / 送信 ${bridgeActivity.bytes} bytes ${formatBridgeTime(bridgeActivity.at_ms)}`}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

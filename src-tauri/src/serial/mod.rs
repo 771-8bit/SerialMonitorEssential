@@ -17,8 +17,13 @@ use tauri::{AppHandle, State};
 /// `data_store` は外側も `Arc` で包み、プロッタスレッドが「現在の」DataStore を
 /// 毎ポーリングで解決できるようハンドルを共有する（ポート再オープンや
 /// クリアで内側の `Arc<DataStore>` は差し替わるため）。
+///
+/// `port` も同じ理由で外側を `Arc` にしてある。AI ブリッジ（`bridge.rs`）の
+/// サーバスレッドはコマンドのスコープより長生きするので Tauri の `State` を
+/// 保持できず、ハンドルの複製が必要になる。既存の `state.port.lock()` は
+/// `Deref` でそのまま動く。
 pub struct SerialState {
-    pub port: Mutex<Option<Arc<Mutex<port::SerialPort>>>>,
+    pub port: Arc<Mutex<Option<Arc<Mutex<port::SerialPort>>>>>,
     pub data_store: Arc<Mutex<Option<Arc<DataStore>>>>,
 }
 
@@ -436,6 +441,14 @@ pub fn get_ascii_lines(
 
 #[tauri::command]
 pub fn list_ports() -> Vec<String> {
+    enumerate_ports()
+}
+
+/// 利用可能なポートの列挙（`list_ports` コマンドの実体）
+///
+/// AI ブリッジの `ports` メソッドが GUI と同じ一覧を返せるよう、コマンド属性の
+/// 付いていない素の関数として切り出してある。
+pub(crate) fn enumerate_ports() -> Vec<String> {
     match serialport::available_ports() {
         Ok(ports) => ports
             .into_iter()

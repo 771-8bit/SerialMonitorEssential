@@ -86,6 +86,30 @@ temp,humidity,state                    # 先頭にヘッダー行を送ると列
 
 数値はラインチャート、非数値はステートタイムラインに自動で振り分けられます。
 
+## AI 連携 (MCP)
+
+COM ポートは排他デバイスなので、アプリが開いている間は他のプロセスが同じポートを開けません。
+そこで**アプリ自身をマルチプレクサ**にしました。あなたが GUI で波形とログを眺めている横で、
+Claude Code などの AI エージェントが**同じシリアルセッション**を読み、同じポートへコマンドを送れます。
+「`AT+VER` を送って応答を読んで」「今のログから異常行を探して」を、ポートの奪い合いなしに頼めます。
+
+有効化は 2 ステップです。まずアプリの設定パネルで **AI Bridge** を ON にします
+（既定は OFF。ON にすると `127.0.0.1:57320` で待ち受けます）。次に MCP サーバーを登録します。
+
+```bash
+claude mcp add serial-monitor -- node "<リポジトリのパス>/mcp/server.mjs"
+```
+
+提供されるツールは `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` /
+`serial_send` / `serial_send_hex` / `serial_wait_for` の 7 つです。
+セットアップ手順・環境変数・ツールの詳細は [`mcp/README.md`](mcp/README.md) を参照してください。
+
+> **セキュリティ**: 待ち受けは **`127.0.0.1` のみ**で外部ネットワークからは接続できません。
+> **既定は OFF** で、設定画面で明示的に有効にしたときだけ動きます。
+> **AI が送信した内容は必ず GUI に表示されます**（バイト数・時刻・内容のプレビュー）。
+> 人間に見えない送信経路は作らない、という方針です（設計判断は
+> [docs/22_architecture_description.md](docs/22_architecture_description.md) の ADR-12）。
+
 ## 開発者向け
 
 前提: Node.js v22+ / Rust stable。

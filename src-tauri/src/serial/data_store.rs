@@ -30,6 +30,14 @@ pub struct ByteTimestamp {
     pub cumulative_bytes: u64, // その時点での累積バイト数
 }
 
+/// `log-error` イベントのペイロード（docs/04_api.md）
+///
+/// ディスクフル等でログ書き込みに失敗したことを UI に伝える。
+#[derive(Clone, serde::Serialize)]
+pub struct LogErrorPayload {
+    pub message: String,
+}
+
 /// DataStore: データ管理の中核
 ///
 /// ObjectPool、FinishedQueue、ArchivedIndexを統合し、
@@ -127,12 +135,23 @@ impl DataStore {
         );
 
         // Logger Thread起動
+        //
+        // ディスク書き込みエラーは logger_thread からコールバックで戻り、
+        // ここで `log-error` イベントとして UI に送る（SYS-F-205 / GAP-09）。
+        // logger_thread 側を tauri 非依存に保つための構成。
         debug!("[DataStore] Spawning Logger Thread");
+        let log_error_handle = app_handle.clone();
         let logger_handle = logger_thread::spawn_logger_thread(
             self.finished_list.clone(),
             self.archived_index.clone(),
             self.temp_dir.clone(),
             self.stop_flag.clone(),
+            Box::new(move |message: String| {
+                use tauri::Emitter;
+                if let Err(e) = log_error_handle.emit("log-error", LogErrorPayload { message }) {
+                    warn!("[DataStore] Failed to emit log-error: {:?}", e);
+                }
+            }),
         );
 
         // UiNotifier Thread起動

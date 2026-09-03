@@ -89,33 +89,76 @@ function niceYRange(min: number, max: number): { min: number; max: number } {
 /**
  * Calculate Y-axis range from chart data, respecting hidden series.
  * When xMin/xMax are given, only samples inside that x window are considered.
+ *
+ * In Average aggregation mode the backend also sends a min/max band per
+ * channel. The band is drawn on the same y scale, so it MUST take part in the
+ * auto-range: otherwise the band's peaks are clipped and a spike disappears
+ * (SYS-F-525 / UN-03, GAP-04). `bandData` is indexed by channel name and its
+ * arrays share the indices of `chartData[0]` (timestamps); `channelNames[i]`
+ * corresponds to series index `i + 1`, which is how hidden-ness is resolved.
+ * With `bandData` null/undefined the result is exactly the values-only range.
  */
-function calculateYRange(
+// Exported only so it can be unit-tested (src/test/calculateYRange.test.ts).
+// It is a pure helper, not a component - Fast Refresh is unaffected.
+// eslint-disable-next-line react-refresh/only-export-components
+export function calculateYRange(
   chartData: uPlot.AlignedData,
   hiddenSeriesIndices: Set<number>,
   xMin?: number,
-  xMax?: number
+  xMax?: number,
+  bandData?: Record<string, BandSeriesData> | null,
+  channelNames?: string[] | null
 ): { yMin: number; yMax: number } {
   let yMin = Infinity;
   let yMax = -Infinity;
   const windowed = xMin !== undefined && xMax !== undefined;
   const xData = chartData[0] as (number | null)[] | undefined;
+  const inWindow = (j: number): boolean => {
+    if (!windowed) return true;
+    const x = xData?.[j];
+    return x != null && x >= xMin! && x <= xMax!;
+  };
+  const fold = (v: number | null | undefined): void => {
+    if (v !== null && v !== undefined && Number.isFinite(v)) {
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+    }
+  };
+
   for (let i = 1; i < chartData.length; i++) {
     // Skip hidden series
     if (hiddenSeriesIndices.has(i)) continue;
     const yData = chartData[i] as (number | null)[];
     for (let j = 0; j < yData.length; j++) {
-      if (windowed) {
-        const x = xData?.[j];
-        if (x == null || x < xMin! || x > xMax!) continue;
+      if (!inWindow(j)) continue;
+      fold(yData[j]);
+    }
+  }
+
+  // Fold in the min/max band of the VISIBLE channels (GAP-04)
+  if (bandData && channelNames) {
+    for (let i = 0; i < channelNames.length; i++) {
+      // channelNames[i] is series index i + 1
+      if (hiddenSeriesIndices.has(i + 1)) continue;
+      const band = bandData[channelNames[i]];
+      if (!band) continue;
+      const minArr = band.min;
+      const maxArr = band.max;
+      if (minArr) {
+        for (let j = 0; j < minArr.length; j++) {
+          if (!inWindow(j)) continue;
+          fold(minArr[j]);
+        }
       }
-      const v = yData[j];
-      if (v !== null && v !== undefined && Number.isFinite(v)) {
-        if (v < yMin) yMin = v;
-        if (v > yMax) yMax = v;
+      if (maxArr) {
+        for (let j = 0; j < maxArr.length; j++) {
+          if (!inWindow(j)) continue;
+          fold(maxArr[j]);
+        }
       }
     }
   }
+
   return { yMin, yMax };
 }
 
@@ -333,8 +376,15 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
           if (xExtent) {
             u.setScale('x', { min: xExtent.min, max: xExtent.max });
 
-            // Calculate Y range excluding hidden series
-            const { yMin, yMax } = calculateYRange(chartData, getHiddenIndices());
+            // Calculate Y range excluding hidden series (band included - GAP-04)
+            const { yMin, yMax } = calculateYRange(
+              chartData,
+              getHiddenIndices(),
+              undefined,
+              undefined,
+              bandDataRef.current,
+              channelsRef.current
+            );
             if (yMin !== Infinity && yMax !== -Infinity) {
               const padding = (yMax - yMin) * 0.1;
               u.setScale('y', { min: yMin - padding, max: yMax + padding });
@@ -512,7 +562,14 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
               max: xExtent.max > xExtent.min ? xExtent.max : xExtent.min + 1,
             });
           }
-          const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
+          const { yMin, yMax } = calculateYRange(
+            chartData,
+            hiddenIndices,
+            undefined,
+            undefined,
+            bandDataRef.current,
+            channelsRef.current
+          );
           if (yMin !== Infinity && yMax !== -Infinity) {
             applyYRange(chart, manualYScaleRef.current ?? niceYRange(yMin, yMax));
           }
@@ -543,7 +600,14 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
               chart.setScale('x', { min: xExtent.min, max: xExtent.max });
             }
 
-            const { yMin, yMax } = calculateYRange(chartData, hiddenIndices);
+            const { yMin, yMax } = calculateYRange(
+              chartData,
+              hiddenIndices,
+              undefined,
+              undefined,
+              bandDataRef.current,
+              channelsRef.current
+            );
             if (yMin !== Infinity && yMax !== -Infinity) {
               if (manualYScaleRef.current) {
                 chart.setScale('y', manualYScaleRef.current);
@@ -578,7 +642,14 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
         }
 
         const chartData = chart.data as uPlot.AlignedData;
-        const { yMin, yMax } = calculateYRange(chartData, getHiddenIndices(), minSec, maxSec);
+        const { yMin, yMax } = calculateYRange(
+          chartData,
+          getHiddenIndices(),
+          minSec,
+          maxSec,
+          bandDataRef.current,
+          channelsRef.current
+        );
         // Nothing visible (e.g. the stream died and the data slid out of the
         // window) - keep the current y range rather than collapsing it.
         if (yMin === Infinity || yMax === -Infinity) return;

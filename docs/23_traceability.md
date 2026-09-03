@@ -34,15 +34,19 @@
 
 | 種別 | 件数 | 内訳 |
 |------|------|------|
-| Rust 例示テスト `#[test]` | **120** | aggregator 36 / data_store 28 / parser 17 / thread 13 / worker 8 / chunk 6 / logger 5 / serial::mod 5 / state_transition 2 |
-| Rust プロパティテスト `proptest` | **8** | parser 3 / aggregator 5 |
-| Rust 合計（`cargo test --lib` 実行結果） | **128 passed** | |
-| vitest | **144 passed** | 7 ファイル（scrollUtils / LineChart / PlotterWindow / PlotterViewFsm / HexViewer / SendPanel / useByteScroll） |
+| Rust 例示テスト `#[test]` | **183** | aggregator 37 / data_store 36 / parser 31 / **bridge 27** / thread 22 / logger 8 / worker 8 / chunk 6 / serial::mod 6 / state_transition 2 |
+| Rust プロパティテスト `proptest` | **11** | aggregator 7 / parser 3 / data_store 1 |
+| Rust 合計（`cargo test --lib` 実行結果） | **194 passed** | |
+| vitest | **167 passed** | 10 ファイル（scrollUtils / LineChart / PlotterWindow / PlotterViewFsm / HexViewer / SendPanel / useByteScroll / **App** / **SettingsPanel** / **calculateYRange**） |
 
 > [07_plotter_spec.md](07_plotter_spec.md) の 2026-09-03 時点の記録は Rust 114 件。以後、
 > 絶対時刻整列グリッド関連の例示テスト 4 件（`test_quantize_bucket_width_125`,
 > `test_aligned_buckets_are_stable_across_sliding_windows`, `test_aligned_cells_on_absolute_grid`,
-> `test_realtime_raw_points_not_lost`）と、`proptest` によるプロパティテスト 8 件が追加されている。
+> `test_realtime_raw_points_not_lost`）と、`proptest` によるプロパティテストが追加されている。
+>
+> **2026-09-03（AI Bridge / GAP 解消回）の増分**: Rust +66（`bridge.rs` 27 = プロトコル単体 + 実ソケット結合、
+> `logger_thread.rs` のエラー通知 3、ほか集約・ストア・パーサの補強）、
+> vitest +23（`App.test.tsx` 6 / `SettingsPanel.test.tsx` 7 / `calculateYRange.test.ts` 10）。
 
 #### プロパティテスト一覧
 
@@ -58,6 +62,9 @@
 | `prop_timestamps_sorted` | `plotter/aggregator.rs` | ts は非減少、`aligned_data[0]` は狭義単調増加、全チャンネル列が同一長 |
 | `prop_version_monotonic` | `plotter/aggregator.rs` | `data_version` が後退しない（`clear` を含む任意の操作列で） |
 | `prop_aligned_realtime_stability` | `plotter/aggregator.rs` | 任意のスライド量・データ分布・ピクセル幅について、両ウィンドウの内部セルが `(ts, min, max, avg)` まで一致 |
+| `prop_count_conservation` | `plotter/aggregator.rs` | 再集約の前後で `count` の総和が保存される（誤差許容なし） |
+| `prop_batch_equivalence` | `plotter/aggregator.rs` | N 点の一括投入と 1 点ずつの投入が一致する（SYS-NF-604） |
+| `prop_get_data_split_read_consistency` | `serial/data_store.rs` | 任意の分割読み出しの連結が一括読み出しと一致する（INV-13 の発見に寄与） |
 
 ---
 
@@ -88,6 +95,7 @@
 | UN-21 | 複数インスタンス | SYS-NF-503 |
 | UN-22 | 自動で回帰を止める | SYS-NF-401, 402, 403 |
 | UN-23 | 設計理由が残る | SYS-NF-404 |
+| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106 |
 
 ---
 
@@ -103,7 +111,7 @@
 | SYS-F-104 | DTR/RTS 駆動と動的変更 | `serial/port.rs::write_dtr` / `write_rts`、`serial/mod.rs::write_dtr` / `write_rts`、`src/App.tsx`（config 変更時の反映） | `E2E`（DTR/RTS トグル）、`INSP` |
 | SYS-F-105 | 不正設定の事前拒否 | `serial/port.rs::SerialPort::new`（baud 0 チェック、data_bits/parity/stop_bits の照合）、`src/components/SettingsPanel.tsx`（入力検証） | `INSP`、**GAP-13** |
 | SYS-F-106 | オープン失敗で旧データを守る | `serial/mod.rs::open_port`（`SerialPort::new` 成功後に旧ストアを破棄） | `INSP`、**GAP-14** |
-| SYS-F-107 | 致命的エラーで切断通知 | `serial/worker_thread.rs`（`serial-status` emit）、`src/App.tsx`（listen） | `INSP`、**GAP-07**（自動検証なし） |
+| SYS-F-107 | 致命的エラーで切断通知 + 2 秒間隔の能動再列挙 | `serial/worker_thread.rs`（`serial-status` emit）、`src/App.tsx`（listen、`PORT_POLL_INTERVAL_MS = 2000` の `list_ports` ポーリング、`close_port` による再同期） | `FE`: `src/test/App.test.tsx`（`polls list_ports on an interval so hotplugged devices appear`, `stops polling once unmounted`, `releases the backend port handle when a disconnect is detected`, `still releases the handle when the disconnect carries no error text`, `does not close the port on a connected=true status`）/ `E2E` — **GAP-07 / GAP-08 解消（2026-09-03）** |
 | SYS-F-108 | 非致命エラーで受信継続 | `serial/port.rs::read`（TimedOut を 0 バイト扱い） | `INSP` |
 | SYS-F-109 | 再オープン時のハンドル解放順序 | `serial/mod.rs::open_port`（`stop_reception` を先に実行） | `E2E`（切断→再接続）、`INSP` |
 
@@ -115,7 +123,7 @@
 | SYS-F-202 | ディスク退避 | `serial/logger_thread.rs::spawn_logger_thread` / `process_buffer` | `UT`: `test_process_buffer_no_flush`, `test_process_buffer_threshold_flush`, `test_process_buffer_force_flush`, `test_process_buffer_with_file_io`, `test_spawn_logger_thread_integration` |
 | SYS-F-203 | 2 記憶域をまたぐ読み出し | `serial/data_store.rs::get_data` | `UT`: `test_get_data_from_archived_only`, `test_get_data_from_finished_list_only`, `test_get_data_archived_then_finished`, `test_get_data_spanning_archived_and_finished`, `test_get_data_exact_boundary`, `test_get_data_multiple_archived_chunks`, `test_get_data_multiple_finished_chunks`, `test_get_data_partial_read_within_chunk`, `test_get_data_zero_length`, `test_get_data_empty_store`, `test_get_data_offset_out_of_range` |
 | SYS-F-204 | どちらにも無い瞬間を作らない (INV-3) | `serial/logger_thread.rs::process_buffer`（書き込み → 索引公開 → pop） | `INSP`（コメントで順序を固定）／ **GAP-15**（順序を破ると落ちるテストがない） |
-| SYS-F-205 | I/O 失敗でも失わない | `serial/logger_thread.rs::process_buffer`（`set_len` によるロールバック） | `INSP` / **GAP-09**（`log-error` 通知は未実装） |
+| SYS-F-205 | I/O 失敗でも失わない + `log-error` 通知 | `serial/logger_thread.rs::process_buffer`（`set_len` によるロールバック）、同 `on_error` コールバック（`Box<dyn Fn(String) + Send>`、5 秒レート制限）、`serial/data_store.rs`（`log-error` の emit）、`src/App.tsx`（利用者への提示） | `UT`: `test_process_buffer_io_error_keeps_chunks`, `test_spawn_logger_thread_notifies_error_rate_limited`, `test_spawn_logger_thread_notifies_open_failure` / `FE`: `src/test/App.test.tsx`（`surfaces log-error events to the user`） — **GAP-09 解消（2026-09-03）** |
 | SYS-F-206 | 16 ms 間引き通知 | `serial/ui_notifier.rs::spawn_ui_notifier_thread` | `INSP` / **GAP-16** |
 | SYS-F-207 | 時刻索引 | `serial/data_store.rs::record_timestamp` / `get_timestamp_for_offset`、`serial/ui_notifier.rs` | `UT`: `test_record_timestamp_basic`, `test_record_timestamp_skip_duplicate`, `test_record_timestamp_with_data`, `test_get_timestamp_for_offset_empty`, `test_get_timestamp_for_offset_exact_match`, `test_get_timestamp_for_offset_binary_search`, `test_get_timestamp_for_offset_before_first`, `test_clear_timestamps` |
 | SYS-F-208 | 行索引 | `serial/worker_thread.rs::record_line_offsets`、`serial/data_store.rs::get_line_offsets` | `UT`: `test_record_line_offsets_basic`, `_with_global_offset`, `_no_duplicates`, `_empty`, `_no_newlines`, `_consecutive_newlines`, `_ignores_cr`, `_crlf`, `test_get_line_offsets`, `test_get_line_offsets_out_of_range`, `test_get_line_offsets_last_line`, `test_get_line_offsets_partial_count`, `test_total_lines_initial`, `test_clear_lines` |
@@ -166,8 +174,8 @@
 | SYS-F-521 | Y 軸の即時拡大 | `LineChart.tsx::setXWindow` 内ヒステリシス | `E2E`（目視: スパイク時の即拡大）/ 詳細な数値検証は GAP-22 参照 |
 | SYS-F-522 | Y 軸の縮小ヒステリシス（60% / 3 秒） | `LineChart.tsx::setXWindow` 内ヒステリシス | `E2E`（実機で毎フレーム再スケールの消失を確認）/ タイミングの単体検証は GAP-22 参照 |
 | SYS-F-523 | Y 軸端の 1-2-5 量子化 | `LineChart.tsx`（nice-range 計算） | `E2E`（-20〜120 等の量子化レンジを実機確認） |
-| SYS-F-524 | 非表示チャンネルを Y レンジに含めない | `src/components/plotter/LineChart.tsx::calculateYRange`（hidden を除外） | `E2E`（凡例クリックで Y 再スケール）／ **GAP-22**（単体テストなし） |
-| SYS-F-525 | min/max バンドを Y レンジに含める | （未修正） | **GAP-04** |
+| SYS-F-524 | 非表示チャンネルを Y レンジに含めない | `src/components/plotter/LineChart.tsx::calculateYRange`（hidden を除外。テストのため export 済） | `FE`: `src/test/calculateYRange.test.ts`（`ignores the band of a hidden channel`, `returns the empty sentinel range when nothing is visible`）/ `E2E`（凡例クリックで Y 再スケール） — **GAP-22 の `calculateYRange` 分は解消（2026-09-03）** |
+| SYS-F-525 | min/max バンドを Y レンジに含める | `src/components/plotter/LineChart.tsx::calculateYRange`（表示中チャンネルのバンド min/max を畳み込む） | `FE`: `src/test/calculateYRange.test.ts`（10 件。`extends the range when the band is wider than the values`, `keeps the value range when the band is narrower`, `only folds in band samples inside the x window`, `ignores null entries inside the band arrays` ほか） — **GAP-04 解消（2026-09-03）** |
 
 ### 2.6 プロッタ表示状態 (SYS-F-6xx)
 
@@ -219,9 +227,22 @@
 | SYS-F-902 | X 閉じでバックエンドが後始末 (INV-5) | `lib.rs::run` の `on_window_event`（`Destroyed` / label=plotter） | `E2E`（X 閉じでスレッド停止・収集停止をログ確認）／ **GAP-25** |
 | SYS-F-903 | メイン閉で全終了 (INV-6) | `lib.rs::run` の `on_window_event`（`Destroyed` / label=main） | `E2E`（exit 0、vite ポート 1420 解放を確認）／ **GAP-25** |
 | SYS-F-904 | 切断後も閲覧・エクスポート可 | `serial/mod.rs::close_port`（ストアを保持） | `INSP` / **GAP-14** |
-| SYS-F-905 | ドッキング / フロート | （未実装） | **GAP-06** |
+| SYS-F-905 | ドッキング / フロート | （未実装。**スコープ内・実装予定**。オーナー決定 2026-09-03） | **GAP-06** |
 
-### 2.10 品質要求 (SYS-NF)
+### 2.10 AI ブリッジ / MCP (SYS-F-11xx)
+
+| SYS | 要求要約 | 実装要素 | 検証 |
+|-----|----------|----------|------|
+| SYS-F-1101 | 既定 OFF・`127.0.0.1` 限定・トークン任意 | `src-tauri/src/bridge.rs`（`BridgeServer`、`Ipv4Addr::LOCALHOST` バインド、`DEFAULT_BRIDGE_PORT = 57320`、`MAX_CONNECTIONS = 4`）、`bridge_set` / `bridge_status` コマンド、`src/components/SettingsPanel.tsx`（AI Bridge トグル） | `UT`: `test_server_binds_loopback_only`, `test_integration_connection_limit`, `test_auth_required_when_token_configured`, `test_auth_is_noop_without_token` / `FE`: `src/test/SettingsPanel.test.tsx`（`renders the bridge toggle off by default and hides the endpoint`, `has the localhost-only tooltip`, `calls bridge_set and shows the endpoint when enabled`, `calls bridge_set with enabled=false when toggled back off`, `reverts the toggle when the backend rejects the start`, `shows the port reported by the backend, not the hardcoded default`）/ `E2E`（2026-09-03） |
+| SYS-F-1102 | 読み出し API（status / tail / read_range / subscribe） | `bridge.rs`（メソッドディスパッチ、`clamp_read_length`、`MAX_READ_LENGTH = 1 MiB`、push ループ 50 ms / 1 フレーム 256 KiB） | `UT`: `test_status_without_store`, `test_status_reports_total_bytes`, `test_read_range_basic_and_clamping`, `test_read_range_bad_params_and_no_store`, `test_tail_default_and_window`, `test_tail_bad_params`, `test_clamp_read_length_caps_at_1mib`, `test_subscribe_params`, `test_integration_status_read_range_tail`, `test_integration_subscribe_pushes_new_data` / `E2E`（TCP 経由で status/tail/read_range と subscribe push を確認、2026-09-03） |
+| SYS-F-1103 | 送信 + GUI 可視化（`bridge-activity`） | `bridge.rs`（`send` メソッド、`build_send_payload`、`preview_of`、`record_send` → `bridge-activity` emit）、`SerialState.port` の `Arc` 化、`src/components/SettingsPanel.tsx`（活動表示行） | `UT`: `test_build_send_payload_line_endings`, `test_build_send_payload_base64_and_errors`, `test_preview_of_truncates_to_64_chars`, `test_record_send_updates_activity_and_emits`, `test_send_without_port_is_error`, `test_send_bad_params_before_port_check`, `test_integration_send_without_port` / `FE`: `SettingsPanel.test.tsx`（`renders connection count and last send activity from bridge_status`）/ `E2E`（COM16→COM15 へ `PING`、GUI に「送信 5 bytes HH:MM:SS」、2026-09-03。スクリーンショット取得済） |
+| SYS-F-1104 | `ports`（GUI と同一列挙） | `bridge.rs`（`ports` メソッド → `serial::list_ports`） | `UT`: `test_ports_returns_list` / `E2E`（2026-09-03） |
+| SYS-F-1105 | MCP アダプタ（プロセス外）の提供 | `mcp/server.mjs`（7 ツール）、`mcp/README.md`（`claude mcp add serial-monitor -- node .../mcp/server.mjs`）、`mcp/package.json` | `T`: `mcp/smoke.mjs`（偽ブリッジに対する結合。status ラウンドトリップ / base64 デコード / 改行付き送信 / `wait_for` のポーリング一致 / アプリ未起動時のメッセージ）/ `E2E`（MCP クライアントから実ブリッジ経由で `PING` → `PONG 42` のラウンドトリップ、2026-09-03） |
+| SYS-F-1106 | 世代変化で `reset` フレーム | `bridge.rs`（push ループの世代検知: `Arc` 差し替え or `total_bytes` の巻き戻り） | `UT`: `test_integration_subscribe_emits_reset_on_store_swap` |
+
+補助: `test_parse_request_errors`, `test_unknown_method`, `test_response_json_shapes` が protocol v1 のワイヤ形式（`{id, ok, result/error}`、parse error、未知メソッド）を契約として固定している。
+
+### 2.11 品質要求 (SYS-NF)
 
 | SYS-NF | 要求要約 | 実装要素 | 検証 |
 |--------|----------|----------|------|
@@ -257,7 +278,7 @@
 | SYS-NF-603 | チャンク分割不変性 | `plotter/parser.rs`（バイトレベル 1 パス） | `UT`: `test_parse_incomplete_line` / `PROP`: **`prop_chunking_invariance`**（任意位置・任意個の分割、UTF-8 / CRLF 途中を含む）, `prop_numeric_roundtrip` |
 | SYS-NF-604 | バッチ等価性 | `aggregator.rs::add_data_points_batch` | `UT`: `test_batch_processing_equals_individual`, `test_add_data_point`, `test_direct_data_point_addition`, `test_aggregator_clone_is_shared` ／ プロパティ化は **GAP-12**（P-7） |
 
-### 2.11 検証にのみ現れる補助テスト
+### 2.12 検証にのみ現れる補助テスト
 
 要求に直接対応しないが、契約を固定しているテスト。削除すると回帰検知が弱まる。
 
@@ -306,12 +327,12 @@
 | **GAP-01** | 検索・フィルタが未実装（UI のみ存在） | SYS-F-309 | 低 |
 | **GAP-02** | ~~固定幅スライディングウィンドウが未実装~~ **解消済（2026-09-03）**: フロント主導の明示レンジ要求＋rAF ローカルスクロール実装。UT/E2E で検証 | SYS-F-501〜504 | 解消 |
 | **GAP-03** | ~~Y 軸ヒステリシスが未実装~~ **解消済（2026-09-03）**: `LineChart.tsx::setXWindow` に実装。数値タイミングの単体検証は残（GAP-22 に統合） | SYS-F-521〜523 | 解消 |
-| **GAP-04** | min/max バンドが Y オートレンジに含まれない（既知の未修正） | SYS-F-525 | 中 |
+| **GAP-04** | ~~min/max バンドが Y オートレンジに含まれない~~ **解消済（2026-09-03）**: `LineChart.tsx::calculateYRange` が表示中チャンネルのバンド min/max を畳み込む（関数を export して単体テスト可能に）。`src/test/calculateYRange.test.ts` 10 件で検証（非表示チャンネル除外・X ウィンドウ外除外・null 混入を含む） | SYS-F-525 | 解消 |
 | **GAP-05** | ~~3 状態モデルが未実装~~ **解消済（2026-09-03）**: LIVE/Inspect/Paused 実装、FSM テスト（`PlotterViewFsm.test.tsx` 49 ペア）+ E2E で検証 | SYS-F-601〜609, SYS-NF-301 | 解消 |
-| **GAP-06** | プロッタのドッキング / フロート切替が未実装 | SYS-F-905 | 低 |
-| **GAP-07** | ホットプラグの能動検知（`WM_DEVICECHANGE` 等）が未実装。切断は read エラーでのみ検知 | SYS-F-107, DEBT-2 | 中 |
-| **GAP-08** | 切断検知後もバックエンドがポートハンドルを保持し、UI 状態と不一致（DEBT-1 / TBD-R4） | SYS-F-107 | 中 |
-| **GAP-09** | `log-error` イベント（ディスクフル等の通知）の発火経路が未実装。API 定義のみ存在 | SYS-F-205 | 中 |
+| **GAP-06** | プロッタのドッキング / フロート切替が未実装。**オーナー決定（2026-09-03）: スコープ外化を撤回し、実装予定として維持する（時期未定）**。[25 §1.3 条件 A](25_release_strategy.md#条件-a-機能未実装gap-の扱いが全件判断済であること) の暫定「スコープ外化の候補」は無効 | SYS-F-905 | 低（実装予定・時期未定） |
+| **GAP-07** | ~~ホットプラグの能動検知が未実装~~ **解消済（2026-09-03）**: `src/App.tsx` に `PORT_POLL_INTERVAL_MS = 2000` のポート一覧ポーリングを実装。切断の権威は read エラー経路のまま、ポーリングは列挙更新のみを担い、接続中に選択が黙って移動しないことをテストで固定。`FE`: `src/test/App.test.tsx`（`polls list_ports on an interval so hotplugged devices appear`, `stops polling once unmounted`） | SYS-F-107, DEBT-2 | 解消 |
+| **GAP-08** | ~~切断検知後もバックエンドがポートハンドルを保持し、UI 状態と不一致~~ **解消済（2026-09-03）**: `serial-status(connected=false)` を受けて `src/App.tsx` が `close_port` を呼び、状態を再同期（DEBT-1 / TBD-R4 決定済）。`FE`: `src/test/App.test.tsx`（`releases the backend port handle when a disconnect is detected`, `still releases the handle when the disconnect carries no error text`, `does not close the port on a connected=true status`） | SYS-F-107 | 解消 |
+| **GAP-09** | ~~`log-error` イベントの発火経路が未実装~~ **解消済（2026-09-03）**: `logger_thread.rs` に `on_error` コールバック（`Box<dyn Fn(String) + Send>`、5 秒レート制限）を追加し、`data_store.rs` が `log-error` を emit、`src/App.tsx` が利用者へ提示。`UT`: `test_process_buffer_io_error_keeps_chunks`, `test_spawn_logger_thread_notifies_error_rate_limited`, `test_spawn_logger_thread_notifies_open_failure` / `FE`: `src/test/App.test.tsx`（`surfaces log-error events to the user`） | SYS-F-205 | 解消 |
 
 ### 4.2 実装はあるが自動検証がない
 
@@ -329,12 +350,13 @@
 | **GAP-19** | ビューアの表示オプション即時反映・in-flight 再取得のキュー化に自動テストがない | SYS-F-307, 308 | 中 |
 | **GAP-20** | `SerialPort::write` の全バイト送出・タイムアウト拡張/復元に自動テストがない（実ポートが必要） | SYS-F-404, 405 | 中 |
 | **GAP-21** | 送信履歴の ↑↓ とカーソル移動の分岐、Enter 挙動切替に自動テストがない | SYS-F-406, 407 | 低 |
-| **GAP-22** | `calculateYRange`（非表示チャンネル除外）に単体テストがない | SYS-F-524 | 中 |
+| **GAP-22** | **部分解消（2026-09-03）**: ~~`calculateYRange`（非表示チャンネル除外・バンドの畳み込み）に単体テストがない~~ → `src/test/calculateYRange.test.ts` 10 件で解消。**残**: Y 軸ヒステリシス（SYS-F-521/522 の即時拡大・60% / 3 秒の縮小）のタイミングを数値で検証するテストがない（GAP-03 から統合された分） | SYS-F-521, 522, 524, 525 | 中 |
 | **GAP-23** | State Timeline プラグインの描画（DPI スケーリング、状態のみの描画）に自動テストがない | SYS-F-707, SYS-NF-304 | 中 |
 | **GAP-24** | 防御的な上限（パーサ 64 KB、state_data 10,000 件、読み出し失敗 500 回）に自動テストがない | SYS-F-711, 712, SYS-NF-204 | 低 |
 | **GAP-25** | ウィンドウライフサイクル（単一インスタンス、X 閉じ、メイン閉での全終了）に自動テストがない | SYS-F-901〜903, INV-5/6 | 中 |
 | **GAP-26** | メモリ定常性（バックエンド、チャンク上限）の自動計測がない。手動の `monitor_memory.py` のみ | SYS-NF-104, 108 | 中 |
 | **GAP-27** | Clear に確認ダイアログがない（不可逆な操作） | SYS-NF-302 | 低 |
+| **GAP-31** | AI Bridge の E2E（実アプリ + com0com + 実 MCP クライアントでの送受信ラウンドトリップ）が `test_tools/e2e/` のハーネスに入っておらず、2026-09-03 の手動実施の記録のみ。また `mcp/smoke.mjs` は**偽ブリッジ**に対する結合であり、実ブリッジとの突き合わせは自動化されていない。トークン設定 UI 自体が未提供（TBD-R7） | SYS-F-1101〜1106 | 中 |
 
 ### 4.3 テスト技法としての不足
 
@@ -350,13 +372,15 @@
 
 | 順位 | GAP | 理由 |
 |------|-----|------|
-| 1 | GAP-02, GAP-05 | ~~LIVE 表示リワークの本体~~ 解消済（2026-09-03） |
-| 2 | GAP-03 | ~~Y 軸ヒステリシス~~ 解消済（2026-09-03） |
-| 3 | GAP-14（GAP-11 は 2026-09-03 に解消） | 2026-09-03 の重大バグはすべて「状態遷移 × コマンド層」で発生した。E2E の手動実施では次の回帰を止められない。状態遷移側（GAP-11）は 0-switch / 1-switch の自動化で解消済、残るのは Tauri コマンド層（GAP-14） |
-| 4 | GAP-15 | INV-3 は 1 度壊れて表示欠落を起こしている。順序を戻す変更を検知できないのは危険 |
-| 5 | GAP-12 の残り | パーサ・集約器は整備済。残るのは `get_data` の一貫性とバッチ等価性のプロパティ化 |
+| — | GAP-02, GAP-03, GAP-04, GAP-05, GAP-07, GAP-08, GAP-09, GAP-11, GAP-28, GAP-30 | **解消済**（GAP-02/03/05/11/28/30 は 2026-09-03 前半、GAP-04/07/08/09 は 2026-09-03 の AI Bridge 回） |
+| 1 | GAP-14 | 2026-09-03 の重大バグはすべて「状態遷移 × コマンド層」で発生した。E2E の手動実施では次の回帰を止められない。状態遷移側（GAP-11）は 0-switch / 1-switch の自動化で解消済、残るのは Tauri コマンド層（GAP-14） |
+| 2 | GAP-15 | INV-3 は 1 度壊れて表示欠落を起こしている。順序を戻す変更を検知できないのは危険 |
+| 3 | GAP-31 | AI Bridge は**外部プロセスへ開く唯一の口**であり、回帰が起きたときの影響がプロセス境界を越える。手動 E2E の記録だけでは次の変更を守れない |
+| 4 | GAP-12 の残り | パーサ・集約器は整備済。残るのはパーサ以外の panic 耐性（P-2 / P-6） |
+| 5 | GAP-22 の残り | Y 軸ヒステリシスのタイミング検証（`calculateYRange` 分は 2026-09-03 に解消） |
 | 6 | GAP-29 | 上記を整備した後、スイート全体の有効性を測る基線として |
-| 7 | それ以外 | 被害が限定的、または実装自体が未着手 |
+| 7 | GAP-01, GAP-06 | 機能そのものが未着手（検索/フィルタは v0.2、ドッキングは時期未定・スコープ内） |
+| 8 | それ以外 | 被害が限定的 |
 
 ---
 

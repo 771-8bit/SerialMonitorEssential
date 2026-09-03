@@ -8,7 +8,7 @@ use std::sync::{
     Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, info};
 
@@ -20,6 +20,20 @@ use log::{debug, error, info};
 // 1MB or 100 chunks buffered before flush
 const BUFFER_THRESHOLD: usize = 1024 * 1024;
 const CHUNK_COUNT_THRESHOLD: usize = 100;
+
+/// ディスク書き込みエラー通知の最小間隔（SYS-F-205 / GAP-09）
+///
+/// ディスクフルのような恒久的な失敗はループの毎周（50ms）で再発するため、
+/// 素通しにすると 20 通知/秒になる。UI 側は alert を出すので必ず絞る。
+const ERROR_NOTIFY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// ディスク書き込みエラーの通知先。
+///
+/// Tauri の `AppHandle` を直接持たずクロージャにしているのは、
+/// (1) このモジュールを tauri 非依存に保ち、
+/// (2) テストが AppHandle を構築せずに記録用クロージャを渡せるようにするため。
+/// 実体は data_store.rs が `log-error` イベントを emit するクロージャを渡す。
+pub type ErrorNotifier = Box<dyn Fn(String) + Send>;
 
 #[derive(Debug, Clone)]
 pub struct PageMetadata {
@@ -34,9 +48,24 @@ pub fn spawn_logger_thread(
     archived_index: Arc<RwLock<Vec<PageMetadata>>>,
     temp_dir: PathBuf,
     stop_flag: Arc<AtomicBool>,
+    on_error: ErrorNotifier,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         info!("[Logger] Thread started");
+        // 直近の通知時刻。None = まだ一度も通知していない。
+        let mut last_error_notify: Option<Instant> = None;
+        let mut notify_error = move |message: String| {
+            let now = Instant::now();
+            let due = match last_error_notify {
+                None => true,
+                Some(prev) => now.duration_since(prev) >= ERROR_NOTIFY_INTERVAL,
+            };
+            if due {
+                last_error_notify = Some(now);
+                on_error(message);
+            }
+        };
+
         let temp_file_path = temp_dir.join("data.bin");
         debug!("[Logger] Temp file path: {:?}", temp_file_path);
         let mut file = match OpenOptions::new()
@@ -50,6 +79,9 @@ pub fn spawn_logger_thread(
             }
             Err(e) => {
                 error!("[Logger] Failed to create temp file: {:?}", e);
+                // ここで return するとログは一切書かれない（受信データは
+                // finished_list に留まり続ける）。利用者に必ず知らせる。
+                notify_error(format!("一時ファイルを作成できません: {e}"));
                 return;
             }
         };
@@ -81,6 +113,10 @@ pub fn spawn_logger_thread(
                 }
                 Err(e) => {
                     error!("[Logger] Failed to process buffer: {:?}", e);
+                    // 書き込めなかったチャンクは finished_list に残る（データは
+                    // 失われない）が、黙って再試行し続けると利用者はディスク
+                    // フルに気付けない。SYS-F-205 / GAP-09。
+                    notify_error(format!("{e}"));
                 }
             }
 
@@ -401,6 +437,7 @@ mod tests {
             archived_index.clone(),
             temp_dir.clone(),
             stop_flag.clone(),
+            Box::new(|_msg: String| {}),
         );
 
         // Add some data
@@ -429,5 +466,172 @@ mod tests {
         // Cleanup
         std::fs::remove_file(&file_path).ok();
         std::fs::remove_dir(&temp_dir).ok();
+    }
+
+    // ================================================================
+    // ディスク書き込み失敗時の挙動（SYS-F-205 / GAP-09）
+    //
+    // 不変条件は 2 つ:
+    //   1. 書き込めなかったチャンクは finished_list に残る（データを失わない）
+    //   2. 利用者に通知が届く。ただしレート制限され、恒久的な失敗でも
+    //      通知が洪水にならない
+    // ================================================================
+
+    /// I/O エラー時にチャンクが finished_list に残る（データ欠損なし）
+    ///
+    /// 読み取り専用で開いたファイルハンドルへ書こうとして `write_all` を
+    /// 失敗させる（Windows / Unix いずれもエラーになる）。
+    #[test]
+    fn test_process_buffer_io_error_keeps_chunks() {
+        let finished_list = Arc::new(RwLock::new(VecDeque::new()));
+        let archived_index = Arc::new(RwLock::new(Vec::new()));
+
+        let temp_dir = std::env::temp_dir().join("serial_monitor_test_io_error");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("readonly.bin");
+        std::fs::File::create(&file_path).unwrap(); // 空ファイルを作る
+
+        // 読み取り専用ハンドル: write_all は必ず失敗する
+        let mut file = OpenOptions::new().read(true).open(&file_path).unwrap();
+
+        {
+            let mut list = finished_list.write().unwrap();
+            list.push_back(Arc::new(create_test_chunk(100, 0xCC)));
+        }
+
+        let result = process_buffer(
+            &finished_list,
+            &archived_index,
+            Some(&mut file),
+            &file_path,
+            true, // force flush
+        );
+
+        assert!(result.is_err(), "write to a read-only file must fail");
+        // データは失われない
+        assert_eq!(finished_list.read().unwrap().len(), 1);
+        // 書けていないものを index に公開してはいけない
+        assert!(archived_index.read().unwrap().is_empty());
+
+        drop(file);
+        std::fs::remove_file(&file_path).ok();
+        std::fs::remove_dir(&temp_dir).ok();
+    }
+
+    /// 恒久的な書き込み失敗で通知コールバックが呼ばれ、かつレート制限される
+    ///
+    /// `archived_index` の RwLock を意図的に poison させると、`process_buffer`
+    /// は毎周（50ms ごと）失敗し続ける = ディスクフルの再現。
+    /// 通知は ERROR_NOTIFY_INTERVAL（5 秒）に 1 回だけであること、
+    /// チャンクが finished_list に残ることを確認する。
+    #[test]
+    fn test_spawn_logger_thread_notifies_error_rate_limited() {
+        let finished_list = Arc::new(RwLock::new(VecDeque::new()));
+        let archived_index: Arc<RwLock<Vec<PageMetadata>>> = Arc::new(RwLock::new(Vec::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // archived_index を poison する（ロック保持中のスレッドを panic させる）
+        {
+            let poisoner = archived_index.clone();
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {})); // 意図的な panic の出力を抑制
+            let _ = thread::spawn(move || {
+                let _guard = poisoner.write().unwrap();
+                panic!("intentional: poison archived_index for the error path test");
+            })
+            .join();
+            std::panic::set_hook(prev_hook);
+        }
+        assert!(archived_index.is_poisoned());
+
+        let temp_dir = std::env::temp_dir().join("serial_monitor_test_log_error");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::remove_file(temp_dir.join("data.bin")).ok();
+
+        // フラッシュ条件（CHUNK_COUNT_THRESHOLD）を満たすだけのチャンクを積む
+        {
+            let mut list = finished_list.write().unwrap();
+            for _ in 0..CHUNK_COUNT_THRESHOLD {
+                list.push_back(Arc::new(create_test_chunk(16, 0xDD)));
+            }
+        }
+
+        let errors: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = errors.clone();
+
+        let handle = spawn_logger_thread(
+            finished_list.clone(),
+            archived_index.clone(),
+            temp_dir.clone(),
+            stop_flag.clone(),
+            Box::new(move |message: String| {
+                recorder.lock().unwrap().push(message);
+            }),
+        );
+
+        // 50ms 周期のループを何周かさせる（= 失敗が複数回起きる）
+        thread::sleep(Duration::from_millis(300));
+        stop_flag.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        let recorded = errors.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "persistent failures must be rate-limited to one notification, got: {recorded:?}"
+        );
+        assert!(!recorded[0].is_empty(), "the payload must carry a message");
+
+        // データは失われない: すべてのチャンクが finished_list に残っている
+        assert_eq!(
+            finished_list.read().unwrap().len(),
+            CHUNK_COUNT_THRESHOLD,
+            "chunks must stay in finished_list when the write fails"
+        );
+
+        std::fs::remove_file(temp_dir.join("data.bin")).ok();
+        std::fs::remove_dir(&temp_dir).ok();
+    }
+
+    /// 一時ファイルを開けない場合も通知される（スレッドは即 return する）
+    #[test]
+    fn test_spawn_logger_thread_notifies_open_failure() {
+        let finished_list = Arc::new(RwLock::new(VecDeque::new()));
+        let archived_index = Arc::new(RwLock::new(Vec::new()));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // temp_dir をファイルとして作る -> temp_dir/data.bin は開けない
+        let base = std::env::temp_dir().join("serial_monitor_test_open_fail");
+        std::fs::create_dir_all(&base).unwrap();
+        let fake_dir = base.join("not_a_directory");
+        std::fs::write(&fake_dir, b"x").unwrap();
+
+        {
+            let mut list = finished_list.write().unwrap();
+            list.push_back(Arc::new(create_test_chunk(32, 0xEE)));
+        }
+
+        let errors: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = errors.clone();
+
+        let handle = spawn_logger_thread(
+            finished_list.clone(),
+            archived_index.clone(),
+            fake_dir.clone(),
+            stop_flag.clone(),
+            Box::new(move |message: String| {
+                recorder.lock().unwrap().push(message);
+            }),
+        );
+        handle.join().unwrap();
+
+        assert_eq!(errors.lock().unwrap().len(), 1);
+        // 何も書けていないのでチャンクは残ったまま
+        assert_eq!(finished_list.read().unwrap().len(), 1);
+
+        std::fs::remove_file(&fake_dir).ok();
+        std::fs::remove_dir(&base).ok();
     }
 }

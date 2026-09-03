@@ -1,0 +1,20 @@
+{
+  "name": "serial-monitor-essential-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP stdio server that lets AI agents read and write the serial session owned by the SerialMonitorEssential GUI app, through its local AI Bridge (TCP 127.0.0.1:57320).",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.5.4"
+  }
+}

@@ -3596,12 +3596,14 @@ dependencies = [
 name = "serial-monitor-essential"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "crossbeam",
  "env_logger",
  "log",
  "proptest",
  "serde",
+ "serde_json",
  "serialport",
  "sysinfo",
  "tauri",

@@ -73,6 +73,18 @@
   border-bottom: none;
 }
 
+/* AI Bridge row: endpoint + activity hint */
+.bridge-endpoint {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+  color: #8cf;
+}
+
+.bridge-hint {
+  font-size: 12px;
+  color: #888;
+}
+
 /* Edit option in dropdown */
 .baud-dropdown-edit {
   padding: 4px 8px;

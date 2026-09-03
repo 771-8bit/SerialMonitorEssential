@@ -100,6 +100,13 @@ impl SerialPort {
         })
     }
 
+    /// Device path this port was opened with (e.g. "COM7", "/dev/ttyUSB0")
+    ///
+    /// Used by the AI bridge `status` method to report which port the app holds.
+    pub fn name(&self) -> &str {
+        &self.port_name
+    }
+
     /// Read data from the serial port
     ///
     /// Returns the number of bytes read. Returns 0 on timeout (no data available).

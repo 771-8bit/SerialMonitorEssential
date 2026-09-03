@@ -1,4 +1,5 @@
 // SerialMonitorEssential - Main library entry point
+mod bridge;
 mod plotter;
 mod serial;
 #[cfg(test)]
@@ -59,13 +60,15 @@ pub fn run() {
             }
         })
         .manage(SerialState {
-            port: Mutex::new(None),
+            port: std::sync::Arc::new(Mutex::new(None)),
             data_store: std::sync::Arc::new(Mutex::new(None)),
         })
         .manage(PlotterState {
             aggregator: PlotterAggregator::new(),
             thread: Mutex::new(None),
         })
+        // AI ブリッジ: 既定 OFF。ここでは状態を登録するだけで自動起動はしない。
+        .manage(bridge::BridgeState::new())
         .invoke_handler(tauri::generate_handler![
             serial::list_ports,
             serial::open_port,
@@ -86,7 +89,9 @@ pub fn run() {
             set_plotter_enabled,
             set_aggregation_mode,
             start_plotter_thread,
-            stop_plotter_thread
+            stop_plotter_thread,
+            bridge::bridge_status,
+            bridge::bridge_set
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

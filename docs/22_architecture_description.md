@@ -52,6 +52,7 @@ flowchart TB
         FS["ユーザーのファイルシステム<br/>エクスポート先"]
         TMP["OS 一時ディレクトリ<br/>%TEMP%"]
         CLIP["クリップボード"]
+        AI["AI エージェント<br/>Claude Code 等<br/>MCP クライアント"]
     end
 
     subgraph sys["SerialMonitorEssential"]
@@ -65,6 +66,7 @@ flowchart TB
     APP -->|"バイナリログ書き出し"| FS
     APP <-->|"チャンクの退避 / 読み戻し"| TMP
     APP -->|"Hex / ASCII テキスト"| CLIP
+    AI <-->|"NDJSON over TCP<br/>127.0.0.1:57320（既定 OFF）"| APP
 ```
 
 ### 外部インターフェース
@@ -75,6 +77,7 @@ flowchart TB
 | OS 一時ディレクトリ | 双方向 | `%TEMP%/SerialMonitorEssential/<PID>/<instance>/data.bin` |
 | ファイルシステム | 出力 | エクスポートされたバイナリログ |
 | クリップボード | 出力 | Hex 文字列 / ASCII 文字列 |
+| AI エージェント（別プロセス） | 双方向 | AI Bridge プロトコル v1（NDJSON / TCP、`127.0.0.1` 限定・既定 OFF）。仕様の正は `src-tauri/src/bridge.rs` のモジュールヘッダ（SYS-F-1101〜1106 / ADR-12） |
 
 ---
 
@@ -114,6 +117,12 @@ flowchart TB
             PRS["PlotterParser"]
             AGG["PlotterAggregator"]
         end
+        BRG["AI Bridge<br/>bridge.rs<br/>127.0.0.1:57320 / NDJSON<br/>既定 OFF"]
+    end
+
+    subgraph extproc["プロセス外（同一 PC）"]
+        MCP["MCP アダプタ<br/>mcp/server.mjs<br/>stdio"]
+        AGENT["AI エージェント"]
     end
 
     APP_C --- SET
@@ -142,6 +151,13 @@ flowchart TB
     PTH --> PRS
     PRS --> PTH
     PTH -->|"add_data_points_batch"| AGG
+
+    CMD -->|"bridge_set / bridge_status"| BRG
+    BRG -->|"get_data / total_bytes（読み出し）"| STORE
+    BRG -->|"write（送信）"| PORT
+    BRG -.->|"bridge-activity イベント"| IPC
+    AGENT <-->|"MCP / stdio"| MCP
+    MCP <-->|"NDJSON / TCP loopback"| BRG
 ```
 
 ### 3.1 責務表
@@ -161,6 +177,8 @@ flowchart TB
 | **C-PLOTW** | プロッタウィンドウ | `src/components/plotter/PlotterWindow.tsx` | 表示状態（LIVE/Inspect/Paused）の管理、更新ループ、凡例 | データの解釈・間引き（ADR-08） |
 | **C-CHART** | LineChart / uPlot | `src/components/plotter/LineChart.tsx` | 座標変換と描画、ズーム/パンの入力処理、Y レンジ計算 | データ取得 |
 | **C-STL** | State Timeline プラグイン | `src/components/plotter/stateTimelinePlugin.ts` | 状態バーの Canvas 矩形描画、DPI スケーリング | 時間軸の管理（uPlot に委ねる） |
+| **C-BRIDGE** | AI Bridge | `src-tauri/src/bridge.rs` | `127.0.0.1` 限定の NDJSON/TCP 待ち受け（既定 OFF）、プロトコル v1 の解釈、キャプチャのオフセット読み出しと push 配信、アプリ経由の送信と `bridge-activity` の emit、接続数制限（4）とトークン検証 | シリアルデータの意味解釈、MCP プロトコル、ポートの所有（`Arc` ハンドル経由で借りるだけ） |
+| **C-MCP** | MCP アダプタ（**プロセス外**） | `mcp/server.mjs`（Node.js。アプリのバンドルに含めない） | ブリッジ protocol v1 を MCP の 7 ツール（`serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` / `serial_send` / `serial_send_hex` / `serial_wait_for`）へ変換、AI 向けの整形（テキスト/hex 判定、待ち受けポーリング）、未起動時の対処メッセージ | 状態の保持、ポートのオープン、ファイル I/O |
 
 ### 3.2 スレッド構成
 
@@ -170,6 +188,8 @@ flowchart TB
 | Logger | 同上 | 50 ms、または閾値（1 MB / 100 チャンク）到達時 | 同上 |
 | UiNotifier | 同上 | 16 ms | 同上 |
 | PlotterThread | プロッタウィンドウの生存期間 | 10 ms（ストア不在時 50 ms） | `start_plotter_thread` |
+| Bridge listener | ブリッジ有効化 (`bridge_set(true)`) から無効化 / アプリ終了まで | `accept` を 100 ms タイムアウトで回し、停止フラグを確認 | `bridge_set` |
+| Bridge connection | 1 接続の生存期間（最大 4 本同時） | 要求駆動。`subscribe` 後は 50 ms 間隔で `total_bytes` を監視して push（1 フレーム最大 256 KiB） | Bridge listener（接続ごとに 1 本） |
 
 ---
 
@@ -392,8 +412,8 @@ stateDiagram-v2
 
 | ID | 内容 | 影響 |
 |----|------|------|
-| **DEBT-1** | SM-1 の `Disconnected`: Worker が致命的エラーで終了しても `SerialState.port` はハンドルを保持したまま。UI は「切断」表示だが、バックエンドから見ると `Open` のまま | 切断後の `write_data` の挙動が未定義（TBD-R4） |
-| **DEBT-2** | ホットプラグの能動検知（`WM_DEVICECHANGE`）が未実装。切断は read エラーでしか分からない | 読み出しが発生しない状況（送信専用など）では切断に気づかない |
+| ~~**DEBT-1**~~ | ~~Worker が致命的エラーで終了しても `SerialState.port` はハンドルを保持したまま~~ **解消済（2026-09-03）**: フロントエンドが `serial-status(connected=false)` を受けて `close_port` を呼び、SM-1 を `Disconnected` へ揃える（TBD-R4 決定済 / GAP-08） | — |
+| ~~**DEBT-2**~~ | ~~ホットプラグの能動検知が未実装~~ **解消済（2026-09-03）**: 2 秒間隔のポート一覧ポーリングを実装（GAP-07）。ただし**切断の権威は read エラー経路のまま**であり、ポーリングは列挙の更新のみを担う | 読み出しが発生しない状況（送信専用など）で切断に気づくまでの遅延は残る。列挙からの消失を切断とみなす設計は、一覧の一時的な欠落で誤って切断する副作用があるため採らなかった |
 | **DEBT-3** | 一時停止中の手動スクロールとアンカー再計算が競合し得る（100 ms スロットル分のラグ） | Inspect 実装時に併せて解消予定 |
 | **DEBT-4** | ストアの Detach→Attach が PlotterThread の 1 ポーリング（10 ms）以内に起きると、スレッドが中間の None を観測するかどうかで「初回アタッチ（データ保持）」か「世代交代（クリア）」かが変わり、観測的に非決定的。UI 操作では到達不能な速さだが、状態遷移テスト（`state_transition_tests.rs`）のオラクルはこの非決定性を前提に書かれている | 決定的にするなら SharedDataStore に世代カウンタを持たせ、Arc の同一性でなく世代番号で判定する |
 | **DEBT-5** | `get_data` は要求範囲の途中に欠落があると読める前半すら返さない（全体 Err）。PlotterThread はこの場合スキップアヘッドで**読めたはずのデータごと**失う。特性化テスト `test_partial_read_when_gap_ahead` が現状挙動として固定済み（望ましい挙動ではないと明記）。プロダクションでは INV-13 により欠落は発生しないため実害は低い | 改善案: `get_data` に「読めた分まで返す」部分読み出しモードを追加し、PlotterThread はページ単位でスキップする |
@@ -679,6 +699,16 @@ sequenceDiagram
 | **採用理由** | チャンク方式なら受信スレッドは所有権を移すだけで、コピーもロック待ちも発生しない。`Arc` にすることで、**UI が読み出し中のチャンクは参照カウントで自動的に保護**される。(b) は「UI が参照中かどうか」を別途追跡する必要があり、`Arc` の利点を捨てる。(a) は UI の読み出しと書き込みの排他が必要。(c) では UI が Logger より先にデータを読めない |
 | **帰結** | 定常状態では、Logger が追従している限りメモリ上のチャンクは数 MB で安定する。プールは初期 100 個（6.4 MB）で、枯渇時は新規確保する（ディスク I/O が遅れた分の吸収代）。返却しないため、プールは実質「起動直後の割り当てコストを前倒しする」役割になる |
 
+### ADR-12: AI ポートを「アプリ内マルチプレクサ + 外付け MCP アダプタ」の 2 層にする
+
+| 項目 | 内容 |
+|------|------|
+| **決定** | 外部 AI エージェントへの窓口を 2 層に分ける。**Layer 1**: アプリ内に `127.0.0.1` 限定の NDJSON/TCP サーバ（`bridge.rs`、既定 OFF、既定ポート 57320、protocol v1）を置き、キャプチャの読み出し（`status` / `tail` / `read_range` / `subscribe`）と、アプリ経由の送信（`send`）、ポート列挙（`ports`）を提供する。**Layer 2**: MCP そのものはアプリに入れず、`mcp/server.mjs` という**別プロセスの stdio アダプタ**が Layer 1 を MCP ツールへ変換する |
+| **背景** | COM ポートは OS レベルで排他オープンであり（[20 AS-3](20_user_needs.md)）、アプリが動いている間は AI エージェントが同じポートを開けない。一方 `DataStore` は既に「オフセット指定の読み出し」を提供しており（SYS-F-203）、**読み手が誰であるかに依存しない**。つまり、アプリをマルチプレクサにする材料は揃っていて、足りないのは外部プロセスからの入口だけだった |
+| **検討した代替案** | (a) アプリ内に MCP サーバを直接実装する。(b) 受信データを外部から読めるファイルへ tap する。(c) AI 側で第 2 プロセスとしてポートを開かせる。(d) HTTP + SSE や WebSocket にする |
+| **採用理由** | (c) は**物理的に不可能**（排他オープン。これが本機能の存在理由そのもの）。(b) は外部ツールが内部のチャンク形式・索引に結合し、内部を変えるたびに壊れる。加えて送信ができない。(a) は Rust 側に MCP SDK 相当の実装と、仕様追従の保守を抱え込む（MCP は動きの速い外部仕様であり、CO-2「1 人で維持できる量」に反する）。(d) は依存（HTTP サーバ・TLS・フレーミング）が NDJSON より重く、得るものが「行を読む」以上にない。**2 層に割ると、変化の速い MCP 仕様は Node の薄いアダプタに閉じ、アプリ本体は「行指向の小さなプロトコル」だけを保守すればよくなる。** アダプタが別プロセスなので、アプリのテストは `AppHandle` なしでプロトコル全体を駆動できる（`bridge.rs` 内 27 テスト、うち実ソケットの結合テストを含む） |
+| **帰結** | **セキュリティが本機能の主リスクになる**ため、3 点を構造として固定する: (1) バインドは `Ipv4Addr::LOCALHOST` のみ、(2) 既定 OFF で、設定画面の明示操作以外から起動しない、(3) **送信は必ず `bridge-activity` イベントを emit し、GUI に出す**（人間に見えない送信経路を作らない = UN-24 の条件）。副次的に、`SerialState.port` を `Arc` 化してブリッジと GUI が同じハンドルを共有する必要が生じた。`subscribe` はストア世代の変化を `reset` フレームで外部へ伝える（SM-2 の外部への露出。SYS-F-1106）。MCP アダプタはリリース資産に含めず、リポジトリの `mcp/` から取得する（[25 §5.8](25_release_strategy.md)） |
+
 ---
 
 ## 9. 品質特性の実現手段（対応表）
@@ -702,6 +732,7 @@ sequenceDiagram
 | RISK-1 | ディスク書き込み速度が受信速度を下回ると `free_pool` が枯渇し、チャンクの新規確保が続いてメモリが増える | 高速受信 + 低速ディスクで破綻 | 初期プールで数十 ms 分を吸収。長期的には受信速度の監視と警告 |
 | RISK-2 | LIVE と Inspect で間引きアルゴリズムが異なるため、状態遷移の前後で見た目が変わる | 利用者の混乱 | 遷移時に「同じデータの別表現」であることが分かる程度に留める。TBD-R2 |
 | RISK-3 | ADR-07 の時間基準（TBD-R3）が未解決のまま実装が進むと、LIVE ウィンドウが「今」を正しく表現できない | SYS-F-502/503 が満たせない | Inspect 実装前に時間基準を確定する |
+| RISK-4 | AI Bridge が有効な間、同一 PC 上の任意のプロセスがループバックに接続してキャプチャを読み、デバイスへ送信できる（トークン未設定時） | ローカルの悪意あるプロセスによる意図しない送信 | 既定 OFF・`127.0.0.1` 限定・送信の GUI 可視化で被害面と気づきやすさを抑える（ADR-12）。トークンの検証は実装済みだが**設定 UI が無い**（TBD-R7）。多ユーザー環境や信頼できないプロセスが同居する PC では有効化しない、を運用上の前提とする |
 | DEBT-1〜3 | §5.9 参照 | | |
 
 ---
