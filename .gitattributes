@@ -1,0 +1,18 @@
+# 改行コードの正規化: テキストはリポジトリ・チェックアウトとも常に LF。
+#
+# 根拠: CI の Windows ランナーは core.autocrlf=true のため、指定がないと
+# チェックアウトが CRLF になり、prettier（endOfLine: "lf" 既定)が
+# 「全ファイル違反」で落ちる（2026-09-03 の CI 初回失敗の原因）。
+* text=auto eol=lf
+
+# バイナリ
+*.png binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.msi binary
+*.dmg binary
+*.AppImage binary
+*.woff binary
+*.woff2 binary

@@ -36,13 +36,21 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # 公式プリビルトを取得する。`cargo install cargo-about` は 0.9 系で
+      # `--features cli` を付けないとバイナリを生成しないまま exit 0 になり、
+      # 後段の generate が "no such command: about" で落ちる（2026-09-03 に発生）。
+      # プリビルト取得ならこの罠がなく、2 分のコンパイルも不要。
       - name: Install cargo-about
-        run: cargo install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
 
+      # package-lock.json 基準でインストールする（決定的）。
+      # 旧手順は lock を削除して新規解決していたため、上流が新版を出すたびに
+      # 生成物が変わり、コミット済みファイルと恒常的に不一致になる欠陥があった。
+      # ライセンス検査の対象は「実際に配布する版」= lock の内容であるべき。
       - name: Install npm dependencies
-        run: |
-          rm -rf node_modules package-lock.json
-          npm install
+        run: npm ci
 
       - name: Generate npm license file
         run: npx license-checker --production --markdown --excludePrivatePackages > docs/THIRD_PARTY_NPM_GENERATED.md

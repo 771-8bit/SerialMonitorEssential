@@ -8,7 +8,12 @@
 [iri-string@0.7.9](https://github.com/lo48576/iri-string) - Apache License 2.0
 [static_assertions@1.1.0](https://github.com/nvzqz/static-assertions-rs) - Apache License 2.0
 [utf8_iter@1.0.4](https://github.com/hsivonen/utf8_iter) - Apache License 2.0
+[linux-raw-sys@0.11.0](https://github.com/sunfishcode/linux-raw-sys) - Apache License 2.0
+[rustix@1.1.2](https://github.com/bytecodealliance/rustix) - Apache License 2.0
 [target-lexicon@0.12.16](https://github.com/bytecodealliance/target-lexicon) - Apache License 2.0
+[wasi@0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi) - Apache License 2.0
+[wasi@0.9.0+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi) - Apache License 2.0
+[wit-bindgen@0.46.0](https://github.com/bytecodealliance/wit-bindgen) - Apache License 2.0
 [windows-collections@0.2.0](https://github.com/microsoft/windows-rs) - Apache License 2.0
 [windows-core@0.57.0](https://github.com/microsoft/windows-rs) - Apache License 2.0
 [windows-core@0.61.2](https://github.com/microsoft/windows-rs) - Apache License 2.0
@@ -64,6 +69,7 @@
 [zerocopy@0.8.31](https://github.com/google/zerocopy) - Apache License 2.0
 [serialize-to-javascript-impl@0.1.2](https://github.com/chippers/serialize-to-javascript) - Apache License 2.0
 [serialize-to-javascript@0.1.2](https://github.com/chippers/serialize-to-javascript) - Apache License 2.0
+[unarray@0.1.4](https://github.com/cameron1024/unarray) - Apache License 2.0
 [ntapi@0.4.2](https://github.com/MSxDOS/ntapi) - Apache License 2.0
 [ipnet@2.11.0](https://github.com/krisprice/ipnet) - Apache License 2.0
 [swift-rs@1.0.7](https://github.com/Brendonovich/swift-rs) - Apache License 2.0
@@ -85,6 +91,7 @@
 [is_terminal_polyfill@1.70.2](https://github.com/polyfill-rs/is_terminal_polyfill) - Apache License 2.0
 [jni-sys@0.3.0](https://github.com/sfackler/rust-jni-sys) - Apache License 2.0
 [once_cell_polyfill@1.70.2](https://github.com/polyfill-rs/once_cell_polyfill) - Apache License 2.0
+[quick-error@1.2.3](http://github.com/tailhook/quick-error) - Apache License 2.0
 [serde_spanned@0.6.9](https://github.com/toml-rs/toml) - Apache License 2.0
 [serde_spanned@1.0.4](https://github.com/toml-rs/toml) - Apache License 2.0
 [toml@0.8.2](https://github.com/toml-rs/toml) - Apache License 2.0
@@ -193,6 +200,7 @@
 [png@0.17.16](https://github.com/image-rs/image-png) - Apache License 2.0
 [polling@3.11.0](https://github.com/smol-rs/polling) - Apache License 2.0
 [proc-macro-hack@0.5.20+deprecated](https://github.com/dtolnay/proc-macro-hack) - Apache License 2.0
+[proptest@1.11.0](https://github.com/proptest-rs/proptest) - Apache License 2.0
 [rayon-core@1.13.0](https://github.com/rayon-rs/rayon) - Apache License 2.0
 [rayon@1.11.0](https://github.com/rayon-rs/rayon) - Apache License 2.0
 [regex-automata@0.4.13](https://github.com/rust-lang/regex) - Apache License 2.0
@@ -200,6 +208,7 @@
 [regex@1.12.2](https://github.com/rust-lang/regex) - Apache License 2.0
 [rustc_version@0.4.1](https://github.com/djc/rustc-version-rs) - Apache License 2.0
 [rustix@1.1.2](https://github.com/bytecodealliance/rustix) - Apache License 2.0
+[rusty-fork@0.3.1](https://github.com/altsysrq/rusty-fork) - Apache License 2.0
 [scopeguard@1.2.0](https://github.com/bluss/scopeguard) - Apache License 2.0
 [serde_with@3.16.1](https://github.com/jonasbb/serde_with/) - Apache License 2.0
 [serde_with_macros@3.16.1](https://github.com/jonasbb/serde_with/) - Apache License 2.0
@@ -219,6 +228,7 @@
 [url@2.5.7](https://github.com/servo/rust-url) - Apache License 2.0
 [uuid@1.19.0](https://github.com/uuid-rs/uuid) - Apache License 2.0
 [version_check@0.9.5](https://github.com/SergioBenitez/version_check) - Apache License 2.0
+[wait-timeout@0.2.1](https://github.com/alexcrichton/wait-timeout) - Apache License 2.0
 [wasi@0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi) - Apache License 2.0
 [wasi@0.9.0+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi) - Apache License 2.0
 [wasm-bindgen-futures@0.4.56](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures) - Apache License 2.0
@@ -230,6 +240,8 @@
 [window-vibrancy@0.6.0](https://github.com/tauri-apps/tauri-plugin-vibrancy) - Apache License 2.0
 [wit-bindgen@0.46.0](https://github.com/bytecodealliance/wit-bindgen) - Apache License 2.0
 [wry@0.53.5](https://github.com/tauri-apps/wry) - Apache License 2.0
+[bit-set@0.8.0](https://github.com/contain-rs/bit-set) - Apache License 2.0
+[bit-vec@0.8.0](https://github.com/contain-rs/bit-vec) - Apache License 2.0
 [cfg-expr@0.15.8](https://github.com/EmbarkStudios/cfg-expr) - Apache License 2.0
 [block-buffer@0.10.4](https://github.com/RustCrypto/utils) - Apache License 2.0
 [cpufeatures@0.2.17](https://github.com/RustCrypto/utils) - Apache License 2.0
@@ -237,6 +249,7 @@
 [digest@0.10.7](https://github.com/RustCrypto/traits) - Apache License 2.0
 [sha2@0.10.9](https://github.com/RustCrypto/hashes) - Apache License 2.0
 [rand_core@0.6.4](https://github.com/rust-random/rand) - Apache License 2.0
+[rand_core@0.9.3](https://github.com/rust-random/rand) - Apache License 2.0
 [getrandom@0.1.16](https://github.com/rust-random/getrandom) - Apache License 2.0
 [getrandom@0.2.16](https://github.com/rust-random/getrandom) - Apache License 2.0
 [getrandom@0.3.4](https://github.com/rust-random/getrandom) - Apache License 2.0
@@ -307,6 +320,9 @@
 [quote@1.0.40](https://github.com/dtolnay/quote) - Apache License 2.0
 [r-efi@5.3.0](https://github.com/r-efi/r-efi) - Apache License 2.0
 [rand@0.8.5](https://github.com/rust-random/rand) - Apache License 2.0
+[rand@0.9.2](https://github.com/rust-random/rand) - Apache License 2.0
+[rand_chacha@0.9.0](https://github.com/rust-random/rand) - Apache License 2.0
+[rand_xorshift@0.4.0](https://github.com/rust-random/rngs) - Apache License 2.0
 [raw-window-handle@0.6.2](https://github.com/rust-windowing/raw-window-handle) - Apache License 2.0
 [rustversion@1.0.22](https://github.com/dtolnay/rustversion) - Apache License 2.0
 [ryu@1.0.21](https://github.com/dtolnay/ryu) - Apache License 2.0
@@ -361,6 +377,8 @@
 [alloc-stdlib@0.2.2](https://github.com/dropbox/rust-alloc-no-stdlib) - BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 [brotli@8.0.2](https://github.com/dropbox/rust-brotli) - BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 [uds_windows@1.1.0](https://github.com/haraldh/rust_uds_windows) - MIT License
+[cfg_aliases@0.2.1](https://github.com/katharostech/cfg_aliases) - MIT License
+[schemars_derive@0.8.22](https://github.com/GREsau/schemars) - MIT License
 [brotli@8.0.2](https://github.com/dropbox/rust-brotli) - MIT License
 [mio@1.1.1](https://github.com/tokio-rs/mio) - MIT License
 [matches@0.1.10](https://github.com/SimonSapin/rust-std-candidates) - MIT License
@@ -411,7 +429,7 @@
 [unescaper@0.1.8](https://github.com/hack-ink/unescaper) - MIT License
 [is-docker@0.2.0](https://github.com/TheLarkInn/is-docker) - MIT License
 [is-wsl@0.4.0](https://github.com/TheLarkInn/is-wsl) - MIT License
-[tauri-appserial-monitor-essential@0.1.0](https://crates.io/crates/tauri-appserial-monitor-essential) - MIT License
+[serial-monitor-essential@0.1.0](https://crates.io/crates/serial-monitor-essential) - MIT License
 [block2@0.6.2](https://github.com/madsmtm/objc2) - MIT License
 [brotli-decompressor@5.0.0](https://github.com/dropbox/rust-brotli-decompressor) - MIT License
 [convert_case@0.4.0](https://github.com/rutrum/convert-case) - MIT License
@@ -470,6 +488,7 @@
 [soup3-sys@0.5.0](https://gitlab.gnome.org/World/Rust/soup3-rs) - MIT License
 [soup3@0.5.0](https://gitlab.gnome.org/World/Rust/soup3-rs) - MIT License
 [javascriptcore-rs@1.1.2](https://github.com/tauri-apps/javascriptcore-rs) - MIT License
+[tracing-core@0.1.36](https://github.com/tokio-rs/tracing) - MIT License
 [phf@0.11.3](https://github.com/rust-phf/rust-phf) - MIT License
 [phf_codegen@0.11.3](https://github.com/rust-phf/rust-phf) - MIT License
 [phf_generator@0.11.3](https://github.com/rust-phf/rust-phf) - MIT License
