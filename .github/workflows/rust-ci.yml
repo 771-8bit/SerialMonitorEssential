@@ -1,15 +1,13 @@
-name: Rust Backend CI
+name: Rust Backend CI (portability observation)
 
+# 役割: 3 OS マトリクスでの移植性の定点観測（SYS-NF-501）。
+# Tier 1 の必須ゲートは ci.yml（Windows 単一ジョブ）に統合済み — docs/25 §3.2。
+# 旧トリガは main ブランチ前提で PR には発火していなかったため、
+# 手動 + 週次スケジュールに変更（2026-09-03）。
 on:
-  push:
-    branches: [ main, dev ]
-    paths:
-      - 'src-tauri/**'
-      - '.github/workflows/rust-ci.yml'
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'src-tauri/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1' # 毎週月曜 03:00 UTC
 
 env:
   CARGO_TERM_COLOR: always

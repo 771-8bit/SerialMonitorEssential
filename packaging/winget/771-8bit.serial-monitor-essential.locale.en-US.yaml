@@ -1,0 +1,39 @@
+# テンプレート。<VERSION> を置換して使う。
+# 手順と前提は同ディレクトリの README.md を参照。
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: 771-8bit.serial-monitor-essential
+PackageVersion: <VERSION>
+PackageLocale: en-US
+
+Publisher: 771-8bit
+PublisherUrl: https://github.com/771-8bit
+PublisherSupportUrl: https://github.com/771-8bit/SerialMonitorEssential/issues
+
+PackageName: serial-monitor-essential
+PackageUrl: https://github.com/771-8bit/SerialMonitorEssential
+Moniker: serial-monitor-essential
+
+License: MIT
+LicenseUrl: https://github.com/771-8bit/SerialMonitorEssential/blob/master/LICENSE
+Copyright: Copyright (c) 2022 771-8bit
+
+ShortDescription: Fast serial monitor and plotter for embedded development
+Description: >-
+  A serial monitor for embedded development that keeps up at high baud rates without
+  dropping bytes or freezing the UI. Received data is spilled to disk so memory stays
+  flat during long captures, and the built-in plotter charts numeric channels in real
+  time with min/max bands preserved through downsampling.
+
+Tags:
+  - serial
+  - serial-monitor
+  - serial-plotter
+  - uart
+  - com-port
+  - embedded
+
+ReleaseNotesUrl: https://github.com/771-8bit/SerialMonitorEssential/releases/tag/v<VERSION>
+
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

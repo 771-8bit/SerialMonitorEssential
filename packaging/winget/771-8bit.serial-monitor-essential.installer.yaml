@@ -1,0 +1,40 @@
+# テンプレート。<VERSION> / <SHA256> / <PRODUCT_CODE> を置換して使う。
+# 手順と前提は同ディレクトリの README.md を参照。
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: 771-8bit.serial-monitor-essential
+PackageVersion: <VERSION>
+
+# Tauri の NSIS バンドルはユーザー単位インストーラ（管理者権限不要）。
+# MSI（per-machine）も Release には添付するが、winget には NSIS のみを登録する。
+# 理由は README.md 「なぜ NSIS だけか」を参照。
+InstallerType: nullsoft
+Scope: user
+UpgradeBehavior: install
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+
+# WebView2 ランタイムを要求するため Windows 10 1809 (10.0.17763.0) 以上。
+MinimumOSVersion: 10.0.17763.0
+
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/771-8bit/SerialMonitorEssential/releases/download/v<VERSION>/serial-monitor-essential_<VERSION>_x64-setup.exe
+    # gh release download 後に Get-FileHash -Algorithm SHA256 で算出した値（大文字 64 桁）。
+    InstallerSha256: <SHA256>
+    AppsAndFeaturesEntries:
+      # winget が「インストール済みか / 更新が要るか」を判定する照合キー。
+      # DisplayName は tauri.conf.json の productName、Publisher は bundle.publisher と一致させること。
+      - DisplayName: serial-monitor-essential
+        Publisher: 771-8bit
+        DisplayVersion: <VERSION>
+        # NSIS のアンインストールキー名。初回リリースの実バイナリをインストールし、
+        # HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\ 配下の実キー名を
+        # 確認してから記入する（README.md 「ProductCode の確認」）。未確認のまま提出しない。
+        ProductCode: <PRODUCT_CODE>
+        InstallerType: nullsoft
+
+ManifestType: installer
+ManifestVersion: 1.6.0

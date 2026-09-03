@@ -1,24 +1,13 @@
-name: Frontend CI
+name: Frontend CI (auxiliary checks)
 
+# 役割: 補助検査（未使用 CSS 検出など）。
+# Tier 1 の必須ゲートは ci.yml に統合済み — docs/25 §3.2。
+# 旧トリガは main ブランチ前提で PR には発火していなかったため、
+# 手動 + 週次スケジュールに変更（2026-09-03）。
 on:
-  push:
-    branches: [main, dev]
-    paths:
-      - 'src/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig.json'
-      - 'eslint.config.js'
-      - '.prettierrc'
-      - '.github/workflows/frontend-ci.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'package.json'
-      - 'tsconfig.json'
-      - 'eslint.config.js'
-      - '.prettierrc'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1' # 毎週月曜 03:00 UTC
 
 jobs:
   lint:
