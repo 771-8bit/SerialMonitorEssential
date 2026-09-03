@@ -56,6 +56,16 @@ def find_pico_ports():
         if 'RASPBERRY' in port.description.upper() or 'PICO' in port.description.upper():
             is_pico = True
             reason.append("Description contains 'RASPBERRY' or 'PICO'")
+
+        # 組み込みRust版ファームウェア (test_tools/pico_serial_tx_test) の VID:PID
+        if port.vid == 0x16C0 and port.pid == 0x27DD:
+            is_pico = True
+            reason.append("VID:PID matches (16C0:27DD - Pico TX Test firmware, Rust)")
+
+        product = (port.product or '').upper() if hasattr(port, 'product') else ''
+        if 'PICO TX TEST' in product:
+            is_pico = True
+            reason.append("Product string contains 'Pico TX Test'")
         
         if is_pico:
             print(f"  ✓ Identified as Pico: {', '.join(reason)}")
@@ -189,7 +199,7 @@ def main():
     
     if control_port:
         print(f"Control Port:  {control_port}")
-        print("  → Use with: python pico_stress_test_controller.py --port {control_port}")
+        print("  → Use with: python serial_test.py --source pico --port {control_port} --mode stress")
     else:
         print("Control Port: Not found")
     
@@ -209,7 +219,7 @@ def main():
         print()
         print("Next steps:")
         print(f"1. Open SerialMonitorEssential and select: {data_port} at 12Mbps")
-        print(f"2. Run: python pico_stress_test_controller.py --port {control_port} --duration 60")
+        print(f"2. Run: python serial_test.py --source pico --port {control_port} --mode stress --duration 60")
     elif len(pico_ports) == 1:
         print("⚠ Only one port found. Pico may be using single CDC mode.")
         print("  Please upload the dual CDC firmware (pico_serial_tx_test.ino)")

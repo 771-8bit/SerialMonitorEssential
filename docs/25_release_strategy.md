@@ -278,7 +278,7 @@ push/PR で落ちたらマージしない必須ゲートは `ci.yml` の 1 本�
 | T2-2 | ペアワイズ | `test_tools/e2e/pairwise_run.ps1` | 被覆配列の全行 PASS（プロセス生存・ログ無パニック・ウィンドウ状態・フッター） | §5.5 / §5.6 |
 | T2-3 | ミューテーション差分 | `cargo mutants --file <変更したファイル>`（出力先はリポジトリ外） | **今回の変更で新規の survived を出さない**。全ファイルの再測定はしない | §7.3 |
 | T2-4 | メモリソーク | `test_tools/monitor_memory.py` + `analyze_memory.py`、12 Mbps 60 秒 | フロント増加率 0 MB/s、バックエンド定常。**リーク 0** | §6.1 / SYS-NF-103, 104 |
-| T2-5 | 実機 Pico スモーク | `test_tools/pico_serial_tx_test` + `verify_received_data.py` | 欠落 0、プロット描画、exit 0 | §6.1 / SYS-NF-101 |
+| T2-5 | 実機 Pico データ完全性 | 組み込み Rust 版 `test_tools/pico_serial_tx_test` を Pico に書き込み、アプリで受信 → `serial_test.py --source pico` + `verify_received_data.py`（検証前にアプリを Disconnect して最終チャンクを flush） | **欠落 0・SHA-256 一致**。※RP2040 の USB Full Speed CDC は実効 ~2Mbps が上限で、真の 12Mbps 線速度はこの治具では出ない（[24 §6.5](24_vv_plan.md#65-実施状況)） | §6.1 / SYS-NF-101 |
 | T2-6 | 妥当性確認 | [20_user_needs.md §3](20_user_needs.md#3-利用シナリオ) のシナリオを実作業として通す | §8 の問いに「いいえ」が出たらニーズへ差し戻す | §8 |
 
 **T2-3 は差分のみ**である点が要点。ミューテーションは parser + thread の 103 件で 29 分かかっており

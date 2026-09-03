@@ -1,0 +1,29 @@
+[package]
+name = "pico-serial-tx-test"
+version = "0.2.5"
+edition = "2021"
+license = "MIT"
+description = "SerialMonitorEssential test firmware for Raspberry Pi Pico (dual USB-CDC TX)"
+publish = false
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
+rp2040-boot2 = "0.3"
+# control-buffer-256: 既定のコントロール転送バッファは 128 バイトで、
+# デュアル CDC の構成記述子（約 141 バイト）が収まらずエニュメレーションが
+# 「Configuration Descriptor Request Failed」で失敗する（実機で確認済み）。
+usb-device = { version = "0.3", features = ["control-buffer-256"] }
+usbd-serial = "0.2"
+embedded-hal = "1.0"
+heapless = "0.8"
+libm = "0.2"
+sha2 = { version = "0.10", default-features = false }
+
+[profile.release]
+codegen-units = 1
+debug = 2
+lto = true
+opt-level = 3

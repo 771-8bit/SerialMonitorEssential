@@ -73,7 +73,16 @@ def run_pico_test(args) -> int:
 
     print(f"Total bytes sent: {result.total_bytes:,}")
     print(f"SHA256 checksum:  {result.checksum}")
-    
+
+    # 0 バイト送信は「空同士でチェックサム一致」という偽合格になるため明示的に
+    # 失敗させる（ファームはデータポートの DTR が立っていないと送信しない:
+    # アプリがデータポートを DtrEnable ON で開いているか確認）
+    if result.total_bytes == 0:
+        print()
+        print("FAIL: Pico reported 0 bytes sent.")
+        print("      Is the app connected to the DATA port with DtrEnable ON?")
+        return 1
+
     # ストレステストモードの場合、実効データレートを計算
     if args.mode == 'stress' and result.duration > 0:
         effective_bps = result.total_bytes * 8 / result.duration

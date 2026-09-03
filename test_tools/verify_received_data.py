@@ -43,21 +43,25 @@ def find_serial_monitor_temp_dir():
             pass
     
     # 最新のPIDディレクトリを探す（実行中のプロセスを優先）
+    # 現行アプリは <pid>/<インスタンス番号>/data.bin（ポート再オープンごとに
+    # インスタンスが増える）。旧レイアウト <pid>/data.bin も後方互換で探す。
     valid_dirs = []
     for pid_dir in pid_dirs:
         if not pid_dir.is_dir():
             continue
-        
+
         try:
             pid = int(pid_dir.name)
-            data_file = pid_dir / 'data.bin'
-            
+        except ValueError:
+            continue
+
+        candidates = [pid_dir / 'data.bin']  # 旧レイアウト
+        candidates += sorted(pid_dir.glob('*/data.bin'))  # 現行: インスタンス別
+        for data_file in candidates:
             if data_file.exists():
                 is_running = pid in running_pids
                 mtime = data_file.stat().st_mtime
                 valid_dirs.append((pid_dir, pid, is_running, mtime, data_file))
-        except ValueError:
-            continue
     
     if len(valid_dirs) == 0:
         return None, "No data.bin files found in any PID directory"
