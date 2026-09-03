@@ -18,7 +18,7 @@ Existing tools each do part of this well, but none of them did all of it, so I b
 
 ![Serial plotter](docs/images/plotter.png)
 
-## Features
+## ✨ Features
 
 ### Monitor
 
@@ -52,7 +52,7 @@ Supported platforms: **Windows 10/11 (x64)** and **Ubuntu 22.04+ (x64)**.
 macOS is build-tested in CI only; no binaries are published
 (see [docs/20_user_needs.md](docs/20_user_needs.md), Japanese).
 
-## Installation
+## 📦 Installation
 
 ### Windows
 
@@ -92,7 +92,7 @@ sudo usermod -aG dialout $USER   # then log out and back in
 Known limitations: performance acceptance (12 Mbps zero-loss, memory soak) and the E2E suite
 currently run on Windows only; Wayland/HiDPI rendering is untested.
 
-## Using the plotter
+## 📈 Using the plotter
 
 1. Select a port and click **Connect**.
 2. Click **Plotter** to open the plotter window.
@@ -106,7 +106,7 @@ temp,humidity,state                    # send a header row first to name the col
 
 Numeric values go to the line chart; non-numeric values go to the state timeline.
 
-## AI integration (MCP)
+## 🤖 AI integration (MCP)
 
 COM ports are exclusive: while the app has a port open, no other process can open it.
 Instead of competing for the port, the app exposes a local bridge, so an AI agent
@@ -155,7 +155,7 @@ protocol spec. Details in [docs/04_api.md](docs/04_api.md) (Japanese).
 > Agent sends are always visible in the GUI — there is no invisible TX path by design
 > (ADR-12 in [docs/22_architecture_description.md](docs/22_architecture_description.md), Japanese).
 
-## Development
+## 🛠️ Development
 
 Prerequisites: Node.js 22+, stable Rust.
 
@@ -181,6 +181,6 @@ Recommended IDE setup: [VS Code](https://code.visualstudio.com/) +
 [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) +
 [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
-## License
+## 📄 License
 
 [MIT](LICENSE)
