@@ -1,15 +1,17 @@
 # Serial Monitor Essential
 
 高速シリアル通信（12 Mbps 級）に対応したシリアルモニタ + リアルタイムプロッタです。
+さらに **AI 連携（MCP）** を内蔵: あなたが GUI で波形を眺めている横で、Claude などの
+AI エージェントが**同じシリアルポート**を読み書きしてデバッグを手伝えます。
 既存のツールにはそれぞれ良さがありますが、欲しい機能が揃ったものが見つからなかったので自作しています
 （旧 C# 版から Tauri / Rust で作り直したものです）。
 
-| | 再接続 | 送信機能 | データレート | プロッタ |
-| ---- | ---- | ---- | ---- | ---- |
-| Arduino IDE | × | ○ | ○ | ○ |
-| Tera Term | ○ | × | ○ | × |
-| Serial Monitor (VS Code 拡張) | ○ | ○ | × | × |
-| **Serial Monitor Essential** | **○** | **○** | **○（12 Mbps 級）** | **○（波形＋状態）** |
+| | 再接続 | 送信機能 | データレート | プロッタ | AI 連携 |
+| ---- | ---- | ---- | ---- | ---- | ---- |
+| Arduino IDE | × | ○ | ○ | ○ | × |
+| Tera Term | ○ | × | ○ | × | × |
+| Serial Monitor (VS Code 拡張) | ○ | ○ | × | × | × |
+| **Serial Monitor Essential** | **○** | **○** | **○（12 Mbps 級）** | **○（波形＋状態）** | **○（MCP）** |
 
 ![メインウィンドウ](docs/images/main-window.png)
 
@@ -30,6 +32,12 @@
 - **ステートタイムライン**: `motor:ON` のような離散状態を色付きバーで数値波形と同じ時間軸に表示
 - **LIVE / Inspect / Paused**: ズームすると自動で検査モードへ。過去に遡って拡大でき、`▶ LIVE` で追従に復帰
 - **データ形式**: Arduino 互換。CSV（`25.5,60,RUNNING`）/ ラベル付き（`temp:25.5,state:RUNNING`）/ ヘッダー行
+
+### AI 連携（MCP）
+- **AI が同じポートを読み書き**: COM ポートは排他だが、アプリがマルチプレクサになるので奪い合いが起きない
+- **送信 → 応答待ちを 1 ツールで**: `serial_wait_for`（正規表現マッチ）でプロトコルの対話デバッグが AI に頼める
+- **人間に常時可視**: AI が送信した内容は必ず GUI に表示される（見えない送信経路は作らない設計）
+- **安全側デフォルト**: 127.0.0.1 のみ・既定 OFF（詳細は下の「AI 連携 (MCP)」節）
 
 対応 OS: **Windows 10/11 (x64)**・**Ubuntu 22.04+ (x64)**（正式サポート。macOS は配布なし、詳細は
 [docs/20_user_needs.md §8.1](docs/20_user_needs.md)）。
@@ -91,7 +99,8 @@ temp,humidity,state                    # 先頭にヘッダー行を送ると列
 COM ポートは排他デバイスなので、アプリが開いている間は他のプロセスが同じポートを開けません。
 そこで**アプリ自身をマルチプレクサ**にしました。あなたが GUI で波形とログを眺めている横で、
 Claude Code などの AI エージェントが**同じシリアルセッション**を読み、同じポートへコマンドを送れます。
-「`AT+VER` を送って応答を読んで」「今のログから異常行を探して」を、ポートの奪い合いなしに頼めます。
+
+![AI Bridge](docs/images/ai-bridge.png)
 
 有効化は 2 ステップです。まずアプリの設定パネルで **AI Bridge** を ON にします
 （既定は OFF。ON にすると `127.0.0.1:57320` で待ち受けます）。次に MCP サーバーを登録します。
@@ -100,8 +109,20 @@ Claude Code などの AI エージェントが**同じシリアルセッショ�
 claude mcp add serial-monitor -- node "<リポジトリのパス>/mcp/server.mjs"
 ```
 
-提供されるツールは `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` /
-`serial_send` / `serial_send_hex` / `serial_wait_for` の 7 つです。
+あとは普通に頼むだけです:
+
+```text
+あなた : ボードに AT+GMR を送って、ファームのバージョンを教えて
+Claude : serial_send("AT+GMR") → serial_wait_for("OK|ERROR")
+         → 応答 "AT version:2.1.0.0 ... OK"。バージョンは 2.1.0.0 です
+あなた : 直近のログに CRC エラーっぽい行がないか見て
+Claude : serial_read_tail(16384) → "CRC mismatch" が 3 行あります（offset 12034〜）…
+```
+
+送信のたびに GUI の AI Bridge 行へ「送信 N bytes・時刻・内容プレビュー」が出るので、
+AI が何をしたかは常に手元で追えます。
+提供ツールは `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` /
+`serial_send` / `serial_send_hex` / `serial_wait_for` の 7 つ。
 セットアップ手順・環境変数・ツールの詳細は [`mcp/README.md`](mcp/README.md) を参照してください。
 
 > **セキュリティ**: 待ち受けは **`127.0.0.1` のみ**で外部ネットワークからは接続できません。
