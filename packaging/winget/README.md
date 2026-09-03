@@ -1,45 +1,46 @@
-# winget マニフェスト（テンプレート）
+# winget manifests (templates)
 
-このディレクトリのファイルは **winget-pkgs へ提出するマニフェストの雛形**である。
-そのままでは提出できない。`<VERSION>` / `<SHA256>` / `<PRODUCT_CODE>` を
-リリースごとに置換して（＝レンダリングして）使う。
+The files in this directory are **templates for the manifests submitted to winget-pkgs**.
+They cannot be submitted as-is. Replace (i.e. render) `<VERSION>` / `<SHA256>` /
+`<PRODUCT_CODE>` for each release before use.
 
-> **提出の前提（オーナー規約）**
-> winget-pkgs への提出は、**本リポジトリでのリリース公開 + リリース済みバイナリでの動作確認 + オーナーの明示的な許可**の後に限る。
-> 自動提出は行わない。[.github/workflows/winget-publish.yml](../../.github/workflows/winget-publish.yml) は
-> `workflow_dispatch` 専用であり、確認フレーズの入力なしには実行できない。
+> **Submission preconditions (owner policy)**
+> Submitting to winget-pkgs is allowed only **after a release has been published in this repository, the released binaries have been verified to work, and the owner has given explicit approval**.
+> There is no automatic submission. [.github/workflows/winget-publish.yml](../../.github/workflows/winget-publish.yml) is
+> `workflow_dispatch` only and cannot run without entering the confirmation phrase.
 
-## ファイル
+## Files
 
-winget-pkgs は**新規パッケージに singleton マニフェストを許可しない**。
-version / installer / defaultLocale の 3 点セットが必須である。
+winget-pkgs **does not allow singleton manifests for new packages**.
+The three-file set of version / installer / defaultLocale is required.
 
-| ファイル | ManifestType | 内容 |
+| File | ManifestType | Contents |
 |----------|--------------|------|
-| `771-8bit.serial-monitor-essential.yaml` | `version` | パッケージ ID とバージョン、既定ロケールの宣言のみ |
-| `771-8bit.serial-monitor-essential.installer.yaml` | `installer` | インストーラ種別（nullsoft / user スコープ）、URL、SHA-256、更新照合キー |
-| `771-8bit.serial-monitor-essential.locale.en-US.yaml` | `defaultLocale` | 表示名、説明、ライセンス、各種 URL |
+| `771-8bit.serial-monitor-essential.yaml` | `version` | Package ID and version, plus the default-locale declaration only |
+| `771-8bit.serial-monitor-essential.installer.yaml` | `installer` | Installer type (nullsoft / user scope), URL, SHA-256, update matching keys |
+| `771-8bit.serial-monitor-essential.locale.en-US.yaml` | `defaultLocale` | Display name, description, license, various URLs |
 
-3 ファイルの `PackageIdentifier` と `PackageVersion` は**必ず一致させる**。ずれると検証で落ちる。
-スキーマは 1.6.0。提出先の winget-pkgs 側で要求バージョンが上がっていたら、
-3 ファイルの `ManifestVersion` を揃えて上げる。
+`PackageIdentifier` and `PackageVersion` **must match across all three files**; a mismatch fails validation.
+The schema version is 1.6.0. If winget-pkgs has raised the required version by the time you
+submit, bump `ManifestVersion` in all three files together.
 
-winget-pkgs 上の配置先は `manifests/7/771-8bit/serial-monitor-essential/<VERSION>/` になる
-（`PackageIdentifier` からパスが決まる）。
+The location in winget-pkgs is `manifests/7/771-8bit/serial-monitor-essential/<VERSION>/`
+(the path is derived from `PackageIdentifier`).
 
-### 置換する値
+### Values to replace
 
-| プレースホルダ | 取得方法 |
+| Placeholder | How to obtain |
 |----------------|----------|
-| `<VERSION>` | `src-tauri/tauri.conf.json` の `version`（バージョンの単一情報源。docs/25 §1.2）。タグは `v<VERSION>` |
-| `<SHA256>` | Release から `.exe` を取得し `Get-FileHash -Algorithm SHA256 <file>`。**ビルド直後のローカル成果物ではなく、公開済み Release アセットから算出する**（アップロードで壊れていないことの確認を兼ねる） |
-| `<PRODUCT_CODE>` | 下記「ProductCode の確認」 |
+| `<VERSION>` | `version` in `src-tauri/tauri.conf.json` (the single source of truth for the version; docs/25 §1.2). The tag is `v<VERSION>` |
+| `<SHA256>` | Download the `.exe` from the Release and run `Get-FileHash -Algorithm SHA256 <file>`. **Compute it from the published Release asset, not from a freshly built local artifact** (this doubles as a check that the upload was not corrupted) |
+| `<PRODUCT_CODE>` | See "Determining the ProductCode" below |
 
-### ProductCode の確認
+### Determining the ProductCode
 
-Tauri の NSIS インストーラはアンインストール情報を **HKCU**（ユーザー単位）に書く。
-winget はここを見て「導入済みか / 更新が必要か」を判定するため、実測値を入れる必要がある。
-**初回リリースのバイナリを実際にインストールしてから**、次で実キー名を確認する。
+Tauri's NSIS installer writes its uninstall information to **HKCU** (per-user).
+winget looks there to decide "already installed? / update needed?", so the actual observed
+value must be used. **Install the first-release binary for real**, then look up the actual
+key name with:
 
 ```powershell
 Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
@@ -47,63 +48,73 @@ Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
     if ($p.DisplayName -eq 'serial-monitor-essential') { $_.PSChildName } }
 ```
 
-出力されたキー名を `AppsAndFeaturesEntries[].ProductCode` に入れる。
-**推測で埋めない。** 誤った ProductCode は「更新があるのに検出されない」形で静かに壊れる。
+Put the printed key name into `AppsAndFeaturesEntries[].ProductCode`.
+**Do not fill it in by guessing.** A wrong ProductCode breaks silently, in the form of
+"an update exists but is never detected".
 
-### なぜ NSIS だけか
+### Why NSIS only
 
-Release には NSIS（`.exe`, per-user）と MSI（`.msi`, per-machine）の両方を添付するが、
-winget に登録するのは NSIS のみ。理由は次の 2 点。
+The Release carries both NSIS (`.exe`, per-user) and MSI (`.msi`, per-machine) installers,
+but only NSIS is registered with winget, for two reasons:
 
-- winget の既定インストールは非管理者で走る。per-user の NSIS なら昇格を要求しない。
-- 同一パッケージに per-user と per-machine を混在させると、更新時にどちらを見て判定するかが
-  ProductCode 単位で分かれ、二重インストールの原因になる。
+- winget's default install runs without administrator rights. The per-user NSIS installer
+  requires no elevation.
+- Mixing per-user and per-machine in the same package splits update detection by
+  ProductCode, causing double installs.
 
-MSI は企業環境での配布ツール向けに Release へ残す（docs/25 §5.1）。
+The MSI stays on the Release for deployment tooling in corporate environments (docs/25 §5.1).
 
-## 公開手順
+## Publishing procedure
 
-順序を守る。**1〜3 を飛ばして 4 を実行しない。**
+Follow the order. **Do not run step 4 while skipping steps 1–3.**
 
-1. **リリースを publish する** — docs/25 §4 のチェックリストを完了し、draft Release を publish する。
-   draft のままだとアセット URL が外部から取得できず、winget の検証パイプラインが落ちる。
-2. **公開済みバイナリで動作確認する** — Release からインストーラを落とし、
-   インストール → 起動 → COM 接続 → プロッタ描画 → 終了（exit 0）を確認する（docs/25 §4 手順 8）。
-3. **オーナーの明示的な許可を得る**。
-4. **workflow_dispatch で `Winget Publish (manual, approval-gated)` を実行する** —
-   `version` に `0.1.0` 形式、`confirm` に `I-HAVE-OWNER-APPROVAL` を入力する。
+1. **Publish the release** — complete the checklist in docs/25 §4 and publish the draft
+   Release. While it remains a draft, the asset URLs cannot be fetched from outside and
+   winget's validation pipeline fails.
+2. **Verify the published binaries** — download the installer from the Release and confirm
+   install → launch → COM connection → plotter rendering → exit (exit 0) (docs/25 §4 step 8).
+3. **Obtain the owner's explicit approval.**
+4. **Run `Winget Publish (manual, approval-gated)` via workflow_dispatch** —
+   enter a version in `0.1.0` form for `version` and `I-HAVE-OWNER-APPROVAL` for `confirm`.
 
-### 初回提出は手動 PR でよい
+### The first submission can be a manual PR
 
-`wingetcreate update` は**既存パッケージの更新用**であり、初回には使えない。
-初回は次のいずれかを選ぶ。手動 PR が最も確実で、レビュー指摘にも対応しやすい。
+`wingetcreate update` is **for updating an existing package** and cannot be used for the
+first submission. For the first one, pick one of the following. A manual PR is the most
+reliable and the easiest for responding to review feedback.
 
-- **手動 PR（推奨）**: このディレクトリの 3 ファイルをレンダリングし、
-  [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) のフォークの
-  `manifests/7/771-8bit/serial-monitor-essential/<VERSION>/` に置いて PR を出す。
-  提出前にローカル検証する: `winget validate --manifest <dir>` と
-  `winget install --manifest <dir>`（後者は実際に入るので確認後アンインストールする）。
-- **`wingetcreate new`**: 対話的に生成する。生成物と本テンプレートの差分を確認してから提出する。
-- **`komac new`**: 同等。komac / wingetcreate のどちらでもよい。ワークフローは wingetcreate を使う。
+- **Manual PR (recommended)**: render the three files in this directory, place them at
+  `manifests/7/771-8bit/serial-monitor-essential/<VERSION>/` in a fork of
+  [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs), and open a PR.
+  Validate locally before submitting: `winget validate --manifest <dir>` and
+  `winget install --manifest <dir>` (the latter actually installs, so uninstall after checking).
+- **`wingetcreate new`**: generates the manifests interactively. Diff the output against
+  these templates before submitting.
+- **`komac new`**: equivalent. Either komac or wingetcreate is fine; the workflow uses
+  wingetcreate.
 
-2 回目以降は `wingetcreate update`（＝ワークフローの経路）が使える。
+From the second release on, `wingetcreate update` (i.e. the workflow path) can be used.
 
-### レビューについて
+### About review
 
-- 初回は winget-pkgs 側のレビューに**数日**かかる。自動検証（マニフェストのスキーマ、
-  URL の到達性、SHA-256 の一致、インストール試験、マルウェアスキャン）を通過したのち人手のレビューが入る。
-- **コード署名がない**ため、SmartScreen / SmartScreen 由来の警告が検証で指摘される可能性がある
-  （docs/25 §6 R-1 / TBD-RS4）。
-- `PackageIdentifier` の表記（`771-8bit` は数字始まり）について、レビューで
-  publisher 表記の変更を求められる可能性がある。求められたら 3 ファイルすべてで揃えて変更する。
+- The first submission takes **several days** of winget-pkgs review. After the automated
+  validation passes (manifest schema, URL reachability, SHA-256 match, install test,
+  malware scan), a human review follows.
+- Because there is **no code signing**, SmartScreen / SmartScreen-derived warnings may be
+  raised during validation (docs/25 §6 R-1 / TBD-RS4).
+- The `PackageIdentifier` spelling (`771-8bit` starts with a digit) may draw a review
+  request to change the publisher spelling. If asked, change it consistently across all
+  three files.
 
-## 必要なシークレット
+## Required secrets
 
-| シークレット | 用途 | 権限 |
+| Secret | Purpose | Permissions |
 |--------------|------|------|
-| `WINGET_TOKEN` | `wingetcreate` が microsoft/winget-pkgs をフォークし、ブランチを push し、PR を作るための GitHub PAT | classic PAT なら `public_repo`。fine-grained なら「すべてのパブリックリポジトリ」に対する Contents: Read and write + Pull requests: Read and write |
+| `WINGET_TOKEN` | GitHub PAT that lets `wingetcreate` fork microsoft/winget-pkgs, push a branch, and open a PR | `public_repo` for a classic PAT. For a fine-grained PAT: Contents: Read and write + Pull requests: Read and write on "All public repositories" |
 
-- リポジトリの Settings → Secrets and variables → Actions に `WINGET_TOKEN` として登録する。
-- **`GITHUB_TOKEN` は使えない**。他リポジトリ（winget-pkgs）へのフォーク・PR 作成権限がないため。
-- 未登録の場合、ワークフローは処理に入る前に明示的なメッセージで失敗する。
-- トークンの管理（有効期限、失効時の再発行）は docs/25 §6 TBD-RS7 で追跡する。
+- Register it as `WINGET_TOKEN` under the repository's Settings → Secrets and variables → Actions.
+- **`GITHUB_TOKEN` cannot be used**: it has no permission to fork or create PRs against
+  another repository (winget-pkgs).
+- If the secret is not registered, the workflow fails with an explicit message before doing
+  any work.
+- Token management (expiry, reissue on revocation) is tracked in docs/25 §6 TBD-RS7.

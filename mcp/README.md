@@ -1,63 +1,66 @@
-# SerialMonitorEssential MCP サーバー
+# SerialMonitorEssential MCP Server
 
-AI エージェント（Claude Code など）が **SerialMonitorEssential の GUI アプリが開いているシリアルセッションを、そのまま読み書きする**ための MCP (Model Context Protocol) stdio サーバーです。
+An MCP (Model Context Protocol) stdio server that lets an AI agent (such as Claude Code)
+**read and write the serial session that the SerialMonitorEssential GUI app already has open**.
 
-> **インストール済みアプリを使う場合はこのディレクトリは不要です。**
-> 同じ MCP アダプタが**アプリ本体に内蔵**されており、`serial-monitor-essential --mcp` で
-> Node.js なしに起動できます（登録コマンドはアプリの **Settings → Setup Guide** が
-> 実際の exe パス入りで表示します）。本ディレクトリの Node 実装は**開発用リファレンス**で、
-> ツールの追加・変更は Rust 版（`src-tauri/src/mcp_stdio.rs`）と同時に行います
-> （docs/22 ADR-13 / DEBT-6）。なお正規表現の方言だけ差があります
-> （Node 版 = JavaScript regex、内蔵版 = Rust regex で lookaround 非対応）。
+> **If you use the installed app, this directory is not needed.**
+> The same MCP adapter is **built into the app itself** and starts with
+> `serial-monitor-essential --mcp`, no Node.js required (the app's **Settings → Setup Guide**
+> shows the registration command with the actual exe path filled in). The Node implementation
+> in this directory is a **reference implementation for development**; tools are added or
+> changed together with the Rust version (`src-tauri/src/mcp_stdio.rs`)
+> (docs/22 ADR-13 / DEBT-6, Japanese). The only difference is the regex dialect
+> (Node version = JavaScript regex; built-in version = Rust regex, no lookaround support).
 
-## 目的
+## Purpose
 
-COM ポートは排他デバイスで、同時に開けるプロセスはひとつだけです。
-そこでこの構成では **アプリ本体がマルチプレクサ**になります。
+A COM port is an exclusive device: only one process can have it open at a time.
+In this setup, **the app itself acts as the multiplexer**.
 
 ```
-  デバイス ── COM ポート ── SerialMonitorEssential (アプリが唯一の所有者)
-                                  ├── GUI ............ 人間が見る・送る
-                                  └── AI Bridge (TCP) ── MCP サーバー ── AI エージェント
+  Device ── COM port ── SerialMonitorEssential (the app is the sole owner)
+                              ├── GUI ............ what a human watches and sends from
+                              └── AI Bridge (TCP) ── MCP server ── AI agent
 ```
 
-人間は GUI、AI は MCP。**同じ受信バッファ・同じポート**を見ているので、
-「人が眺めているログを AI にそのまま調べさせる」「AI にコマンドを打たせて人が横で確認する」
-といった作業が、ポートの奪い合いなしに成立します。
+Humans use the GUI, the AI uses MCP. Both see **the same receive buffer and the same port**,
+so workflows like "let the AI inspect the log you are watching" or "have the AI type commands
+while you verify on screen" work without fighting over the port.
 
-| レイヤ | 実体 | 役割 |
+| Layer | What it is | Role |
 | --- | --- | --- |
-| Layer 1 | アプリ内の AI Bridge | `127.0.0.1:57320` に NDJSON の TCP サーバーを立てる |
-| Layer 2 | 本ディレクトリ (`server.mjs`) | その TCP を MCP ツールに変換する stdio サーバー |
+| Layer 1 | AI Bridge inside the app | Runs an NDJSON TCP server on `127.0.0.1:57320` |
+| Layer 2 | This directory (`server.mjs`) | A stdio server that translates that TCP into MCP tools |
 
-## 前提
+## Prerequisites
 
-1. **SerialMonitorEssential を起動しておく**こと。
-2. **設定画面で「AI Bridge」を ON** にすること（既定は OFF）。
-3. Node.js **20 以上**。
-4. 依存関係のインストール:
+1. **SerialMonitorEssential must be running.**
+2. **Turn on "AI Bridge" in the settings panel** (off by default).
+3. Node.js **20 or later**.
+4. Install dependencies:
 
    ```bash
    cd mcp
    npm install
    ```
 
-アプリが起動していない／AI Bridge が OFF のときは、ツールは例外ではなく
-「アプリを起動して AI Bridge を ON にしてください」という日本語＋英語のエラーメッセージを返します。
+If the app is not running or AI Bridge is off, the tools do not throw; they return a
+bilingual (Japanese + English) error message telling you to start the app and turn on
+AI Bridge in its settings.
 
-## Claude Code への登録
+## Registering with Claude Code
 
 ```bash
 claude mcp add serial-monitor -- node "C:/Users/kazuki/Documents/SerialMonitorEssential/mcp/server.mjs"
 ```
 
-環境変数を渡す場合は `-e` を使います。
+To pass environment variables, use `-e`.
 
 ```bash
 claude mcp add serial-monitor -e SME_BRIDGE_PORT=57320 -- node "C:/Users/kazuki/Documents/SerialMonitorEssential/mcp/server.mjs"
 ```
 
-`.mcp.json` に直接書く場合:
+To write it into `.mcp.json` directly:
 
 ```json
 {
@@ -71,71 +74,75 @@ claude mcp add serial-monitor -e SME_BRIDGE_PORT=57320 -- node "C:/Users/kazuki/
 }
 ```
 
-登録後、`claude mcp list` に `serial-monitor` が出れば OK です。
+After registering, you should see `serial-monitor` in `claude mcp list`.
 
-## 環境変数
+## Environment variables
 
-| 変数 | 既定値 | 説明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `SME_BRIDGE_HOST` | `127.0.0.1` | AI Bridge のホスト。ループバック以外は非推奨。 |
-| `SME_BRIDGE_PORT` | `57320` | AI Bridge のポート。アプリ側の設定と合わせる。 |
-| `SME_BRIDGE_TOKEN` | (なし) | アプリ側でトークンを設定した場合のみ。接続直後に `auth` を自動送信します。 |
+| `SME_BRIDGE_HOST` | `127.0.0.1` | AI Bridge host. Anything other than loopback is not recommended. |
+| `SME_BRIDGE_PORT` | `57320` | AI Bridge port. Must match the setting in the app. |
+| `SME_BRIDGE_TOKEN` | (none) | Only needed if a token is configured on the app side. `auth` is sent automatically right after connecting. |
 
-## ツール一覧
+## Tools
 
-| ツール | 引数 | 返すもの |
+| Tool | Arguments | Returns |
 | --- | --- | --- |
-| `serial_status` | なし | 接続状態・ポート名・受信バイト数・アプリバージョン（要約＋生 JSON） |
-| `serial_ports` | なし | PC が認識しているシリアルポートの一覧 |
-| `serial_read_tail` | `bytes?` (既定 4096 / 最大 1048576) | 直近の受信データ。テキストならそのまま、バイナリらしければ 16 バイト/行の hex ダンプ。offset と total_bytes 付き |
-| `serial_read_range` | `offset`, `length` (最大 1048576) | 指定範囲の受信データ。表示ルールは `serial_read_tail` と同じ |
-| `serial_send` | `text`, `line_ending?` (`none`/`cr`/`lf`/`crlf`、既定 `lf`) | 書き込んだバイト数。**送信内容は GUI にも表示されます** |
-| `serial_send_hex` | `hex` (例 `"01 03 00 00 00 0A"`) | 16進ペアを検証して生バイトを送信。改行は付きません |
-| `serial_wait_for` | `pattern`, `timeout_ms?` (既定 10000), `from_end?` (既定 true) | **本命機能。** 呼び出し後に届いた新規データを 500ms 間隔でポーリングし、正規表現に一致したら該当箇所と offset を返す。タイムアウト時は直近 256 バイトを表示 |
+| `serial_status` | none | Connection state, port name, received byte count, app version (summary + raw JSON) |
+| `serial_ports` | none | List of serial ports the PC recognizes |
+| `serial_read_tail` | `bytes?` (default 4096 / max 1048576) | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes |
+| `serial_read_range` | `offset`, `length` (max 1048576) | Received data in the given range. Same display rules as `serial_read_tail` |
+| `serial_send` | `text`, `line_ending?` (`none`/`cr`/`lf`/`crlf`, default `lf`) | Number of bytes written. **The send is also shown in the GUI** |
+| `serial_send_hex` | `hex` (e.g. `"01 03 00 00 00 0A"`) | Validates the hex pairs and sends the raw bytes. No line ending is appended |
+| `serial_wait_for` | `pattern`, `timeout_ms?` (default 10000), `from_end?` (default true) | **The headline feature.** Polls the data that arrives after the call every 500 ms and, on a regex match, returns the matching portion and its offset. On timeout, shows the last 256 bytes |
 
-補足:
+Notes:
 
-- `serial_wait_for` の `pattern` は JavaScript の正規表現ソース（`m` フラグ付きで評価）。
-- この Node 版では `serial_wait_for` が返す `offset` は lossy UTF-8 変換に基づくため、
-  マッチ前に不正 UTF-8 バイトが混じっていると置換分だけずれることがあります
-  （アプリ内蔵の Rust 版は生バイト基準で正確）。
-- `from_end: false` にすると、既にバッファに溜まっている直近 4096 バイトも検索対象に含めます。
-- バイナリ判定は「印字不可バイトが 10% 超」。UTF-8 として妥当な日本語ログはテキスト扱いになります。
+- `serial_wait_for`'s `pattern` is a JavaScript regular expression source (evaluated with the `m` flag).
+- In this Node version, the `offset` returned by `serial_wait_for` is based on lossy UTF-8
+  conversion, so if invalid UTF-8 bytes appear before the match, the offset can drift by the
+  amount replaced (the built-in Rust version is exact, based on raw bytes).
+- With `from_end: false`, the search also includes the most recent 4096 bytes already in the buffer.
+- Binary detection is "more than 10% non-printable bytes". Japanese logs that are valid UTF-8
+  are treated as text.
 
-## 典型的なフロー
+## Typical flow
 
 ```
-1. serial_status            → ポートが開いているか、今何バイト受信しているかを確認
-2. serial_send              → "AT+VER" などのコマンドを送る（GUI にも表示される）
-3. serial_wait_for          → "OK|ERROR" 等の応答を待つ（送信直後の新規データだけを対象）
-4. serial_read_tail         → 前後の文脈をもう少し広く読む
+1. serial_status            → check whether the port is open and how many bytes have been received
+2. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
+3. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
+4. serial_read_tail         → read a little more surrounding context
 ```
 
-エージェントへの指示例:
+Example instruction to an agent:
 
-> `serial_status` でポートを確認して、`serial_send` で `AT+VER` を送り、
-> `serial_wait_for` で `VER:.*` を 5 秒待って、返ってきたバージョンを教えて。
+> Check the port with `serial_status`, send `AT+VER` with `serial_send`,
+> wait 5 seconds for `VER:.*` with `serial_wait_for`, and tell me the version that comes back.
 
-範囲を絞って読み直したいときは、`serial_wait_for` が返した `offset` を
-`serial_read_range` にそのまま渡せます。
+When you want to re-read a narrower range, the `offset` returned by `serial_wait_for` can be
+passed straight to `serial_read_range`.
 
-## セキュリティ
+## Security
 
-- **待ち受けは `127.0.0.1` のみ。** 外部ネットワークからは接続できません。
-- **既定は OFF。** アプリの設定で明示的に AI Bridge を ON にしたときだけ動きます。
-- **送信は必ず GUI に表示されます。** AI が何を書き込んだか、人間が画面で確認できます。
-- 必要に応じて `SME_BRIDGE_TOKEN` でトークン認証を有効にできます（同一 PC 上の他プロセス対策）。
-- MCP サーバー自身はファイルを読み書きしません。標準出力は MCP プロトコル専用で、ログはすべて標準エラーに出ます。
+- **Listens on `127.0.0.1` only.** Not reachable from external networks.
+- **Off by default.** Runs only when AI Bridge is explicitly turned on in the app's settings.
+- **Every send is shown in the GUI.** A human can see on screen what the AI wrote.
+- Token authentication can be enabled with `SME_BRIDGE_TOKEN` if needed (against other
+  processes on the same PC).
+- The MCP server itself reads and writes no files. Standard output is reserved for the MCP
+  protocol; all logging goes to standard error.
 
-## 開発・動作確認
+## Development and testing
 
 ```bash
-node --check server.mjs   # 構文チェック
-node smoke.mjs            # ブリッジ側を偽装した結合テスト（PASS 行が出て exit 0）
-npm start                 # MCP サーバーを単体起動（stdin EOF で終了）
+node --check server.mjs   # syntax check
+node smoke.mjs            # integration test against a fake bridge (prints PASS lines and exits 0)
+npm start                 # run the MCP server standalone (exits on stdin EOF)
 ```
 
-`smoke.mjs` は MCP を使わず、エフェメラルポートに**ブリッジ側の偽サーバー**を立てて
-`server.mjs` のブリッジクライアント（`BridgeClient` / `waitForPattern` / レンダリング関数）を検証します。
-status のラウンドトリップ、base64 デコード、改行付き送信、`wait_for` のポーリング一致、
-アプリ未起動時の即時フェイルとメッセージ内容までカバーしています。
+`smoke.mjs` does not use MCP; it starts a **fake bridge** server on an ephemeral port and
+exercises `server.mjs`'s bridge client (`BridgeClient` / `waitForPattern` / the rendering
+functions). It covers the status round trip, base64 decoding, sends with line endings,
+`serial_wait_for`'s polling match, and the immediate failure — including the message
+content — when the app is not running.

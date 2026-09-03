@@ -144,7 +144,7 @@ so you can always see what the agent did.
 
 Available tools: `serial_status`, `serial_ports`, `serial_read_tail`, `serial_read_range`,
 `serial_send`, `serial_send_hex`, `serial_wait_for`.
-See [`mcp/README.md`](mcp/README.md) (Japanese) for setup details, environment variables,
+See [`mcp/README.md`](mcp/README.md) for setup details, environment variables,
 and the tool reference.
 
 Agents that don't speak MCP can use the bridge directly: connect to `127.0.0.1:57320`

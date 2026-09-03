@@ -1,213 +1,213 @@
 # SerialMonitorEssential Test Tools
 
-テストおよび検証ツール
+Testing and verification tools.
 
-## セットアップ (uv使用)
+## Setup (using uv)
 
-### 1. uvのインストール
+### 1. Install uv
 
 ```bash
 # Windows PowerShell
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
-### 2. 依存関係のインストール
+### 2. Install dependencies
 
 ```bash
-# プロジェクトルートで
+# in the project root
 uv sync
 ```
 
 ---
 
-## 統合テストツール (serial_test.py)
+## Integrated test tool (serial_test.py)
 
-すべてのシリアルテストを統一したCLIで実行できます。
+Runs all serial tests through a single CLI.
 
-### 基本的な使い方
+### Basic usage
 
 ```bash
 cd test_tools
 
-# Picoストレステスト（12Mbps高速データ）
+# Pico stress test (12 Mbps high-speed data)
 uv run python serial_test.py --source pico --port COM14 --mode stress --duration 60
 
-# 仮想COMストレステスト
+# Virtual COM stress test
 uv run python serial_test.py --source virtual --port COM15 --mode stress --duration 10
 
-# 仮想COM低速テスト（1行/秒）
+# Virtual COM slow test (1 line/s)
 uv run python serial_test.py --source virtual --port COM15 --mode slow --duration 30
 
-# 仮想COMプロッタテスト（10Hz CSV）
+# Virtual COM plotter test (10 Hz CSV)
 uv run python serial_test.py --source virtual --port COM15 --mode plotter --duration 10
 
-# 受信モード（SendPanelテスト用）
+# Receive mode (for SendPanel testing)
 uv run python serial_test.py --receive --port COM16 --verbose
 ```
 
-### オプション一覧
+### Options
 
-| オプション | 説明 | デフォルト |
+| Option | Description | Default |
 |-----------|------|-----------|
-| `--source pico\|virtual` | データソース選択 | - |
-| `--receive` | 受信モード（SendPanelテスト用） | - |
-| `--port` | シリアルポート | 必須 |
-| `--mode stress\|slow\|plotter` | テストモード | stress |
-| `--duration` | テスト時間（秒） | 10 |
-| `--baud` | ボーレート | 115200 |
-| `--verify` | 自動検証を実行 | false |
-| `--verbose` | 受信データをテキスト表示 | false |
+| `--source pico\|virtual` | Data source | - |
+| `--receive` | Receive mode (for SendPanel testing) | - |
+| `--port` | Serial port | required |
+| `--mode stress\|slow\|plotter` | Test mode | stress |
+| `--duration` | Test duration (seconds) | 10 |
+| `--baud` | Baud rate | 115200 |
+| `--verify` | Run automatic verification | false |
+| `--verbose` | Print received data as text | false |
 
-### テストモード
+### Test modes
 
-| モード | 説明 | データパターン |
+| Mode | Description | Data pattern |
 |--------|------|----------------|
-| `stress` | 高速バイナリ | カウンタ値 0-255 の繰り返し |
-| `slow` | 1行/秒 | `[NNNN] Hello from Virtual Port! Counter=N` |
-| `plotter` | 10Hz CSV | `time,sin,cos,random` |
+| `stress` | High-speed binary | Repeating counter values 0-255 |
+| `slow` | 1 line/s | `[NNNN] Hello from Virtual Port! Counter=N` |
+| `plotter` | 10 Hz CSV | `time,sin,cos,random` |
 
 ---
 
-## その他のツール
+## Other tools
 
-### Picoポート識別
+### Pico port identification
 
 ```bash
 uv run python identify_pico_ports.py
 ```
 
-### 受信データ検証
+### Received-data verification
 
 ```bash
 uv run python verify_received_data.py --result test_results/test_result.txt
 ```
 
-### メモリ監視・分析
+### Memory monitoring and analysis
 
 ```bash
-# メモリ監視
-uv run python monitor_memory.py --duration 60
+# memory monitoring
+uv run python monitor_memory.py --duration 3600
 
-# メモリ分析
+# memory analysis
 uv run python analyze_memory.py test_results/memory_log_*.csv
 ```
 
 ---
 
-## 仮想COMポートのセットアップ
+## Setting up virtual COM ports
 
 ### Windows (com0com)
 
-1. **ダウンロード**: [com0com Signed Driver](https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/)
+1. **Download**: [com0com Signed Driver](https://sourceforge.net/projects/com0com/files/com0com/3.0.0.0/)
 
-2. **インストール**:
+2. **Install**:
    ```powershell
-   # 管理者権限で実行
+   # run as administrator
    .\setup.exe
    ```
 
-3. **仮想ポートペア作成**:
+3. **Create a virtual port pair**:
    ```powershell
    cd "C:\Program Files (x86)\com0com"
    .\setupc.exe install PortName=COM15 PortName=COM16
    ```
 
-4. **確認**: デバイスマネージャー → ポート (COM & LPT) で確認
+4. **Verify**: check Device Manager → Ports (COM & LPT)
 
 ### Linux (socat)
 
 ```bash
-# インストール
+# install
 sudo apt-get install socat  # Ubuntu/Debian
 
-# 仮想ポートペア作成
+# create a virtual port pair
 socat -d -d pty,raw,echo=0,link=/tmp/vcom0 pty,raw,echo=0,link=/tmp/vcom1 &
 sudo chmod 666 /tmp/vcom0 /tmp/vcom1
 ```
 
 ---
 
-## モジュール構成
+## Module layout
 
 ```
 test_tools/
-├── serial_test.py           # 統合テストCLI
+├── serial_test.py           # integrated test CLI
 ├── lib/
-│   ├── data_generator.py    # テストデータ生成
-│   ├── pico_controller.py   # Pico制御
-│   ├── virtual_sender.py    # 仮想COM送信
-│   └── serial_receiver.py   # データ受信
-├── identify_pico_ports.py   # Picoポート識別
-├── verify_received_data.py  # 受信データ検証
-├── monitor_memory.py        # メモリ監視
-├── analyze_memory.py        # メモリ分析
-└── pico_serial_tx_test/     # Picoファームウェア
+│   ├── data_generator.py    # test data generation
+│   ├── pico_controller.py   # Pico control
+│   ├── virtual_sender.py    # virtual COM sending
+│   └── serial_receiver.py   # data reception
+├── identify_pico_ports.py   # Pico port identification
+├── verify_received_data.py  # received-data verification
+├── monitor_memory.py        # memory monitoring
+├── analyze_memory.py        # memory analysis
+└── pico_serial_tx_test/     # Pico firmware
 ```
 
 
 ---
 
-## 詳細な検証シナリオ
+## Detailed verification scenarios
 
-### 1. Raspberry Pi Pico セットアップ
+### 1. Raspberry Pi Pico setup
 
-#### ハードウェア要件
-- **Raspberry Pi Pico** × 1台
-- **USBケーブル** (Micro-B, データ転送対応)
+#### Hardware requirements
+- **Raspberry Pi Pico** × 1
+- **USB cable** (Micro-B, with data transfer support)
 
-#### ファームウェア書き込み
-1. **Arduino IDE** をセットアップ（`Raspberry Pi Pico/RP2040` ボードマネージャをインストール）。
-2. `test_tools/pico_serial_tx_test/pico_serial_tx_test.ino` を開く。
-3. Picoを **BOOTSELボタン** を押しながら接続。
-4. ボード `Raspberry Pi Pico` を選択し、アップロード。
-5. 書き込み後、Picoは2つのCOMポート（データ用・制御用）として認識されます。
+#### Flashing the firmware
+1. Set up the **Arduino IDE** (install the `Raspberry Pi Pico/RP2040` board manager package).
+2. Open `test_tools/pico_serial_tx_test/pico_serial_tx_test.ino`.
+3. Connect the Pico while holding the **BOOTSEL button**.
+4. Select the `Raspberry Pi Pico` board and upload.
+5. After flashing, the Pico enumerates as two COM ports (one for data, one for control).
 
-### 2. 高負荷耐久テスト (12Mbps Verification)
+### 2. High-load endurance test (12Mbps Verification)
 
-**目的:** 12Mbpsで1分間データを受信し、1バイトの欠落もないことを検証する。
+**Goal:** receive data at 12 Mbps for one minute and verify that not a single byte is lost.
 
-1. **ポート識別:**
+1. **Identify the ports:**
    ```bash
    uv run python identify_pico_ports.py
    ```
-   データポート（SerialMonitor用）と制御ポート（Controller用）を確認。
+   Note which is the data port (for SerialMonitor) and which is the control port (for the controller).
 
-2. **アプリ起動:**
-   SerialMonitorEssentialでデータポートを開く（Baudrate: 12000000）。
+2. **Start the app:**
+   Open the data port in SerialMonitorEssential (baud rate: 12000000).
 
-3. **テスト実行:**
+3. **Run the test:**
    ```bash
-   uv run python pico_stress_test_controller.py --port <Control_Port> --duration 60
+   uv run python serial_test.py --source pico --port <Control_Port> --mode stress --duration 60
    ```
 
-4. **自動検証:**
-   スクリプトが自動的に受信データ（tempディレクトリ内の `data.bin`）を探し、送信バイト数とSHA256ハッシュを比較検証します。
+4. **Automatic verification:**
+   The script automatically locates the received data (`data.bin` in the temp directory) and
+   compares the byte count and SHA256 hash against what was sent.
 
-### 3. メモリリークテスト
+### 3. Memory leak test
 
-**目的:** 長時間（1時間〜）の受信でメモリ使用量が安定していることを確認する。
+**Goal:** confirm that memory usage stays stable during long (1 hour or more) reception.
 
-1. **監視開始:**
+1. **Start monitoring:**
    ```bash
-   uv run python monitor_memory.py --duration 60
+   uv run python monitor_memory.py --duration 3600
    ```
-2. **負荷テスト開始:**
-   アプリで受信を開始し、Picoへ長時間送信指示を送る。
+2. **Start the load test:**
+   Start receiving in the app, then send the Pico a long-duration transmit command.
    ```bash
-   uv run python pico_stress_test_controller.py --port <Control_Port> --duration 3600
+   uv run python serial_test.py --source pico --port <Control_Port> --mode stress --duration 3600
    ```
-3. **分析:**
+3. **Analyze:**
    ```bash
    uv run python analyze_memory.py test_results/memory_log_*.csv
    ```
-   グラフを確認し、右肩上がりになっていないことを確認。
+   Check the graph and confirm memory usage is not trending upward.
 
-### 4. 複数インスタンス起動テスト
+### 4. Multiple-instance launch test
 
-**目的:** 複数起動時に一時ファイル（PIDフォルダ）が競合しないことを確認する。
+**Goal:** confirm that temporary files (PID folders) do not conflict when multiple instances run.
 
-1. アプリを3つ起動（開発モードではディレクトリコピーが必要な場合あり、ビルド済みバイナリならそのまま起動可）。
-2. それぞれ異なるポート（またはOpen/Close繰り返し）で動作させる。
-3. `%TEMP%\SerialMonitorEssential\` を確認し、3つのPIDフォルダが独立して存在することを確認。
-4. 1つを閉じると、該当するPIDフォルダのみが削除されることを確認。
-
+1. Launch three instances of the app (in dev mode this may require copying the directory; built binaries can be launched as-is).
+2. Run each on a different port (or with repeated Open/Close).
+3. Check `%TEMP%\SerialMonitorEssential\` and confirm that three PID folders exist independently.
+4. Close one instance and confirm that only its PID folder is deleted.

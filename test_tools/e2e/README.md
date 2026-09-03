@@ -1,106 +1,108 @@
-# E2E 自動操作ハーネス
+# E2E Automation Harness
 
-com0com 仮想 COM ペア(COM15⇔COM16)と Windows UI Automation を使った
-実機 E2E テストのスクリプト群。**このディレクトリの手順だけで、実機なしに
-全 E2E を新しいマシンで再現できる**ことを目標にする。
+Scripts for real-machine E2E testing using a com0com virtual COM pair (COM15⇔COM16)
+and Windows UI Automation. The goal is that **the instructions in this directory alone
+are enough to reproduce the full E2E suite on a fresh machine, with no physical hardware**.
 
-CI(GitHub Actions)で回せるのは GUI 不要の `mcp_stdio_smoke.py` のみ
-(`.github/workflows/ci.yml` に組み込み済み)。それ以外が CI 不可能な理由
-(com0com はカーネルモードドライバ / UIA は対話デスクトップ必須)は
-[docs/25 §3.4](../../docs/25_release_strategy.md) を参照。
+The only script that can run in CI (GitHub Actions) is `mcp_stdio_smoke.py`, which needs
+no GUI (already wired into `.github/workflows/ci.yml`). For why the rest cannot run in CI
+(com0com is a kernel-mode driver / UIA requires an interactive desktop), see
+[docs/25 §3.4](../../docs/25_release_strategy.md) (Japanese).
 
-## セットアップ(初回のみ)
+## Setup (first time only)
 
-### 1. com0com のインストール
+### 1. Install com0com
 
-1. [com0com (SourceForge)](https://sourceforge.net/projects/com0com/) から
-   インストーラを取得して実行する。
-   - Windows 10/11 (x64, Secure Boot 有効)では**署名済みドライバ**の
-     ビルド(v3.0.0.0 系)が必要。未署名版はテスト署名モードを要求される。
-2. インストール直後は既定ペア `CNCA0⇔CNCB0` が 1 組できる(これはそのままでよい)。
+1. Get the installer from [com0com (SourceForge)](https://sourceforge.net/projects/com0com/)
+   and run it.
+   - On Windows 10/11 (x64, Secure Boot enabled) you need a **signed-driver**
+     build (the v3.0.0.0 line). Unsigned builds require test-signing mode.
+2. Right after installation there is one default pair, `CNCA0⇔CNCB0` (leave it as is).
 
-### 2. COM15⇔COM16 ペアの作成(管理者権限)
+### 2. Create the COM15⇔COM16 pair (requires admin)
 
 ```powershell
 cd "C:\Program Files (x86)\com0com"
 .\setupc.exe install PortName=COM15 PortName=COM16
 ```
 
-確認(どちらでもよい):
+Verify (either way works):
 
 ```powershell
 .\setupc.exe list
-# または
+# or
 Get-ItemProperty "HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM"
 #   \Device\com0com11 : COM15
-#   \Device\com0com21 : COM16  が見えれば OK
+#   \Device\com0com21 : COM16  — if you see these, you're set
 ```
 
-別のポート番号にした場合は、各スクリプトの `-PortApp` / `--port` 引数で指定する。
+If you chose different port numbers, pass them via each script's `-PortApp` / `--port`
+arguments.
 
-### 3. Python 依存
+### 3. Python dependencies
 
 ```powershell
 pip install pyserial
 ```
 
-### 4. アプリのビルド
+### 4. Build the app
 
 ```powershell
 cd src-tauri
-cargo build --release   # E2E は release 推奨(DEV デバッグ表示が出ない)
+cargo build --release   # release is recommended for E2E (no DEV debug overlay)
 ```
 
-### 仮想ペアの制約(重要)
+### Virtual-pair limitations (important)
 
-- **ボーレート・DTR/RTS は仮想ペアでは実質 no-op**。設定 UI の反映確認には
-  使えるが、信号レベルの検証にはならない。
-- したがって **12 Mbps 等の性能受入には使えない**。性能系は実機
-  (Raspberry Pi Pico)で行う([docs/25 §2](../../docs/25_release_strategy.md)
-  「com0com のみでの合格は 1.0 の根拠にしない」)。
+- **Baud rate and DTR/RTS are effectively no-ops on the virtual pair.** They are fine for
+  checking that the settings UI applies them, but they do not verify anything at the
+  signal level.
+- Therefore the pair **cannot be used for performance acceptance such as 12 Mbps**.
+  Performance testing is done on real hardware (Raspberry Pi Pico) — see
+  [docs/25 §2](../../docs/25_release_strategy.md) (Japanese),
+  "passing on com0com alone is not evidence for 1.0".
 
-## スクリプト一覧
+## Script list
 
-| ファイル | 役割 | GUI | com0com | CI |
+| File | Role | GUI | com0com | CI |
 |---|---|---|---|---|
-| `ui.ps1` | UIA 操作の共通アクション。`-Action list / select-port / select-combo / click / toggle / click-text / wheel / close-window / shot` | 要 | - | 不可 |
-| `pairwise_gen.py` / `pairwise_gen2.py` | ペアワイズ(t=2)被覆配列の生成器(グリーディ法、決定的)。因子を変えたら再生成して `pairwise_run*.ps1` の `$rows` を更新する | - | - | 可(生成のみ) |
-| `pairwise_run.ps1` / `pairwise_run2.ps1` | 被覆配列の各行を UIA で適用し、ヘルスオラクル(プロセス生存・ログ無パニック・ウィンドウ状態)を検査 | 要 | 要 | 不可 |
-| `mcp_stdio_smoke.py` | **内蔵 MCP アダプタ(`--mcp`)のスモーク**。実パイプ越しの JSON-RPC(initialize / ping / tools / エラー系 / クリーン終了)。ブリッジ未起動を隔離ポートで決定化 | 不要 | 不要 | **組み込み済み** |
-| `pong_bot.py` | COM15 で `PING`→`PONG 42` を返す応答ボット | 不要 | 要 | 不可 |
-| `mcp_bridge_live.py` | **AI Bridge のライブ往復検証**(status / send→wait_for / read_tail / ブロック中 ping 即応答 / cancelled 中断) | 要(別途起動) | 要 | 不可 |
-| `run_bridge_e2e.ps1` | 上記 3 つを**ワンコマンドで一括実行**(起動→UIA 設定→往復検証→後片付け) | 自動起動 | 要 | 不可 |
+| `ui.ps1` | Shared UIA actions. `-Action list / select-port / select-combo / click / toggle / click-text / wheel / close-window / shot` | Required | - | No |
+| `pairwise_gen.py` / `pairwise_gen2.py` | Pairwise (t=2) covering-array generators (greedy, deterministic). When factors change, regenerate and update `$rows` in `pairwise_run*.ps1` | - | - | Yes (generation only) |
+| `pairwise_run.ps1` / `pairwise_run2.ps1` | Apply each row of the covering array via UIA and check a health oracle (process alive, no panics in the log, window state) | Required | Required | No |
+| `mcp_stdio_smoke.py` | **Smoke test for the built-in MCP adapter (`--mcp`)**. JSON-RPC over a real pipe (initialize / ping / tools / error cases / clean shutdown). Uses an isolated port to make the bridge-not-running case deterministic | Not needed | Not needed | **Wired in** |
+| `pong_bot.py` | Responder bot on COM15 that replies `PONG 42` to `PING` | Not needed | Required | No |
+| `mcp_bridge_live.py` | **Live round-trip verification of the AI Bridge** (status / send→wait_for / read_tail / prompt ping response while blocked / cancelled interruption) | Required (started separately) | Required | No |
+| `run_bridge_e2e.ps1` | **Runs the three above in one command** (launch → UIA setup → round-trip verification → cleanup) | Auto-launched | Required | No |
 
-## 使い方
+## Usage
 
 ```powershell
-# --- CI と同じスモーク(GUI 不要) ---
+# --- Same smoke test as CI (no GUI needed) ---
 python .\mcp_stdio_smoke.py
 
-# --- AI Bridge E2E 一括(GAP-31 のスクリプト化) ---
-.\run_bridge_e2e.ps1                 # release バイナリ自動検出、COM15/COM16
+# --- Full AI Bridge E2E (scripted version of GAP-31) ---
+.\run_bridge_e2e.ps1                 # auto-detects the release binary, COM15/COM16
 
-# --- 個別 UIA 操作 ---
+# --- Individual UIA actions ---
 .\ui.ps1 -Action select-combo -Path "COM|CNC" -Name "COM16"
 .\ui.ps1 -Action click -Name "Connect"
 .\ui.ps1 -Action shot -WindowTitle "Serial Plotter" -Path out.png
 
-# --- ペアワイズ一括実行 ---
-# アプリは `npm run tauri dev -- --no-watch` で起動しておく
-# (--no-watch にしないとテスト中のファイル変更でアプリが再起動する)
-.\pairwise_run.ps1 -LogPath <アプリのstdoutログファイル>
+# --- Batch pairwise run ---
+# Start the app beforehand with `npm run tauri dev -- --no-watch`
+# (without --no-watch, file changes during the test restart the app)
+.\pairwise_run.ps1 -LogPath <the app's stdout log file>
 
-# --- プロッタ用データ送出 ---
+# --- Send plotter data ---
 python ..\serial_test.py --source virtual --port COM15 --mode plot:label
 ```
 
-## 注意
+## Notes
 
-- スクリーンショット(`shot`)は対象ウィンドウを前面化する
-- `select-combo` はドロップダウン展開のためウィンドウをアクティブにする
-- ウィンドウ出現直後は React のマウント前で UIA 操作が失敗することがある
-  (`run_bridge_e2e.ps1` は数秒待ってから操作する)
-- `npm run tauri dev` をスクリプトから kill すると vite が port 1420 を
-  掴んだまま残ることがある: `Get-NetTCPConnection -LocalPort 1420` で
-  PID を引いて kill する
-- 詳細な計画・合否基準は `docs/24_vv_plan.md` §5–6 を参照
+- Screenshots (`shot`) bring the target window to the foreground
+- `select-combo` activates the window in order to expand the dropdown
+- Right after a window appears, UIA actions can fail because React has not mounted yet
+  (`run_bridge_e2e.ps1` waits a few seconds before acting)
+- Killing `npm run tauri dev` from a script can leave vite holding port 1420:
+  look up the PID with `Get-NetTCPConnection -LocalPort 1420` and kill it
+- For the detailed plan and pass/fail criteria, see `docs/24_vv_plan.md` §5–6 (Japanese)
