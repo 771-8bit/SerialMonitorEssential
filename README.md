@@ -1,162 +1,177 @@
 # Serial Monitor Essential
 
-高速シリアル通信（12 Mbps 級）に対応したシリアルモニタ + リアルタイムプロッタです。
-さらに **AI 連携（MCP）** を内蔵: あなたが GUI で波形を眺めている横で、Claude などの
-AI エージェントが**同じシリアルポート**を読み書きしてデバッグを手伝えます。
-既存のツールにはそれぞれ良さがありますが、欲しい機能が揃ったものが見つからなかったので自作しています
-（旧 C# 版から Tauri / Rust で作り直したものです）。
+A serial monitor and real-time plotter for high-speed serial communication (up to ~12 Mbps),
+with built-in MCP integration so an AI agent can read and write the same serial session you
+are watching in the GUI.
 
-| | 再接続 | 送信機能 | データレート | プロッタ | AI 連携 |
+Existing tools each do part of this well, but none of them did all of it, so I built one.
+(Rewritten in Tauri/Rust from an earlier C# version.)
+
+| | Reconnect | TX | Data rate | Plotter | AI integration |
 | ---- | ---- | ---- | ---- | ---- | ---- |
-| Arduino IDE | × | ○ | ○ | ○ | × |
-| Tera Term | ○ | × | ○ | × | × |
-| Serial Monitor (VS Code 拡張) | ○ | ○ | × | × | × |
-| **Serial Monitor Essential** | **○** | **○** | **○（12 Mbps 級）** | **○（波形＋状態）** | **○（MCP）** |
+| Arduino IDE | ✗ | ✓ | ✓ | ✓ | ✗ |
+| Tera Term | ✓ | ✗ | ✓ | ✗ | ✗ |
+| Serial Monitor (VS Code extension) | ✓ | ✓ | ✗ | ✗ | ✗ |
+| **Serial Monitor Essential** | ✓ | ✓ | ✓ (~12 Mbps) | ✓ (lines + states) | ✓ (MCP) |
 
-![メインウィンドウ](docs/images/main-window.png)
+![Main window](docs/images/main-window.png)
 
-![シリアルプロッタ](docs/images/plotter.png)
+![Serial plotter](docs/images/plotter.png)
 
-## 特徴
+## Features
 
-### モニタ
-- **12 Mbps 級の高速受信**: 受信データを取りこぼさない設計（Chunk ベースのメモリ管理＋ディスク退避）
-- **Hex / ASCII 表示**: 仮想スクロールで大量データも軽快。タイムスタンプ・折り返し・制御文字表示の切替え
-- **送信**: テキスト / HEX、改行コード選択（None/CR/LF/CRLF）、↑↓キーで送信履歴
-- **保存・コピー**: 受信データのファイル保存（バイナリ）とクリップボードコピー（Hex/ASCII）
-- **DTR / RTS 制御、再接続に強い**: ポートを開き直しても状態が壊れない
+### Monitor
 
-### プロッタ
-- **オシロのロールモード風ライブ表示**: 固定幅スライディングウィンドウ（1s〜300s）。表示が「バタバタ」しない
-  絶対時刻整列ダウンサンプリング（LTTB / Average+min-max バンド切替え）
-- **ステートタイムライン**: `motor:ON` のような離散状態を色付きバーで数値波形と同じ時間軸に表示
-- **LIVE / Inspect / Paused**: ズームすると自動で検査モードへ。過去に遡って拡大でき、`▶ LIVE` で追従に復帰
-- **データ形式**: Arduino 互換。CSV（`25.5,60,RUNNING`）/ ラベル付き（`temp:25.5,state:RUNNING`）/ ヘッダー行
+- High-speed RX up to ~12 Mbps with no data loss (chunk-based memory management with disk spill)
+- Hex / ASCII views with virtual scrolling; toggle timestamps, line wrap, and control-character rendering
+- TX as text or hex, selectable line ending (None/CR/LF/CRLF), input history on arrow keys
+- Export received data to a binary file; copy as hex or ASCII
+- DTR/RTS control; port reconnects and re-opens don't corrupt state
 
-### AI 連携（MCP）
-- **AI が同じポートを読み書き**: COM ポートは排他だが、アプリがマルチプレクサになるので奪い合いが起きない
-- **送信 → 応答待ちを 1 ツールで**: `serial_wait_for`（正規表現マッチ）でプロトコルの対話デバッグが AI に頼める
-- **人間に常時可視**: AI が送信した内容は必ず GUI に表示される（見えない送信経路は作らない設計）
-- **安全側デフォルト**: 127.0.0.1 のみ・既定 OFF（詳細は下の「AI 連携 (MCP)」節）
+### Plotter
 
-対応 OS: **Windows 10/11 (x64)**・**Ubuntu 22.04+ (x64)**（正式サポート。macOS は配布なし、詳細は
-[docs/20_user_needs.md §8.1](docs/20_user_needs.md)）。
+- Oscilloscope-style roll mode: a fixed-width sliding window (1 s – 300 s) with
+  absolute-time-aligned downsampling (LTTB, or average with min/max bands), so already-drawn
+  history does not reflow as new data arrives
+- State timeline: discrete values like `motor:ON` rendered as colored bars on the same time axis
+  as the numeric channels
+- LIVE / Inspect / Paused view states: zooming switches to Inspect automatically; pan back
+  through history and click LIVE to resume following
+- Arduino-compatible input: CSV (`25.5,60,RUNNING`), labeled (`temp:25.5,state:RUNNING`),
+  optional header row
 
-## インストール
+### AI integration (MCP)
+
+- COM ports are exclusive, so the app acts as a multiplexer: an AI agent shares the port you
+  already have open instead of competing for it
+- `serial_wait_for` covers "send a command, wait for a matching reply" in a single tool call
+- Everything the agent sends is shown in the GUI (byte count, time, content preview)
+- Off by default; listens on 127.0.0.1 only
+
+Supported platforms: **Windows 10/11 (x64)** and **Ubuntu 22.04+ (x64)**.
+macOS is build-tested in CI only; no binaries are published
+(see [docs/20_user_needs.md](docs/20_user_needs.md), Japanese).
+
+## Installation
 
 ### Windows
 
-1. [Releases](https://github.com/771-8bit/SerialMonitorEssential/releases) から
-   `serial-monitor-essential_<VERSION>_x64-setup.exe` をダウンロードして実行します
-   （管理者権限は不要、ユーザー単位でインストールされます）。
-2. 署名がないため SmartScreen の警告が出ることがあります。
-   「詳細情報」→「実行」で続行してください。ダウンロードした資産の SHA-256 はリリースノートに記載します。
+1. Download `serial-monitor-essential_<VERSION>_x64-setup.exe` from
+   [Releases](https://github.com/771-8bit/SerialMonitorEssential/releases) and run it.
+   No admin rights required (per-user install).
+2. The installer is not code-signed, so SmartScreen may warn.
+   Click "More info" → "Run anyway". SHA-256 checksums are listed in the release notes.
 
-> **旧 C# 版（Serial Monitor Essential 0.0.9 以前）をお使いの場合**
-> 本アプリは別アプリとして共存します（旧版は上書き・削除されません）。
-> 混乱を避けるため、「アプリと機能」から旧版のアンインストールを推奨します。
+> **Upgrading from the C# version (Serial Monitor Essential 0.0.9 or earlier):**
+> the two apps install side by side and the old one is not modified.
+> Uninstalling the old version from "Apps & features" is recommended to avoid confusion.
 
-winget 対応は準備中です（リリース後に `winget install 771-8bit.serial-monitor-essential` を予定）。
+winget support is planned: `winget install 771-8bit.serial-monitor-essential` after the
+first release.
 
 ### Linux (Ubuntu 22.04+)
 
-[Releases](https://github.com/771-8bit/SerialMonitorEssential/releases) から入手します。
+Download from [Releases](https://github.com/771-8bit/SerialMonitorEssential/releases).
 
 ```sh
-# .deb（推奨。webkit2gtk-4.1 などの依存は apt が解決します）
+# .deb (recommended; apt resolves webkit2gtk-4.1 and the other dependencies)
 sudo apt install ./serial-monitor-essential_<VERSION>_amd64.deb
 
-# または AppImage
+# or AppImage
 chmod +x serial-monitor-essential_<VERSION>_amd64.AppImage
 ./serial-monitor-essential_<VERSION>_amd64.AppImage
 ```
 
-**シリアルポートの権限（必須）**: `/dev/ttyUSB*` / `/dev/ttyACM*` を開くには `dialout` グループへの参加が必要です。
+Serial port permissions (required): `/dev/ttyUSB*` / `/dev/ttyACM*` belong to the
+`dialout` group.
 
 ```sh
-sudo usermod -aG dialout $USER   # 実行後、再ログイン（または再起動）
+sudo usermod -aG dialout $USER   # then log out and back in
 ```
 
-既知の制約: 性能受入（12 Mbps 欠落ゼロ・メモリソーク）と E2E は Windows でのみ実施済みで、
-Linux での実測値は TBD です。Wayland / HiDPI の表示は未検証です。
+Known limitations: performance acceptance (12 Mbps zero-loss, memory soak) and the E2E suite
+currently run on Windows only; Wayland/HiDPI rendering is untested.
 
-## 使い方（プロッタ）
+## Using the plotter
 
-1. ポートを選んで **Connect** → 受信データがモニタに流れます
-2. **Plotter** ボタンでプロッタウィンドウを開きます
-3. デバイスから次のいずれかの形式で送信すると自動でチャンネルが生えます
+1. Select a port and click **Connect**.
+2. Click **Plotter** to open the plotter window.
+3. Send data in any of these formats; channels are created automatically:
 
 ```text
-25.5,60,RUNNING                        # CSV（ch0, ch1, … 自動命名）
-temp:25.5,humidity:60,state:RUNNING    # ラベル付き
-temp,humidity,state                    # 先頭にヘッダー行を送ると列名になります
+25.5,60,RUNNING                        # CSV (auto-named ch0, ch1, ...)
+temp:25.5,humidity:60,state:RUNNING    # labeled
+temp,humidity,state                    # send a header row first to name the columns
 ```
 
-数値はラインチャート、非数値はステートタイムラインに自動で振り分けられます。
+Numeric values go to the line chart; non-numeric values go to the state timeline.
 
-## AI 連携 (MCP)
+## AI integration (MCP)
 
-COM ポートは排他デバイスなので、アプリが開いている間は他のプロセスが同じポートを開けません。
-そこで**アプリ自身をマルチプレクサ**にしました。あなたが GUI で波形とログを眺めている横で、
-Claude Code などの AI エージェントが**同じシリアルセッション**を読み、同じポートへコマンドを送れます。
+COM ports are exclusive: while the app has a port open, no other process can open it.
+Instead of competing for the port, the app exposes a local bridge, so an AI agent
+(e.g. Claude Code) can read the same capture and send to the same port while you watch
+in the GUI.
 
 ![AI Bridge](docs/images/ai-bridge.png)
 
-有効化は 2 ステップです。まずアプリの設定パネルで **AI Bridge** を ON にします
-（既定は OFF。ON にすると `127.0.0.1:57320` で待ち受けます）。次に MCP サーバーを登録します。
+Enabling it takes two steps:
+
+1. Turn on **AI Bridge** in the settings panel (off by default; listens on `127.0.0.1:57320`).
+2. Register the MCP server:
 
 ```bash
-claude mcp add serial-monitor -- node "<リポジトリのパス>/mcp/server.mjs"
+claude mcp add serial-monitor -- node "<path-to-repo>/mcp/server.mjs"
 ```
 
-あとは普通に頼むだけです:
+Then ask for what you need:
 
 ```text
-あなた : ボードに AT+GMR を送って、ファームのバージョンを教えて
+You    : Send AT+GMR to the board and tell me the firmware version.
 Claude : serial_send("AT+GMR") → serial_wait_for("OK|ERROR")
-         → 応答 "AT version:2.1.0.0 ... OK"。バージョンは 2.1.0.0 です
-あなた : 直近のログに CRC エラーっぽい行がないか見て
-Claude : serial_read_tail(16384) → "CRC mismatch" が 3 行あります（offset 12034〜）…
+         → response "AT version:2.1.0.0 ... OK". The firmware version is 2.1.0.0.
+You    : Check the recent log for CRC errors.
+Claude : serial_read_tail(16384) → 3 lines contain "CRC mismatch" (offsets 12034–...)
 ```
 
-送信のたびに GUI の AI Bridge 行へ「送信 N bytes・時刻・内容プレビュー」が出るので、
-AI が何をしたかは常に手元で追えます。
-提供ツールは `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` /
-`serial_send` / `serial_send_hex` / `serial_wait_for` の 7 つ。
-セットアップ手順・環境変数・ツールの詳細は [`mcp/README.md`](mcp/README.md) を参照してください。
+Every send from the agent appears in the GUI's AI Bridge row (byte count, time, preview),
+so you can always see what the agent did.
 
-> **セキュリティ**: 待ち受けは **`127.0.0.1` のみ**で外部ネットワークからは接続できません。
-> **既定は OFF** で、設定画面で明示的に有効にしたときだけ動きます。
-> **AI が送信した内容は必ず GUI に表示されます**（バイト数・時刻・内容のプレビュー）。
-> 人間に見えない送信経路は作らない、という方針です（設計判断は
-> [docs/22_architecture_description.md](docs/22_architecture_description.md) の ADR-12）。
+Available tools: `serial_status`, `serial_ports`, `serial_read_tail`, `serial_read_range`,
+`serial_send`, `serial_send_hex`, `serial_wait_for`.
+See [`mcp/README.md`](mcp/README.md) (Japanese) for setup details, environment variables,
+and the tool reference.
 
-## 開発者向け
+> **Security:** the bridge listens on `127.0.0.1` only and is off by default.
+> Agent sends are always visible in the GUI — there is no invisible TX path by design
+> (ADR-12 in [docs/22_architecture_description.md](docs/22_architecture_description.md), Japanese).
 
-前提: Node.js v22+ / Rust stable。
+## Development
+
+Prerequisites: Node.js 22+, stable Rust.
 
 ```bash
 npm install
-npm run tauri dev            # 開発起動（RUST_LOG=debug で詳細ログ）
-npm run tauri build          # インストーラ生成
+npm run tauri dev            # dev mode (RUST_LOG=debug for verbose logs)
+npm run tauri build          # build installers
 
-# 品質ゲート（CI と同じ）
+# quality gates (same as CI)
 npm run type-check && npm run lint && npm run format:check && npm test
 cd src-tauri && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-設計・テストのドキュメントは `docs/` にあります:
-[要求](docs/21_system_requirements.md) /
-[アーキテクチャ（状態機械・ADR）](docs/22_architecture_description.md) /
-[トレーサビリティ](docs/23_traceability.md) /
-[V&V 計画](docs/24_vv_plan.md) /
-[リリース戦略](docs/25_release_strategy.md)。
-E2E ハーネス（com0com + UI Automation）は [`test_tools/e2e/`](test_tools/e2e/README.md)。
+Design and test documentation lives in `docs/` (Japanese):
+[requirements](docs/21_system_requirements.md) /
+[architecture (state machines, ADRs)](docs/22_architecture_description.md) /
+[traceability](docs/23_traceability.md) /
+[V&V plan](docs/24_vv_plan.md) /
+[release strategy](docs/25_release_strategy.md).
+The E2E harness (com0com + UI Automation) is in [`test_tools/e2e/`](test_tools/e2e/README.md).
 
-推奨 IDE: [VS Code](https://code.visualstudio.com/) +
+Recommended IDE setup: [VS Code](https://code.visualstudio.com/) +
 [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) +
 [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
 
-## ライセンス
+## License
 
 [MIT](LICENSE)
