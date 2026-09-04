@@ -172,6 +172,10 @@ impl BridgeCtx {
     }
 
     /// 現在の SerialPort を解決する
+    ///
+    /// 注: これを `None` に置き換えるミューテーションは単体テストでは等価
+    /// （テストは実ポートを保持できず `send` は常に "port not open" になる）。
+    /// 実ポート経路は E2E（COM15/COM16, docs/24 §6.5）でのみ検証できる。
     fn port_handle(&self) -> Option<Arc<Mutex<SerialPort>>> {
         self.port.lock().ok().and_then(|guard| guard.clone())
     }
@@ -1343,7 +1347,9 @@ mod tests {
         let activity = ctx.activity.lock().unwrap().clone().unwrap();
         assert_eq!(activity.kind, "send");
         assert_eq!(activity.bytes, 5);
-        assert!(activity.at_ms > 0);
+        // 実時刻であること（2023-01-01 以降）を確認する。単に > 0 だと now_ms が
+        // 定数を返す退行（ミューテーション now_ms->1）を検出できない。
+        assert!(activity.at_ms > 1_672_531_200_000, "at_ms must be a real epoch ms");
         // ポーリング側（bridge_status）でも送信内容を復元できる
         assert_eq!(activity.preview, "hello");
 
@@ -1434,6 +1440,22 @@ mod tests {
         assert_eq!(err["ok"], json!(false));
         assert_eq!(err["error"], json!("boom"));
         assert!(err.get("result").is_none());
+    }
+
+    #[test]
+    fn test_is_ok_reflects_outcome() {
+        // is_ok が常に true を返す退行を検出する（subscribe の push 判定に効く）
+        assert!(Response::ok(json!(1), json!({})).is_ok());
+        assert!(!Response::error(Value::Null, "x").is_ok());
+    }
+
+    #[test]
+    fn test_size_constants() {
+        // クランプ・フレーム上限の定数値を固定する。相対量のテストだけでは
+        // `1024 * 1024` → `1024 + 1024` のような定数退行を検出できない。
+        assert_eq!(MAX_READ_LENGTH, 1_048_576); // 1 MiB
+        assert_eq!(SUBSCRIBE_MAX_FRAME, 262_144); // 256 KiB
+        assert_eq!(MAX_LINE_BYTES, 4_194_304); // 4 MiB
     }
 
     // ---------------- 統合（実ソケット） ----------------

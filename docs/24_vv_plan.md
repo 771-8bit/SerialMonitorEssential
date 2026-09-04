@@ -494,6 +494,29 @@ E-15（ピクセル完全一致）・E-17・E-19・E-20 は未実施）。
 **E-21（AI Bridge）は `run_bridge_e2e.ps1` としてスクリプト化済み**で、
 ワンコマンドで再実行できる（2026-09-03 実施・全 PASS）。
 
+**T2-1/T2-2 ペアワイズ E2E 回帰（2026-09-04 実施・7/7 PASS）**: AI Bridge/MCP/
+ガイド追加後の回帰確認として `pairwise_run.ps1` を dev モード（com0com COM15→COM16、
+連続プロッタデータ）で実行。被覆配列 7 行（connected/viewMode/lineWrap/timestamp/
+autoScroll/plotterOpen/aggMode/plotView の 8 因子・全 112 ペア）が**全行 PASS**
+（オラクル: メインウィンドウ生存・プロッタ開閉・集約モード切替・LIVE/Paused
+フッター状態・ログに panic/ERROR なし）。
+- **ハーネス修正**: プロセス生存オラクルが `Get-Process -Name` / `-eq` / `-match` の
+  いずれでも、連続ハイフンを含む 24 文字名 `serial-monitor-essential` に対して
+  この PS 実行コンテキストでのみ偽を返す癖があり「app process died」を誤検出していた
+  （独立監視ではアプリ pid は全行生存を確認）。**UIA のメインウィンドウ存在で生存
+  判定する**方式に変更（ウィンドウがある = プロセス生存。より強い liveness 信号）。
+  併せて Cargo リネーム後の旧プロセス名 + `-ErrorAction Stop` 一括問い合わせによる
+  誤検出も解消。
+
+**T2-3 ミューテーション差分（2026-09-04 実施）**: 今サイクルの新規・外部公開コード
+`mcp_stdio.rs` と `bridge.rs` を対象（他ファイルは 9/3 の基線あり）。
+- **`mcp_stdio.rs`: missed 0（全ミュータント caught）**。内蔵 MCP アダプタは完全被覆。
+- **`bridge.rs`**: 初回 missed 8 → うち 6 をテスト追加で kill（`test_size_constants`
+  で定数 `*→+` 4 件、`test_is_ok_reflects_outcome` で `is_ok→true`、`record_send`
+  の at_ms アサーション強化で `now_ms→1`）。残 2（`port_handle→None`・
+  `is_timeout→true`）は **IO 層で単体テストでは等価**（実ポート／実ソケット read
+  エラー経路は E2E でのみ検証可能）とし、コードにコメントで明記。
+
 **T2-5 実機データ完全性（2026-09-04 実施・PASS）**: 組み込み Rust 版ファーム
 （`test_tools/pico_serial_tx_test`）を Raspberry Pi Pico に書き込み、実機で検証した。
 - **トランスポート層**: pyserial 受信オラクルで 60 秒 = **15,451,179 バイトを取りこぼし

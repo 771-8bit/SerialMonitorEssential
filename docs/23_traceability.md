@@ -34,9 +34,9 @@
 
 | 種別 | 件数 | 内訳 |
 |------|------|------|
-| Rust 例示テスト `#[test]` | **214** | aggregator 37 / data_store 36 / parser 31 / **mcp_stdio 30** / **bridge 28** / thread 22 / logger 8 / worker 8 / chunk 6 / serial::mod 6 / state_transition 2 |
+| Rust 例示テスト `#[test]` | **216** | aggregator 37 / data_store 36 / parser 31 / **mcp_stdio 30** / **bridge 30** / thread 22 / logger 8 / worker 8 / chunk 6 / serial::mod 6 / state_transition 2 |
 | Rust プロパティテスト `proptest` | **11** | aggregator 7 / parser 3 / data_store 1 |
-| Rust 合計（`cargo test --lib` 実行結果） | **225 passed** | |
+| Rust 合計（`cargo test --lib` 実行結果） | **227 passed** | |
 | vitest | **173 passed** | 11 ファイル（scrollUtils / LineChart / PlotterWindow / PlotterViewFsm / HexViewer / SendPanel / useByteScroll / **App** / **SettingsPanel** / **calculateYRange** / **AiGuideWindow**） |
 
 > [07_plotter_spec.md](07_plotter_spec.md) の 2026-09-03 時点の記録は Rust 114 件。以後、

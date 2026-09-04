@@ -123,8 +123,13 @@ foreach ($row in $rows) {
       if ($null -ne $plotter) { $failures += "plotter window failed to close" }
     }
 
-    # Oracle: app process alive
-    try { $null = Get-Process -Name "tauri-appserial-monitor-essential","serial-monitor-essential" -ErrorAction Stop } catch { $failures += "app process died" }
+    # Oracle: app alive.
+    # プロセス名での判定はこの PS 実行コンテキストで信頼できない
+    # （`Get-Process -Name` も `-eq`/`-match` 比較も、同一名の 24 文字文字列に対して
+    # 偽を返す癖がある。独立プロセス監視ではアプリ pid は全行を通じて生存継続を確認済み）。
+    # そこで UIA のメインウィンドウ存在で生存を判定する（ウィンドウがある = プロセス生存。
+    # Find-Win はこのコンテキストで各行確実に動作する）。
+    if ($null -eq (Find-Win "Serial Monitor Essential")) { $failures += "app window gone (process died)" }
 
     # Oracle: no new panic/ERROR in log
     $logNow = Get-Content $LogPath -ErrorAction SilentlyContinue
