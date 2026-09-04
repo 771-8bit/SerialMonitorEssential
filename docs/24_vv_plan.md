@@ -513,17 +513,21 @@ autoScroll/plotterOpen/aggMode/plotView の 8 因子・全 112 ペア）が**全
 > 教訓: cargo-mutants は `outcomes.json` を**逐次書き込む**。途中経過を最終と
 > 誤読して「missed 0/1」と早合点する事故を起こした。以下は**完走時**の数値。
 
-初回完走（テスト追加前）: 232 mutants = **caught 159 / missed 57 / unviable 15 /
-timeout 1**（≈74%）。内訳 bridge 27 missed・mcp_stdio 30 missed。ここから
-純ロジックの穴を埋めるテストを追加した:
-- **`bridge.rs`**: +`test_size_constants`/`test_is_ok_reflects_outcome`/at_ms 強化
-  → 再測定で **missed 21**（27→21、6 kill を確認済み）。
-- **`mcp_stdio.rs`**: +`test_from_env_parses_and_filters`（port>0/token フィルタ）、
-  `test_is_valid_utf8_truncation_bounds`、`test_serial_send_all_line_endings`
-  （line_ending の match アーム）、`test_dispatch_null_id_is_ignored`。
-  → 純ロジック側の穴を狙って追加（**確定 kill 数は検証再測定で確認**）。
+**測定値（いずれも完走・"N mutants tested in ..." のサマリ行で完走を確認）**:
 
-**残存ミュータントは大半が IO 層とコマンド配線**で、単体では等価/駆動不可:
+| 時点 | mutants | caught | missed | unviable | timeout | スコア |
+|---|---|---|---|---|---|---|
+| テスト追加前 | 232 | 159 | **57**（bridge 27 / mcp_stdio 30） | 15 | 1 | 73.6% |
+| テスト追加後（検証再測定） | 232 | 170 | **46**（bridge 22 / mcp_stdio 24） | 15 | 1 | **78.7%** |
+
+追加したテストで **11 ミュータントを kill**（純ロジックの穴を狙って追加）:
+- `bridge.rs`: `test_size_constants`（定数 `*→+`）/ `test_is_ok_reflects_outcome` /
+  `record_send` の at_ms アサーション強化（`now_ms→1`）。
+- `mcp_stdio.rs`: `test_from_env_parses_and_filters`（port>0・token 空フィルタ）/
+  `test_is_valid_utf8_truncation_bounds` / `test_serial_send_all_line_endings`
+  （line_ending の match アーム削除）/ `test_dispatch_null_id_is_ignored`。
+
+**残存 46 は大半が IO 層とコマンド配線**で、単体では等価/駆動不可:
 bridge.rs（run_subscription/handle_connection/BridgeServer の accept・Drop・
 is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
 （`TcpBridgeClient::exchange`/`request` の再試行・トランスポート分類、
