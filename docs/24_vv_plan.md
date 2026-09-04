@@ -510,12 +510,28 @@ autoScroll/plotterOpen/aggMode/plotView の 8 因子・全 112 ペア）が**全
 
 **T2-3 ミューテーション差分（2026-09-04 実施）**: 今サイクルの新規・外部公開コード
 `mcp_stdio.rs` と `bridge.rs` を対象（他ファイルは 9/3 の基線あり）。
-- **`mcp_stdio.rs`: missed 0（全ミュータント caught）**。内蔵 MCP アダプタは完全被覆。
-- **`bridge.rs`**: 初回 missed 8 → テスト追加後の再測定で **missed 1**（caught 15）。
-  追加テスト: `test_size_constants`（定数 `*→+` 4 件）、`test_is_ok_reflects_outcome`
-  （`is_ok→true`）、`record_send` の at_ms アサーション強化（`now_ms→1`）。残 1 の
-  `port_handle→None` は **IO 層で単体テストでは等価**（実ポート経路は E2E でのみ
-  検証可能）とし、コードにコメント明記。
+> 教訓: cargo-mutants は `outcomes.json` を**逐次書き込む**。途中経過を最終と
+> 誤読して「missed 0/1」と早合点する事故を起こした。以下は**完走時**の数値。
+
+初回完走（テスト追加前）: 232 mutants = **caught 159 / missed 57 / unviable 15 /
+timeout 1**（≈74%）。内訳 bridge 27 missed・mcp_stdio 30 missed。ここから
+純ロジックの穴を埋めるテストを追加した:
+- **`bridge.rs`**: +`test_size_constants`/`test_is_ok_reflects_outcome`/at_ms 強化
+  → 再測定で **missed 21**（27→21、6 kill を確認済み）。
+- **`mcp_stdio.rs`**: +`test_from_env_parses_and_filters`（port>0/token フィルタ）、
+  `test_is_valid_utf8_truncation_bounds`、`test_serial_send_all_line_endings`
+  （line_ending の match アーム）、`test_dispatch_null_id_is_ignored`。
+  → 純ロジック側の穴を狙って追加（**確定 kill 数は検証再測定で確認**）。
+
+**残存ミュータントは大半が IO 層とコマンド配線**で、単体では等価/駆動不可:
+bridge.rs（run_subscription/handle_connection/BridgeServer の accept・Drop・
+is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
+（`TcpBridgeClient::exchange`/`request` の再試行・トランスポート分類、
+`run_stdio`/`write_response`/`attach_parent_console` の stdio 主ループ、
+`wait_for_pattern` のオフセット窓算術の一部）。実ソケット結合テスト
+（`test_integration_*`・`test_tcp_client_*`）と E2E（`run_bridge_e2e.ps1`、GAP-31）で
+機能担保するが、ミュータント粒度では未アサート。→ **DEBT-7**（両ファイルの IO
+ロジックを純関数へ抽出して細粒度検証する）。
 
 **T2-5 実機データ完全性（2026-09-04 実施・PASS）**: 組み込み Rust 版ファーム
 （`test_tools/pico_serial_tx_test`）を Raspberry Pi Pico に書き込み、実機で検証した。
@@ -541,21 +557,19 @@ autoScroll/plotterOpen/aggMode/plotView の 8 因子・全 112 ペア）が**全
   送信直後の検証は最大 1 チャンク（<64KB）過小になる。**アプリを Disconnect すると
   最終チャンクがディスクへ flush** され `data.bin` が完全一致する（検証手順に明記）。
 
-**T2-4 メモリソーク（2026-09-04 実施・部分的、リークは検出されず）**: 上記 Pico を
-~2.06 Mbps で 600 秒連続送信し、`monitor_memory.py`（5 秒間隔）で計測。アプリは
-154,411,464 バイト（603,171 行）を受信し、計測後も正常動作。
-- **合計ワーキングセット**: 537MB → ピーク ~685MB（送信中）→ 送信停止で **46.5MB へ解放**
-  （プロセス数 7→1）。**保持され続けるリークの兆候はなし**（解放される = 一過性バッファ）。
-- **注意 1**: `analyze_memory.py` の素朴なヒューリスティック（前半/後半平均差 >10MB）は
-  「leak 疑い（+99MB）」を出すが、これは**送信中の一過性上昇を検出しているだけ**で、
-  停止後に解放される軌跡（プラトー→急減）はリークではないことを示す。
-- **注意 2**: ピーク時 ~685MB は **154MB の受信に対して大きい**。内訳は主に WebView2
-  フロントエンド（受信ペインのライブ描画・7 プロセス）。バックエンド（チャンクの
-  ディスクスピル）は解放後の 46.5MB が示すとおり定常。**フロントエンドの高レート
-  描画時のピーク・フットプリントは footprint 上の課題**として記録（リークではない）。
-- **残**: これは 10 分・~2Mbps の 1 サイクルであり、正式ゲート（60 分）でも、
-  **複数サイクルでベースラインが漸増しないか**（真のリーク signature）でもない。
-  真の 12Mbps + 60 分は FT2232H 治具（[SYS-NF-101 残課題]）で行う。
+**T2-4 メモリソーク（2026-09-04 実施・60 分・PASS／リークなし）**: Pico を ~2.06 Mbps で
+3600 秒連続送信し、`monitor_memory.py`（10 秒間隔・359 サンプル）で計測。約 900MB を
+連続受信し、計測中は UIA 操作等を一切行わない静穏条件。
+- **合計ワーキングセット**: start 402MB → end 418MB（min 395 / max 421）。
+  前半平均 412.7MB → 後半平均 414.1MB = **+1.3MB（30 分あたり）でノイズ水準**。
+  プロセス数は 7 で一定。`analyze_memory.py` の判定も「✓ stable」。
+  → **60 分でベースライン漸増なし。メモリリークは検出されず**。
+- 参考: 同日の 10 分予備計測ではピーク ~685MB を記録したが、これは計測中の
+  スクリーンショット／UI 操作で WebView2 の描画バッファが一時的に膨らんだ
+  アーティファクトで、送信停止後に解放された。静穏条件の 60 分計測（本結果）が
+  T2-4 の正式値であり、~410MB で定常。
+- **残**: 実効 ~2Mbps での結果。真の 12Mbps・長時間は FT2232H 治具
+  （[SYS-NF-101 残課題]、[6.1.1 の限界]）で確認する。
 
 ---
 

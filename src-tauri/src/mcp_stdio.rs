@@ -1581,6 +1581,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_dispatch_null_id_is_ignored() {
+        // id:null + method は通知扱い（Ignore）。`!id.is_null()` を true に固定する
+        // 退行を検出する（null id を通常リクエストとして処理してしまう）。
+        assert_eq!(
+            dispatch_line(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#),
+            Dispatch::Ignore
+        );
+    }
+
+    #[test]
+    fn test_from_env_parses_and_filters() {
+        // 直列化して env の競合を避ける（他テストはこれらの変数を触らない）
+        std::env::set_var("SME_BRIDGE_HOST", "10.0.0.5");
+        std::env::set_var("SME_BRIDGE_PORT", "60000");
+        std::env::set_var("SME_BRIDGE_TOKEN", "tok");
+        let c = TcpBridgeClient::from_env();
+        assert_eq!(c.host, "10.0.0.5");
+        assert_eq!(c.port, 60000);
+        assert_eq!(c.token.as_deref(), Some("tok"));
+
+        // port=0 は無効 → 既定へフォールバック（`> 0` フィルタの退行検出）
+        std::env::set_var("SME_BRIDGE_PORT", "0");
+        // token 空 → None（`!t.is_empty()` の退行検出）
+        std::env::set_var("SME_BRIDGE_TOKEN", "");
+        let c = TcpBridgeClient::from_env();
+        assert_eq!(c.port, DEFAULT_BRIDGE_PORT);
+        assert_eq!(c.token, None);
+
+        // 数値でない → 既定
+        std::env::set_var("SME_BRIDGE_PORT", "abc");
+        assert_eq!(TcpBridgeClient::from_env().port, DEFAULT_BRIDGE_PORT);
+
+        std::env::remove_var("SME_BRIDGE_HOST");
+        std::env::remove_var("SME_BRIDGE_PORT");
+        std::env::remove_var("SME_BRIDGE_TOKEN");
+    }
+
+    #[test]
+    fn test_is_valid_utf8_truncation_bounds() {
+        // 末尾 3 バイトまでの切断を許すが、4 バイト以上は不正のまま
+        // （trim ループ境界 `<`/`<=` と長さ演算の退行検出）
+        let base = "AAAA".as_bytes(); // 4 バイトの妥当 ASCII
+        assert!(is_valid_utf8_allow_truncation(base));
+        // 末尾に 3 バイトの継続バイト（不正だが末尾切断として許容）
+        let mut trunc3 = base.to_vec();
+        trunc3.extend_from_slice(&[0xe3, 0x81, 0x82][..2]); // "あ" の先頭2バイト
+        assert!(is_valid_utf8_allow_truncation(&trunc3));
+        // 4 バイト以上の不正列は許容しない
+        assert!(!is_valid_utf8_allow_truncation(&[
+            0xff, 0xff, 0xff, 0xff, 0x41
+        ]));
+        // 空は妥当
+        assert!(is_valid_utf8_allow_truncation(&[]));
+    }
+
+    #[test]
+    fn test_serial_send_all_line_endings() {
+        // none/cr/lf/crlf それぞれで正しい line_ending がブリッジへ渡ることを確認。
+        // match アーム削除（"none"|"cr"|"lf"|"crlf"）の退行を検出する。
+        for ending in ["none", "cr", "lf", "crlf"] {
+            let mut bridge = MockBridge::new(vec![Ok(json!({ "bytes_written": 2 }))]);
+            let text = call_tool(
+                &mut bridge,
+                "serial_send",
+                &json!({ "text": "AT", "line_ending": ending }),
+            )
+            .unwrap();
+            assert_eq!(bridge.calls[0].1["line_ending"], json!(ending));
+            assert!(text.contains(&format!("+ {ending} ->")));
+        }
+    }
+
     // ---------------- 実ソケット統合（bridge.rs のサーバに接続） ----------------
 
     #[test]
