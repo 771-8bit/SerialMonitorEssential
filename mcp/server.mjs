@@ -29,7 +29,20 @@ export const MAX_CHUNK_BYTES = 1048576;
 export const DEFAULT_TAIL_BYTES = 4096;
 export const REQUEST_TIMEOUT_MS = 5000;
 export const WAIT_POLL_MS = 500;
+/**
+ * Lower bound for the tail window read on each `waitForPattern` poll. The
+ * actual request grows to cover the backlog observed on the previous poll
+ * (capped at MAX_CHUNK_BYTES). A fixed 64 KiB window only scans
+ * 64 KiB / WAIT_POLL_MS = 131 KB/s, so above roughly 1 Mbps the device reply
+ * scrolls out of the window between polls and is missed (docs/26 §5.1).
+ */
 export const WAIT_WINDOW_BYTES = 65536;
+/**
+ * Overlap retained after releasing an already-scanned prefix of the
+ * accumulator. Keeps memory constant at high rates. A single match longer
+ * than this may be missed at a trim boundary.
+ */
+export const WAIT_RETAIN_BYTES = 65536;
 /** Above this ratio of non-printable bytes we render a hex dump instead of text. */
 export const BINARY_RATIO = 0.1;
 
@@ -461,9 +474,16 @@ export async function waitForPattern(client, options = {}) {
   let accStart = cursor;
   let totalBytes = initialTotal;
   let gap = false;
+  let scanned = 0;
 
   for (;;) {
-    const res = await client.request('tail', { bytes: windowBytes });
+    // Ask for everything that arrived since the last poll. The window grows
+    // with the arrival rate, so a fast device cannot outrun it (docs/26 §5.1).
+    const want = Math.min(
+      MAX_CHUNK_BYTES,
+      Math.max(windowBytes, totalBytes - cursor + windowBytes),
+    );
+    const res = await client.request('tail', { bytes: want });
     const newTotal = Number(res?.total_bytes ?? totalBytes);
     // Capture reset (port reopen / Clear): total_bytes rewound past our cursor.
     // Without this the cursor points past the new stream and every poll is
@@ -485,6 +505,7 @@ export async function waitForPattern(client, options = {}) {
         // concatenating across the discontinuity allows phantom matches that
         // span the gap and corrupts every offset computed afterwards.
         gap = true;
+        scanned += chunk.length;
         acc = Buffer.from(chunk);
         accStart = chunkOffset;
         cursor = chunkEnd;
@@ -492,6 +513,7 @@ export async function waitForPattern(client, options = {}) {
         const take = chunk.subarray(cursor - chunkOffset);
         if (take.length > 0) {
           if (acc.length === 0) accStart = cursor;
+          scanned += take.length;
           acc = Buffer.concat([acc, take]);
           cursor = chunkEnd;
         }
@@ -510,7 +532,7 @@ export async function waitForPattern(client, options = {}) {
         match: match[0],
         excerpt: text.slice(from, to),
         elapsedMs: Date.now() - started,
-        bytesScanned: acc.length,
+        bytesScanned: scanned,
         totalBytes,
         gap,
       };
@@ -524,11 +546,26 @@ export async function waitForPattern(client, options = {}) {
         tail,
         tailOffset: accStart + Math.max(0, acc.length - 256),
         elapsedMs: Date.now() - started,
-        bytesScanned: acc.length,
+        bytesScanned: scanned,
         totalBytes,
         gap,
       };
     }
+
+    // Release the already-scanned prefix so memory stays constant at high
+    // rates. accStart advances by the same amount, so reported offsets stay
+    // absolute stream offsets. Not a gap: nothing unscanned was dropped.
+    if (acc.length > WAIT_RETAIN_BYTES) {
+      // Nudge the cut forward to a UTF-8 lead byte. This implementation matches
+      // on the lossy-decoded string, so cutting mid-character would inject a
+      // U+FFFD and skew byteIndex (DEBT-6 asymmetry 2). At most 3 steps for
+      // valid UTF-8; capped so arbitrary binary cannot walk the buffer.
+      let cut = acc.length - WAIT_RETAIN_BYTES;
+      for (let i = 0; i < 3 && cut < acc.length && (acc[cut] & 0xc0) === 0x80; i += 1) cut += 1;
+      accStart += cut;
+      acc = acc.subarray(cut);
+    }
+
     await sleep(Math.min(pollMs, remaining));
   }
 }

@@ -38,8 +38,19 @@ pub const SERVER_NAME: &str = "serial-monitor-essential";
 const REQUEST_TIMEOUT_MS: u64 = 5000;
 /// `serial_wait_for` のポーリング間隔
 const WAIT_POLL_MS: u64 = 500;
-/// `serial_wait_for` が 1 回のポーリングで読む tail 窓
+/// `serial_wait_for` が 1 回のポーリングで読む tail 窓の**下限**
+///
+/// 実際の要求量は「前回判明した未読分 + この値」に広げる（`MAX_READ_LENGTH` で頭打ち）。
+/// 固定 64 KiB のままだと 64 KiB / `WAIT_POLL_MS` = 実効 131 KB/s しか走査できず、
+/// 約 1 Mbps を超えた時点でポーリングの間にデータが窓から流れ出て、デバイスの
+/// 返信を取りこぼす（docs/26 §5.1）。
 const WAIT_WINDOW_BYTES: u32 = 65536;
+/// 走査済みの接頭辞を解放したあとも蓄積に残す重なり
+///
+/// 高レートでは蓄積が毎秒 MB 単位で伸びるため、走査済みの前方は捨てて
+/// メモリを定数に保つ。**この長さを超えるマッチは切り出し境界で取り逃がし得る**
+/// （64 KiB を超える単一マッチは実用上ないが、制限として明記しておく）。
+const WAIT_RETAIN_BYTES: usize = 65536;
 /// この比率を超えて非印字バイトが含まれるときは hex ダンプ表示にする
 const BINARY_RATIO: f64 = 0.1;
 /// サポートする MCP プロトコル版（クライアント指定をエコーできる版）
@@ -375,7 +386,8 @@ pub struct WaitOutcome {
     pub tail: Vec<u8>,
     pub tail_offset: u64,
     pub elapsed_ms: u64,
-    pub bytes_scanned: usize,
+    /// 走査した総バイト数（蓄積の切り詰めがあっても減らない累計）
+    pub bytes_scanned: u64,
     pub total_bytes: u64,
     pub gap: bool,
     /// `notifications/cancelled` により中断された
@@ -425,27 +437,31 @@ pub fn wait_for_pattern(
     let mut acc_start = cursor;
     let mut total_bytes = initial_total;
     let mut gap = false;
+    let mut scanned: u64 = 0;
 
-    let unmatched =
-        |acc_len: usize, total_bytes: u64, gap: bool, was_cancelled: bool| WaitOutcome {
-            matched: false,
-            offset: 0,
-            excerpt: String::new(),
-            tail: Vec::new(),
-            tail_offset: 0,
-            elapsed_ms: started.elapsed().as_millis() as u64,
-            bytes_scanned: acc_len,
-            total_bytes,
-            gap,
-            cancelled: was_cancelled,
-        };
+    let unmatched = |scanned: u64, total_bytes: u64, gap: bool, was_cancelled: bool| WaitOutcome {
+        matched: false,
+        offset: 0,
+        excerpt: String::new(),
+        tail: Vec::new(),
+        tail_offset: 0,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        bytes_scanned: scanned,
+        total_bytes,
+        gap,
+        cancelled: was_cancelled,
+    };
 
     loop {
         if cancelled() {
-            return Ok(unmatched(acc.len(), total_bytes, gap, true));
+            return Ok(unmatched(scanned, total_bytes, gap, true));
         }
 
-        let res = bridge.request("tail", json!({ "bytes": WAIT_WINDOW_BYTES }))?;
+        // 前回のポーリングで判明した未読分を丸ごと取りに行く。到着レートに応じて
+        // 自動的に広がるので、固定窓のような読み負け（docs/26 §5.1）が起きない。
+        let want = (total_bytes.saturating_sub(cursor) + WAIT_WINDOW_BYTES as u64)
+            .clamp(WAIT_WINDOW_BYTES as u64, MAX_READ_LENGTH as u64);
+        let res = bridge.request("tail", json!({ "bytes": want }))?;
         let new_total = res
             .get("total_bytes")
             .and_then(Value::as_u64)
@@ -470,6 +486,7 @@ pub fn wait_for_pattern(
                 // ポーリングの間に窓から流れ出た（取りこぼしあり）。
                 // 不連続を跨いだ偽マッチとオフセット破壊を防ぐため置き換える。
                 gap = true;
+                scanned += chunk.len() as u64;
                 acc = chunk;
                 acc_start = chunk_offset;
                 cursor = chunk_end;
@@ -479,6 +496,7 @@ pub fn wait_for_pattern(
                     if acc.is_empty() {
                         acc_start = cursor;
                     }
+                    scanned += take.len() as u64;
                     acc.extend_from_slice(take);
                     cursor = chunk_end;
                 }
@@ -496,7 +514,7 @@ pub fn wait_for_pattern(
                 tail: Vec::new(),
                 tail_offset: 0,
                 elapsed_ms: started.elapsed().as_millis() as u64,
-                bytes_scanned: acc.len(),
+                bytes_scanned: scanned,
                 total_bytes,
                 gap,
                 cancelled: false,
@@ -515,12 +533,23 @@ pub fn wait_for_pattern(
                 tail,
                 tail_offset,
                 elapsed_ms: elapsed,
-                bytes_scanned: acc.len(),
+                bytes_scanned: scanned,
                 total_bytes,
                 gap,
                 cancelled: false,
             });
         }
+
+        // 走査済みの前方を解放し、蓄積を定数メモリに保つ。重なりを残すので
+        // ポーリング境界を跨ぐマッチは拾える（`WAIT_RETAIN_BYTES` 超の単一
+        // マッチのみ取り逃がし得る）。`acc_start` を同量進めるので、返す
+        // オフセットはストリーム絶対値のまま狂わない。
+        if acc.len() > WAIT_RETAIN_BYTES {
+            let drop = acc.len() - WAIT_RETAIN_BYTES;
+            acc.drain(..drop);
+            acc_start += drop as u64;
+        }
+
         std::thread::sleep(Duration::from_millis(poll_ms.min(timeout_ms - elapsed)));
     }
 }
@@ -1512,6 +1541,63 @@ mod tests {
         assert!(
             !outcome.matched,
             "a pattern spanning the discontinuity must not match"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_window_grows_to_cover_backlog() {
+        // 固定 64 KiB 窓では 64 KiB / WAIT_POLL_MS = 実効 131 KB/s しか走査できず、
+        // 1.5 MB/s(12 Mbps) では約 11 倍の読み負けになり返信を取りこぼす（docs/26 §5.1）。
+        // 未読分に応じて要求量が広がること、MAX_READ_LENGTH で頭打ちになることを固定する。
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 0 })),
+            // 1 回目のポーリングの間に 1 MB 到着していたと判明する
+            tail_response(b"aaaaaaaaaa", 0, 1_000_000),
+            tail_response(b"OK", 1_000_000, 1_000_002),
+        ]);
+        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
+        assert!(outcome.matched);
+
+        assert_eq!(bridge.calls[0].0, "status");
+        assert_eq!(
+            bridge.calls[1].1["bytes"],
+            json!(WAIT_WINDOW_BYTES),
+            "first poll has no backlog information yet, so it uses the floor"
+        );
+        assert_eq!(
+            bridge.calls[2].1["bytes"],
+            json!(MAX_READ_LENGTH),
+            "a 1 MB backlog must widen the window, clamped to MAX_READ_LENGTH"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_trims_accumulator_but_keeps_absolute_offsets() {
+        // 窓を広げると蓄積が毎秒 MB 単位で伸びるため走査済みの前方を解放する。
+        // 解放しても (1) オフセットはストリーム絶対値のまま、(2) bytes_scanned は
+        // 累計のまま、(3) データを捨てていないので gap は立たない、を固定する。
+        let big_a = vec![b'a'; 50_000];
+        let big_b = vec![b'b'; 30_000];
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 0 })),
+            tail_response(&big_a, 0, 50_000),
+            tail_response(&big_b, 50_000, 80_000), // ここで 80_000 > WAIT_RETAIN_BYTES
+            tail_response(b"OK\n", 80_000, 80_003),
+        ]);
+        let outcome = wait_for_pattern(&mut bridge, "OK", 5000, true, 1, &|| false).unwrap();
+
+        assert!(outcome.matched);
+        assert_eq!(
+            outcome.offset, 80_000,
+            "trimming the scanned prefix must not shift the reported stream offset"
+        );
+        assert_eq!(
+            outcome.bytes_scanned, 80_003,
+            "bytes_scanned is cumulative, not the size of the retained window"
+        );
+        assert!(
+            !outcome.gap,
+            "releasing an already-scanned prefix is not a discontinuity"
         );
     }
 

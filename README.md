@@ -174,7 +174,8 @@ Design and test documentation lives in `docs/` (Japanese):
 [architecture (state machines, ADRs)](docs/22_architecture_description.md) /
 [traceability](docs/23_traceability.md) /
 [V&V plan](docs/24_vv_plan.md) /
-[release strategy](docs/25_release_strategy.md).
+[release strategy](docs/25_release_strategy.md) /
+[AI API design](docs/26_ai_api_design.md).
 The E2E harness (com0com + UI Automation) is in [`test_tools/e2e/`](test_tools/e2e/README.md).
 
 Recommended IDE setup: [VS Code](https://code.visualstudio.com/) +
