@@ -1349,7 +1349,10 @@ mod tests {
         assert_eq!(activity.bytes, 5);
         // 実時刻であること（2023-01-01 以降）を確認する。単に > 0 だと now_ms が
         // 定数を返す退行（ミューテーション now_ms->1）を検出できない。
-        assert!(activity.at_ms > 1_672_531_200_000, "at_ms must be a real epoch ms");
+        assert!(
+            activity.at_ms > 1_672_531_200_000,
+            "at_ms must be a real epoch ms"
+        );
         // ポーリング側（bridge_status）でも送信内容を復元できる
         assert_eq!(activity.preview, "hello");
 
