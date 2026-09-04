@@ -511,11 +511,11 @@ autoScroll/plotterOpen/aggMode/plotView の 8 因子・全 112 ペア）が**全
 **T2-3 ミューテーション差分（2026-09-04 実施）**: 今サイクルの新規・外部公開コード
 `mcp_stdio.rs` と `bridge.rs` を対象（他ファイルは 9/3 の基線あり）。
 - **`mcp_stdio.rs`: missed 0（全ミュータント caught）**。内蔵 MCP アダプタは完全被覆。
-- **`bridge.rs`**: 初回 missed 8 → うち 6 をテスト追加で kill（`test_size_constants`
-  で定数 `*→+` 4 件、`test_is_ok_reflects_outcome` で `is_ok→true`、`record_send`
-  の at_ms アサーション強化で `now_ms→1`）。残 2（`port_handle→None`・
-  `is_timeout→true`）は **IO 層で単体テストでは等価**（実ポート／実ソケット read
-  エラー経路は E2E でのみ検証可能）とし、コードにコメントで明記。
+- **`bridge.rs`**: 初回 missed 8 → テスト追加後の再測定で **missed 1**（caught 15）。
+  追加テスト: `test_size_constants`（定数 `*→+` 4 件）、`test_is_ok_reflects_outcome`
+  （`is_ok→true`）、`record_send` の at_ms アサーション強化（`now_ms→1`）。残 1 の
+  `port_handle→None` は **IO 層で単体テストでは等価**（実ポート経路は E2E でのみ
+  検証可能）とし、コードにコメント明記。
 
 **T2-5 実機データ完全性（2026-09-04 実施・PASS）**: 組み込み Rust 版ファーム
 （`test_tools/pico_serial_tx_test`）を Raspberry Pi Pico に書き込み、実機で検証した。
