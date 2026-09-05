@@ -1,0 +1,156 @@
+/* AI Integration Guide window */
+
+/* body は overflow:hidden なので、このウィンドウは自前でスクロールする */
+.ai-guide-scroll {
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.ai-guide {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 16px 24px 24px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-color, #ddd);
+  user-select: text;
+  cursor: auto;
+}
+
+.ai-guide h1 {
+  font-size: 18px;
+  margin: 0;
+}
+
+.ai-guide h2 {
+  font-size: 14px;
+  margin: 20px 0 6px;
+  border-bottom: 1px solid #444;
+  padding-bottom: 4px;
+}
+
+.ai-guide p,
+.ai-guide ul,
+.ai-guide ol {
+  margin: 6px 0;
+}
+
+.ai-guide code {
+  background: #2a2a2a;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.guide-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.guide-status.on {
+  background: #1d4620;
+  color: #8ce99a;
+}
+
+.guide-status.off {
+  background: #4a1d1d;
+  color: #ffa8a8;
+}
+
+.guide-ok {
+  color: #8ce99a;
+}
+
+.guide-warn {
+  color: #ffa8a8;
+}
+
+.guide-copy-block {
+  margin: 10px 0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.guide-copy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: #333;
+  font-size: 12px;
+}
+
+.guide-copy-header button {
+  font-size: 11px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.guide-copy-block pre {
+  margin: 0;
+  padding: 8px;
+  background: #1e1e1e;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+.guide-transcript {
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 8px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.guide-tools {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.guide-tools td {
+  border: 1px solid #444;
+  padding: 4px 8px;
+  vertical-align: top;
+}
+
+.guide-tools td:first-child {
+  white-space: nowrap;
+}
+
+.guide-note {
+  font-size: 12px;
+  color: #999;
+}
+
+.guide-footer {
+  margin-top: 24px;
+  padding-top: 8px;
+  border-top: 1px solid #444;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #999;
+}

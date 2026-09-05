@@ -1,0 +1,121 @@
+.hex-viewer {
+  font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+  font-size: 13px;
+  line-height: 20px;
+  background-color: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  /* Disable selection by default */
+}
+
+.hex-scroll-container {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.hex-row {
+  display: flex;
+  padding: 0 8px;
+  color: #d4d4d4;
+  user-select: none;
+  /* rows themselves not selectable, only content */
+}
+
+.hex-row:hover {
+  background-color: #2a2d2e;
+}
+
+.hex-offset {
+  width: 70px;
+  color: #569cd6;
+  flex-shrink: 0;
+  user-select: none;
+  /* Offset not selectable */
+  cursor: default;
+}
+
+.hex-bytes {
+  width: 370px;
+  flex-shrink: 0;
+  color: #ce9178;
+  letter-spacing: 0.5px;
+  user-select: text;
+  /* Enable selection */
+  cursor: text;
+}
+
+.hex-ascii {
+  display: flex;
+  width: 230px;
+  flex-shrink: 0;
+  padding-left: 8px;
+  border-left: 1px solid #3c3c3c;
+  box-sizing: border-box;
+  user-select: none;
+  /* Disable selection */
+  cursor: default;
+}
+
+/* Fixed-width character container */
+.ascii-char {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 20px;
+  color: #dcdcaa;
+  font-size: 13px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Control character label - small text */
+.ascii-ctrl {
+  font-size: 6px;
+  font-weight: 600;
+  letter-spacing: -0.5px;
+}
+
+/* (ascii-chars-batch removed - each char now rendered individually) */
+
+.hex-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background-color: #2d2d2d;
+  border-top: 1px solid #3c3c3c;
+  color: #6c6c6c;
+  font-size: 12px;
+}
+
+/* Scrollbar styling */
+.hex-viewer ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.hex-viewer ::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.hex-viewer ::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 5px;
+}
+
+.hex-viewer ::-webkit-scrollbar-thumb:hover {
+  background: #5c5c5c;
+}
+
+.hex-debug {
+  font-size: 10px;
+  color: #808080;
+  font-family: 'Consolas', monospace;
+}

@@ -1,0 +1,50 @@
+{
+  "name": "serial-monitor-essential",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"*.{json,js,ts}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"*.{json,js,ts}\"",
+    "lint:css-unused": "node scripts/check-unused-css.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "uplot": "^1.6.32"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.1",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "@vitest/coverage-v8": "^4.0.16",
+    "eslint": "^9.39.2",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "jsdom": "^27.3.0",
+    "prettier": "^3.7.4",
+    "purgecss": "^7.0.2",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.50.1",
+    "vite": "^7.0.4",
+    "vitest": "^4.0.16"
+  }
+}

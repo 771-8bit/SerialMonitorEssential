@@ -1,0 +1,37 @@
+[package]
+name = "serial-monitor-essential"
+version = "0.1.0"
+description = "Fast serial monitor and plotter for embedded development"
+authors = ["771-8bit"]
+edition = "2021"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "serial_monitor_essential_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+crossbeam = "0.8"
+log = "0.4"
+env_logger = "0.11"
+serialport = "4.8"
+sysinfo = "0.32"
+chrono = "0.4"
+regex = "1"
+
+[dev-dependencies]
+proptest = "1"
