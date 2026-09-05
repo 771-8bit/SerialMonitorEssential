@@ -45,6 +45,17 @@ export const WAIT_WINDOW_BYTES = 65536;
 export const WAIT_RETAIN_BYTES = 65536;
 /** Above this ratio of non-printable bytes we render a hex dump instead of text. */
 export const BINARY_RATIO = 0.1;
+/**
+ * Default cap on the characters a read tool returns.
+ *
+ * The budget is in CHARACTERS, not tokens: the server cannot know the client's
+ * tokenizer, and any estimate is wrong for hex and CJK (docs/26). Roughly
+ * 3.6 chars per token for ASCII logs.
+ */
+export const DEFAULT_MAX_CHARS = 4000;
+/** The floor is above ENVELOPE_RESERVE: header and footer are never dropped. */
+export const MIN_MAX_CHARS = 500;
+export const MAX_MAX_CHARS = 200000;
 
 const MAX_RX_BUFFER = 8 * 1024 * 1024;
 
@@ -399,18 +410,200 @@ export function renderBytes(buf, baseOffset = 0) {
   return { mode: 'hex', body: hexDump(buf, baseOffset) };
 }
 
-function renderChunk({ buf, offset, totalBytes, extra = [] }) {
-  const rendered = renderBytes(buf, offset ?? 0);
+/** Parse the `format` tool argument. */
+export function parseRenderFormat(v) {
+  if (v === undefined || v === null) return 'auto';
+  if (v === 'auto' || v === 'text' || v === 'hex' || v === 'lines') return v;
+  throw new Error("bad arguments: 'format' must be one of auto/text/hex/lines");
+}
+
+/**
+ * Number of leading bytes whose lossy-UTF-8 rendering fits in `maxChars`
+ * characters. Counting characters (not bytes) means CJK logs are not
+ * under-filled by 3x.
+ */
+export function headBytesWithinCharBudget(buf, maxChars) {
+  let bytes = 0;
+  let chars = 0;
+  while (bytes < buf.length && chars < maxChars) {
+    const b = buf[bytes];
+    let width = 1;
+    if (b >= 0xf0) width = 4;
+    else if (b >= 0xe0) width = 3;
+    else if (b >= 0xc0) width = 2;
+    if (bytes + width > buf.length) width = 1;
+    bytes += width;
+    chars += 1;
+  }
+  return Math.min(bytes, buf.length);
+}
+
+/** Number of trailing bytes that fit, never splitting a multi-byte character. */
+export function tailBytesWithinCharBudget(buf, maxChars) {
+  let start = buf.length;
+  let chars = 0;
+  while (start > 0 && chars < maxChars) {
+    let cand = start - 1;
+    let steps = 0;
+    while (cand > 0 && steps < 3 && (buf[cand] & 0xc0) === 0x80) {
+      cand -= 1;
+      steps += 1;
+    }
+    start = cand;
+    chars += 1;
+  }
+  return buf.length - start;
+}
+
+/** Collapse consecutive identical lines into one line with [xN]. */
+export function collapseRepeatedLines(text) {
+  const out = [];
+  let removed = 0;
+  let prev = null;
+  let run = 0;
+  const flush = () => {
+    if (prev === null) return;
+    if (run > 1) {
+      removed += run - 1;
+      out.push(`${prev}  [x${run}]`);
+    } else {
+      out.push(prev);
+    }
+  };
+  for (const line of text.split('\n')) {
+    if (prev !== null && line === prev) {
+      run += 1;
+    } else {
+      flush();
+      prev = line;
+      run = 1;
+    }
+  }
+  flush();
+  return { text: out.join('\n'), removed };
+}
+
+/** A hex dump row is 78 chars + newline, so chars map back to bytes exactly. */
+export const HEX_ROW_CHARS = 79;
+/** Characters held back for the header and the (never-dropped) footer. */
+const ENVELOPE_RESERVE = 240;
+
+/**
+ * Render one chunk while strictly honouring `maxChars`.
+ *
+ * The budget is enforced by slicing BYTES before rendering, so the byte range
+ * actually shown can be reported as absolute offsets and the rest fetched with
+ * a single serial_read_range call (docs/26: handles, not payloads). Truncation
+ * is always disclosed in a footer.
+ */
+export function renderChunk({
+  buf,
+  offset,
+  totalBytes,
+  extra = [],
+  format = 'auto',
+  collapse = false,
+  maxChars = DEFAULT_MAX_CHARS,
+  keepTail = true,
+}) {
+  const base = offset ?? 0;
+  if (buf.length === 0) {
+    const header = [
+      `offset=${base}`,
+      'bytes=0',
+      totalBytes === undefined ? null : `total_bytes=${totalBytes}`,
+      'rendering=empty',
+      ...extra,
+    ]
+      .filter(Boolean)
+      .join('  ');
+    return { text: `${header}\n---\n(no data)`, shownStart: base, shownEnd: base, truncated: false };
+  }
+
+  const mode = format === 'auto' ? (looksLikeText(buf) ? 'text' : 'hex') : format;
+  const bodyBudget = Math.max(80, maxChars - ENVELOPE_RESERVE);
+
+  // --- slice by bytes: the one place the budget is enforced ---
+  let slice;
+  let shownStart;
+  if (mode === 'hex') {
+    const fit = Math.max(1, Math.floor(bodyBudget / HEX_ROW_CHARS)) * 16;
+    if (buf.length <= fit) {
+      slice = buf;
+      shownStart = base;
+    } else if (keepTail) {
+      slice = buf.subarray(buf.length - fit);
+      shownStart = base + buf.length - fit;
+    } else {
+      slice = buf.subarray(0, fit);
+      shownStart = base;
+    }
+  } else if (keepTail) {
+    const keep = tailBytesWithinCharBudget(buf, bodyBudget);
+    slice = buf.subarray(buf.length - keep);
+    shownStart = base + buf.length - keep;
+  } else {
+    slice = buf.subarray(0, headBytesWithinCharBudget(buf, bodyBudget));
+    shownStart = base;
+  }
+
+  // `lines` drops the partial line at each end
+  if (mode === 'lines') {
+    const first = slice.indexOf(0x0a);
+    if (first >= 0) {
+      shownStart += first + 1;
+      slice = slice.subarray(first + 1);
+    } else {
+      slice = slice.subarray(slice.length);
+    }
+    const last = slice.lastIndexOf(0x0a);
+    slice = last >= 0 ? slice.subarray(0, last + 1) : slice.subarray(0, 0);
+  }
+  const shownEnd = shownStart + slice.length;
+  const truncated = slice.length < buf.length;
+
+  let body = mode === 'hex' ? hexDump(slice, shownStart) : slice.toString('utf8');
+  let collapsed = 0;
+  if (collapse && mode !== 'hex') {
+    const c = collapseRepeatedLines(body);
+    body = c.text;
+    collapsed = c.removed;
+  }
+
   const header = [
-    `offset=${offset ?? 0}`,
+    `offset=${base}`,
     `bytes=${buf.length}`,
     totalBytes === undefined ? null : `total_bytes=${totalBytes}`,
-    `rendering=${rendered.mode}`,
+    `rendering=${mode}`,
     ...extra,
+    truncated ? `shown=${shownStart}..${shownEnd} (${slice.length} of ${buf.length} bytes)` : null,
+    collapsed > 0 ? `collapsed=${collapsed} repeated lines` : null,
   ]
     .filter(Boolean)
     .join('  ');
-  return `${header}\n---\n${rendered.body}`;
+
+  let foot = '';
+  if (truncated) {
+    const end = base + buf.length;
+    const next = [];
+    if (shownStart > base) next.push(`serial_read_range(offset=${base}, length=${shownStart - base})`);
+    if (shownEnd < end) next.push(`serial_read_range(offset=${shownEnd}, length=${end - shownEnd})`);
+    foot =
+      `\n---\ntruncated: ${buf.length - slice.length} more bytes in this read ` +
+      `(budget ${maxChars} chars). next: ${next.join(' and ')}`;
+  }
+
+  // Trim the BODY only; the footer is never dropped.
+  const allowed = Math.max(0, maxChars - ([...header].length + 5 + [...foot].length));
+  const bodyChars = [...body];
+  if (bodyChars.length > allowed) body = bodyChars.slice(0, allowed).join('');
+
+  // Backstop so exceeding the budget is structurally impossible.
+  let text = `${header}\n---\n${body}${foot}`;
+  const all = [...text];
+  if (all.length > maxChars) text = all.slice(0, maxChars).join('');
+
+  return { text, shownStart, shownEnd, truncated };
 }
 
 /* ------------------------------------------------------------------ */
@@ -624,7 +817,9 @@ export function createServer(client) {
         `total_bytes: ${res.total_bytes ?? 0}`,
         `app_version: ${res.app_version ?? 'unknown'} (protocol ${res.protocol ?? '?'})`,
       ].join('\n');
-      return `${summary}\n\nraw: ${JSON.stringify(res)}`;
+      // The old `raw: {full JSON}` repeated the four lines above verbatim:
+      // zero extra information at double the tokens (docs/26 §5).
+      return summary;
     })
   );
 
@@ -649,7 +844,7 @@ export function createServer(client) {
     {
       title: 'Read latest serial data',
       description:
-        'Read the most recent bytes received from the device. Rendered as UTF-8 text, or as a hex dump when the data looks binary. Default 4096 bytes, max 1048576.',
+        `Read the most recent bytes received from the device. Rendered as UTF-8 text, or as a hex dump when the data looks binary. Default ${DEFAULT_TAIL_BYTES} bytes, max ${MAX_CHUNK_BYTES}. Output is capped at max_chars (${DEFAULT_MAX_CHARS} by default); when it does not fit, the most recent part is kept and a footer reports the exact byte range shown plus a serial_read_range call for the rest.`,
       inputSchema: {
         bytes: z
           .number()
@@ -658,18 +853,44 @@ export function createServer(client) {
           .max(MAX_CHUNK_BYTES)
           .optional()
           .describe(`How many trailing bytes to read (default ${DEFAULT_TAIL_BYTES}).`),
+        format: z
+          .enum(['auto', 'text', 'hex', 'lines'])
+          .optional()
+          .describe(
+            'auto (default): text, or hex when the data looks binary. text: always UTF-8. hex: always a hex dump (about 79 chars per 16 bytes, so it burns budget ~5x faster than text). lines: text with the partial first and last lines dropped.'
+          ),
+        collapse_repeats: z
+          .boolean()
+          .optional()
+          .describe(
+            'Collapse consecutive identical lines into one line with [xN]. Applied after the byte budget, so raise "bytes" as well when a log is highly repetitive. Not available in hex.'
+          ),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(
+            `Hard cap on the returned characters (default ${DEFAULT_MAX_CHARS}). Roughly 3.6 chars per token for ASCII logs.`
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    handler(async ({ bytes }) => {
+    handler(async ({ bytes, format, collapse_repeats: collapseRepeats, max_chars: maxChars }) => {
       const want = bytes ?? DEFAULT_TAIL_BYTES;
       const res = await client.request('tail', { bytes: want });
       const buf = decodeBase64(res?.base64);
+      // tail means "the latest", so keep the end when the budget is tight.
       return renderChunk({
         buf,
         offset: Number(res?.offset ?? 0),
         totalBytes: Number(res?.total_bytes ?? 0),
-      });
+        format: parseRenderFormat(format),
+        collapse: collapseRepeats === true,
+        maxChars: maxChars ?? DEFAULT_MAX_CHARS,
+        keepTail: true,
+      }).text;
     })
   );
 
@@ -678,7 +899,7 @@ export function createServer(client) {
     {
       title: 'Read a serial byte range',
       description:
-        'Read an explicit byte range of the received stream (offsets match those reported by serial_read_tail and serial_wait_for). Rendered as text, or as a hex dump when the data looks binary.',
+        `Read an explicit byte range of the received stream (offsets match those reported by serial_read_tail and serial_wait_for). Rendered as text, or as a hex dump when the data looks binary. Output is capped at max_chars (${DEFAULT_MAX_CHARS} by default); when it does not fit, the start of the range is kept and a footer gives the exact offset to resume from.`,
       inputSchema: {
         offset: z.number().int().min(0).describe('Absolute start offset in the received stream.'),
         length: z
@@ -687,18 +908,44 @@ export function createServer(client) {
           .min(1)
           .max(MAX_CHUNK_BYTES)
           .describe(`How many bytes to read (max ${MAX_CHUNK_BYTES}).`),
+        format: z
+          .enum(['auto', 'text', 'hex', 'lines'])
+          .optional()
+          .describe(
+            'auto (default): text, or hex when the data looks binary. text: always UTF-8. hex: always a hex dump (about 79 chars per 16 bytes). lines: text with the partial first and last lines dropped.'
+          ),
+        collapse_repeats: z
+          .boolean()
+          .optional()
+          .describe(
+            'Collapse consecutive identical lines into one line with [xN]. Not available in hex.'
+          ),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(`Hard cap on the returned characters (default ${DEFAULT_MAX_CHARS}).`),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    handler(async ({ offset, length }) => {
-      const res = await client.request('read_range', { offset, length });
-      const buf = decodeBase64(res?.base64);
-      return renderChunk({
-        buf,
-        offset: Number(res?.offset ?? offset),
-        extra: [`length_read=${res?.length_read ?? buf.length}`],
-      });
-    })
+    handler(
+      async ({ offset, length, format, collapse_repeats: collapseRepeats, max_chars: maxChars }) => {
+        const res = await client.request('read_range', { offset, length });
+        const buf = decodeBase64(res?.base64);
+        // A range read asks "from here", so keep the start when it is tight.
+        return renderChunk({
+          buf,
+          offset: Number(res?.offset ?? offset),
+          extra: [`length_read=${res?.length_read ?? buf.length}`],
+          format: parseRenderFormat(format),
+          collapse: collapseRepeats === true,
+          maxChars: maxChars ?? DEFAULT_MAX_CHARS,
+          keepTail: false,
+        }).text;
+      }
+    )
   );
 
   server.registerTool(

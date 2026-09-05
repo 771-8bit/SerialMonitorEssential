@@ -13,12 +13,18 @@ import net from 'node:net';
 
 import {
   BridgeClient,
+  DEFAULT_MAX_CHARS,
   LINE_ENDINGS,
+  MIN_MAX_CHARS,
+  collapseRepeatedLines,
   decodeBase64,
+  headBytesWithinCharBudget,
   hexDump,
   looksLikeText,
   parseHex,
   renderBytes,
+  renderChunk,
+  tailBytesWithinCharBudget,
   waitForPattern,
 } from './server.mjs';
 
@@ -344,10 +350,88 @@ async function testBridgeAbsent() {
   );
 }
 
+/**
+ * Rendering budget (docs/26 §7 phase 0). No bridge needed: renderChunk is pure.
+ * The Rust adapter is the shipped implementation and carries the full test set;
+ * these keep the reference implementation honest about the same contract.
+ */
+function testRenderBudget() {
+  const ascii = Buffer.alloc(40000, 0x41);
+  const binary = Buffer.from(Array.from({ length: 40000 }, (_, i) => i % 251));
+  const jp = Buffer.from('温度 25.5 度\n'.repeat(3000), 'utf8');
+
+  let worst = 0;
+  let over = null;
+  for (const buf of [ascii, binary, jp]) {
+    for (const maxChars of [MIN_MAX_CHARS, 1000, DEFAULT_MAX_CHARS, 20000]) {
+      for (const keepTail of [true, false]) {
+        for (const format of ['auto', 'text', 'hex', 'lines']) {
+          for (const collapse of [false, true]) {
+            const out = renderChunk({
+              buf,
+              offset: 1000,
+              format,
+              collapse,
+              maxChars,
+              keepTail,
+            });
+            const n = [...out.text].length;
+            worst = Math.max(worst, n - maxChars);
+            if (n > maxChars) over = `${format}/${keepTail}/${maxChars}: ${n} chars`;
+          }
+        }
+      }
+    }
+  }
+  check('render budget is never exceeded', over === null, over ?? `worst margin ${worst}`);
+
+  // The pathological case from docs/26: 4096 binary bytes rendered as hex.
+  const unbounded = hexDump(binary.subarray(0, 4096), 0).length;
+  const bounded = renderChunk({ buf: binary.subarray(0, 4096), offset: 0 });
+  check(
+    'hex tail is bounded and discloses truncation',
+    unbounded > 19000 &&
+      [...bounded.text].length <= DEFAULT_MAX_CHARS &&
+      bounded.text.includes('truncated:'),
+    `${unbounded} chars unbounded -> ${[...bounded.text].length} chars`
+  );
+
+  // The truncation footer must be a usable handle, not just a warning.
+  const range = renderChunk({
+    buf: Buffer.alloc(10000, 0x78),
+    offset: 5000,
+    format: 'text',
+    maxChars: 1000,
+    keepTail: false,
+  });
+  const dropped = 10000 - (range.shownEnd - range.shownStart);
+  check(
+    'truncation footer resumes at an exact offset',
+    range.text.includes(`serial_read_range(offset=${range.shownEnd}, length=${dropped})`),
+    range.text.split('\n').pop()
+  );
+
+  const { text: collapsed, removed } = collapseRepeatedLines('a\na\na\nb\nc\nc');
+  check(
+    'repeated lines collapse',
+    collapsed === 'a  [x3]\nb\nc  [x2]' && removed === 3,
+    `${JSON.stringify(collapsed)} removed=${removed}`
+  );
+
+  // CJK must be budgeted by characters, not bytes (3 bytes per char).
+  check(
+    'char budget counts characters, not bytes',
+    headBytesWithinCharBudget(Buffer.from('温度センサ', 'utf8'), 2) === 6 &&
+      tailBytesWithinCharBudget(Buffer.from('温度センサ', 'utf8'), 2) === 6,
+    'CJK 2 chars = 6 bytes at both ends'
+  );
+}
+
 async function run() {
   await testMainFlow();
   await testAuth();
   await testBridgeAbsent();
+  testRenderBudget();
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) FAILED`);

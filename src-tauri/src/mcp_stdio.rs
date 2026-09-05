@@ -53,6 +53,19 @@ const WAIT_WINDOW_BYTES: u32 = 65536;
 const WAIT_RETAIN_BYTES: usize = 65536;
 /// この比率を超えて非印字バイトが含まれるときは hex ダンプ表示にする
 const BINARY_RATIO: f64 = 0.1;
+/// 読み出し系ツールが返す本文の既定上限（文字数）
+///
+/// トークンではなく**文字数**で課すのは、サーバがクライアントのトークナイザを
+/// 知り得ず、hex や CJK では推定が必ず外れるため（docs/26 統括原則）。
+/// ログ的 ASCII ではおおよそ 3.6 文字/トークン。
+pub const DEFAULT_MAX_CHARS: usize = 4000;
+/// `max_chars` に指定できる下限 / 上限
+///
+/// 下限は [`ENVELOPE_RESERVE`] より大きく取る。ヘッダとフッタは切り詰め対象に
+/// しない（切り詰めた事実と続きの取り方を必ず伝えるため）ので、封筒すら
+/// 入らない予算を許すと本文が空でも上限を超えてしまう。
+pub const MIN_MAX_CHARS: usize = 500;
+pub const MAX_MAX_CHARS: usize = 200_000;
 /// サポートする MCP プロトコル版（クライアント指定をエコーできる版）
 const KNOWN_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
 /// クライアント指定が未知のときに名乗る版
@@ -320,26 +333,353 @@ pub fn hex_dump(buf: &[u8], base_offset: u64) -> String {
     rows.join("\n")
 }
 
-/// テキストなら lossy UTF-8、バイナリらしければ hex ダンプ
-fn render_bytes(buf: &[u8], base_offset: u64) -> (&'static str, String) {
-    if buf.is_empty() {
-        ("empty", "(no data)".to_string())
-    } else if looks_like_text(buf) {
-        ("text", String::from_utf8_lossy(buf).into_owned())
-    } else {
-        ("hex", hex_dump(buf, base_offset))
+/// 出力の描画形式（ツール引数 `format`）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderFormat {
+    /// 中身を見てテキスト / hex を選ぶ（既定）
+    Auto,
+    /// 常に lossy UTF-8 テキスト
+    Text,
+    /// 常に hex ダンプ
+    Hex,
+    /// テキストだが、両端の欠けた行を捨てて完全な行だけを出す
+    Lines,
+}
+
+impl RenderFormat {
+    pub fn parse(v: Option<&Value>) -> Result<Self, String> {
+        match v {
+            None | Some(Value::Null) => Ok(Self::Auto),
+            Some(v) => match v.as_str() {
+                Some("auto") => Ok(Self::Auto),
+                Some("text") => Ok(Self::Text),
+                Some("hex") => Ok(Self::Hex),
+                Some("lines") => Ok(Self::Lines),
+                _ => Err("bad arguments: 'format' must be one of auto/text/hex/lines".to_string()),
+            },
+        }
+    }
+
+    /// このバイト列を実際にどう描画するか
+    fn resolve(self, buf: &[u8]) -> Self {
+        match self {
+            Self::Auto if looks_like_text(buf) => Self::Text,
+            Self::Auto => Self::Hex,
+            other => other,
+        }
     }
 }
 
-fn render_chunk(buf: &[u8], offset: u64, total_bytes: Option<u64>, extra: &[String]) -> String {
-    let (mode, body) = render_bytes(buf, offset);
+/// テキストなら lossy UTF-8、バイナリらしければ hex ダンプ
+///
+/// 予算を持たない小さな断片（`serial_wait_for` の末尾 256 バイトなど）専用。
+/// 呼び出しの本文は必ず [`render_chunk`] を通し、予算を課すこと。
+fn render_bytes(buf: &[u8], base_offset: u64) -> String {
+    if buf.is_empty() {
+        "(no data)".to_string()
+    } else if looks_like_text(buf) {
+        String::from_utf8_lossy(buf).into_owned()
+    } else {
+        hex_dump(buf, base_offset)
+    }
+}
+
+/// hex ダンプ 1 行が消費する文字数（16 バイト分 + 改行）
+///
+/// `00000010  30 31 .. 66  |0123456789abcdef|` = 78 文字 + `\n`。
+/// この定数のおかげで hex は「文字数 → バイト数」を厳密に逆算できる。
+const HEX_ROW_CHARS: usize = 79;
+
+/// lossy UTF-8 変換したときの文字数が `max_chars` 以下に収まる最大の先頭バイト数
+///
+/// `String::from_utf8_lossy` と同じ規則で数える。不正バイト列は
+/// `Utf8Error::error_len()` 分をまとめて 1 個の U+FFFD にするため、
+/// 「1 バイト = 1 文字以下」を仮定した概算より正確に予算を使い切れる。
+pub fn head_bytes_within_char_budget(buf: &[u8], max_chars: usize) -> usize {
+    let mut consumed = 0usize;
+    let mut chars = 0usize;
+    while consumed < buf.len() && chars < max_chars {
+        let rest = &buf[consumed..];
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                for (i, _) in s.char_indices() {
+                    if chars >= max_chars {
+                        return consumed + i;
+                    }
+                    chars += 1;
+                }
+                return buf.len();
+            }
+            Err(e) => {
+                // valid_up_to() までは妥当な UTF-8 なので from_utf8 は必ず成功する
+                let valid = std::str::from_utf8(&rest[..e.valid_up_to()]).unwrap_or("");
+                for (i, _) in valid.char_indices() {
+                    if chars >= max_chars {
+                        return consumed + i;
+                    }
+                    chars += 1;
+                }
+                consumed += e.valid_up_to();
+                if chars >= max_chars {
+                    return consumed;
+                }
+                // 不正列は error_len 分（末尾切れなら残り全部）で 1 個の U+FFFD
+                let skip = e.error_len().unwrap_or(rest.len() - e.valid_up_to());
+                consumed += skip;
+                chars += 1;
+            }
+        }
+    }
+    consumed.min(buf.len())
+}
+
+/// 同上を末尾から数え、残すべき**末尾バイト数**を返す
+pub fn tail_bytes_within_char_budget(buf: &[u8], max_chars: usize) -> usize {
+    // 先頭から順に「ここから末尾までが予算に収まるか」を二分探索するより、
+    // UTF-8 の先頭バイト境界を末尾から辿って数えるほうが単純で速い。
+    let mut start = buf.len();
+    let mut chars = 0usize;
+    while start > 0 && chars < max_chars {
+        // 直前の文字境界まで戻る（継続バイト 10xxxxxx を最大 3 個スキップ）
+        let mut cand = start - 1;
+        let mut steps = 0;
+        while cand > 0 && steps < 3 && (buf[cand] & 0xc0) == 0x80 {
+            cand -= 1;
+            steps += 1;
+        }
+        start = cand;
+        chars += 1;
+    }
+    buf.len() - start
+}
+
+/// 連続する同一行を 1 行 + 回数表示に畳む。畳んだ行数も返す
+pub fn collapse_repeated_lines(text: &str) -> (String, usize) {
+    let mut out: Vec<String> = Vec::new();
+    let mut removed = 0usize;
+    let mut prev: Option<&str> = None;
+    let mut run = 0usize;
+    let flush = |out: &mut Vec<String>, line: &str, run: usize| {
+        if run > 1 {
+            out.push(format!("{line}  [x{run}]"));
+        } else {
+            out.push(line.to_string());
+        }
+    };
+    for line in text.split('\n') {
+        match prev {
+            Some(p) if p == line => run += 1,
+            Some(p) => {
+                if run > 1 {
+                    removed += run - 1;
+                }
+                flush(&mut out, p, run);
+                prev = Some(line);
+                run = 1;
+            }
+            None => {
+                prev = Some(line);
+                run = 1;
+            }
+        }
+    }
+    if let Some(p) = prev {
+        if run > 1 {
+            removed += run - 1;
+        }
+        flush(&mut out, p, run);
+    }
+    (out.join("\n"), removed)
+}
+
+/// 予算に収まるよう切り出した描画結果
+///
+/// ツール経路が使うのは `text` だけだが、残りは**同じ内容がヘッダとフッタに
+/// 文字列として現れる**ものの構造化版であり、テストが「本文が示すバイト範囲」と
+/// 「報告したオフセット」の一致を機械的に検証するために読む。文字列を
+/// パースして検証すると、書式を変えた瞬間にテストが黙って無意味になる。
+pub struct Rendered {
+    pub text: String,
+    /// 実際に描画したバイト範囲（ストリーム絶対オフセット）
+    #[allow(dead_code)]
+    pub shown_start: u64,
+    #[allow(dead_code)]
+    pub shown_end: u64,
+    #[allow(dead_code)]
+    pub truncated: bool,
+}
+
+/// ヘッダ + フッタのために確保しておく文字数
+const ENVELOPE_RESERVE: usize = 240;
+
+/// `max_chars` を厳守して 1 チャンクを描画する
+///
+/// 予算に収まらないときは**バイト単位で切り出してから**描画するので、
+/// 出したバイト範囲を絶対オフセットで正確に報告でき、続きを
+/// `serial_read_range` で 1 回で取り直せる（設計原則「ペイロードではなく
+/// ハンドル」）。切り詰めは必ずフッタで報告し、黙って短くしない。
+#[allow(clippy::too_many_arguments)]
+fn render_chunk(
+    buf: &[u8],
+    offset: u64,
+    total_bytes: Option<u64>,
+    extra: &[String],
+    format: RenderFormat,
+    collapse: bool,
+    max_chars: usize,
+    keep_tail: bool,
+) -> Rendered {
+    if buf.is_empty() {
+        let mut header = vec![format!("offset={offset}"), "bytes=0".to_string()];
+        if let Some(total) = total_bytes {
+            header.push(format!("total_bytes={total}"));
+        }
+        header.push("rendering=empty".to_string());
+        header.extend(extra.iter().cloned());
+        return Rendered {
+            text: format!("{}\n---\n(no data)", header.join("  ")),
+            shown_start: offset,
+            shown_end: offset,
+            truncated: false,
+        };
+    }
+
+    let mode = format.resolve(buf);
+    let body_budget = max_chars.saturating_sub(ENVELOPE_RESERVE).max(80);
+
+    // --- バイト単位で切り出す（ここが予算を守る唯一の場所） ---
+    let (slice, shown_start) = match mode {
+        RenderFormat::Hex => {
+            let rows = (body_budget / HEX_ROW_CHARS).max(1);
+            let fit = rows * 16;
+            if buf.len() <= fit {
+                (buf, offset)
+            } else if keep_tail {
+                // 行の境界を保つため 16 の倍数で切る
+                let start = buf.len() - fit;
+                (&buf[start..], offset + start as u64)
+            } else {
+                (&buf[..fit], offset)
+            }
+        }
+        _ => {
+            if keep_tail {
+                let keep = tail_bytes_within_char_budget(buf, body_budget);
+                let start = buf.len() - keep;
+                (&buf[start..], offset + start as u64)
+            } else {
+                let keep = head_bytes_within_char_budget(buf, body_budget);
+                (&buf[..keep], offset)
+            }
+        }
+    };
+    let mut shown_start = shown_start;
+    let mut slice = slice;
+
+    // `lines` は端の欠けた行を捨てる。捨てた分だけ shown 範囲も詰める
+    if mode == RenderFormat::Lines {
+        if let Some(p) = slice.iter().position(|&b| b == b'\n') {
+            shown_start += p as u64 + 1;
+            slice = &slice[p + 1..];
+        } else {
+            slice = &slice[slice.len()..];
+        }
+        if let Some(p) = slice.iter().rposition(|&b| b == b'\n') {
+            slice = &slice[..p + 1];
+        } else {
+            slice = &slice[..0];
+        }
+    }
+    let shown_end = shown_start + slice.len() as u64;
+    let truncated = slice.len() < buf.len();
+
+    // --- 描画 ---
+    let mut body = match mode {
+        RenderFormat::Hex => hex_dump(slice, shown_start),
+        _ => String::from_utf8_lossy(slice).into_owned(),
+    };
+    let mut collapsed = 0usize;
+    if collapse && mode != RenderFormat::Hex {
+        let (c, removed) = collapse_repeated_lines(&body);
+        body = c;
+        collapsed = removed;
+    }
+
+    // --- ヘッダ / フッタ ---
+    let mode_label = match mode {
+        RenderFormat::Hex => "hex",
+        RenderFormat::Lines => "lines",
+        _ => "text",
+    };
     let mut header = vec![format!("offset={offset}"), format!("bytes={}", buf.len())];
     if let Some(total) = total_bytes {
         header.push(format!("total_bytes={total}"));
     }
-    header.push(format!("rendering={mode}"));
+    header.push(format!("rendering={mode_label}"));
     header.extend(extra.iter().cloned());
-    format!("{}\n---\n{}", header.join("  "), body)
+    if truncated {
+        header.push(format!(
+            "shown={}..{} ({} of {} bytes)",
+            shown_start,
+            shown_end,
+            slice.len(),
+            buf.len()
+        ));
+    }
+    if collapsed > 0 {
+        header.push(format!("collapsed={collapsed} repeated lines"));
+    }
+
+    // 落とした範囲は前後どちらにも出る（tail は先頭側、range は末尾側、
+    // `lines` は端の欠け行の分だけ両側）。両方を正確に示し、続きを 1 回で
+    // 取り直せるようにする。黙って短くしない（設計原則 5）。
+    let footer = if truncated {
+        let dropped = buf.len() - slice.len();
+        let end = offset + buf.len() as u64;
+        let mut next: Vec<String> = Vec::new();
+        if shown_start > offset {
+            next.push(format!(
+                "serial_read_range(offset={offset}, length={})",
+                shown_start - offset
+            ));
+        }
+        if shown_end < end {
+            next.push(format!(
+                "serial_read_range(offset={shown_end}, length={})",
+                end - shown_end
+            ));
+        }
+        Some(format!(
+            "\n---\ntruncated: {dropped} more bytes in this read (budget {max_chars} chars). next: {}",
+            next.join(" and ")
+        ))
+    } else {
+        None
+    };
+
+    let head = header.join("  ");
+    let foot = footer.unwrap_or_default();
+    // 最終的な硬い上限。溢れたら**本文だけ**を削り、フッタは決して落とさない。
+    let fixed = head.chars().count() + 5 + foot.chars().count();
+    let allowed = max_chars.saturating_sub(fixed);
+    if body.chars().count() > allowed {
+        body = body.chars().take(allowed).collect();
+    }
+
+    // 予算超過を構造的に不可能にするための最後の砦。オフセットが桁外れに
+    // 大きく（テラバイト級のキャプチャ）封筒だけで予算を食い潰す場合にのみ
+    // 効く。通常経路では発動しない。
+    let mut text = format!("{head}\n---\n{body}{foot}");
+    if text.chars().count() > max_chars {
+        text = text.chars().take(max_chars).collect();
+    }
+
+    Rendered {
+        text,
+        shown_start,
+        shown_end,
+        truncated,
+    }
 }
 
 /// "48 65 6c" / "0x48,0x65" / "48:65-6C" などを受け付ける
@@ -578,13 +918,27 @@ pub fn tool_definitions() -> Value {
         {
             "name": "serial_read_tail",
             "title": "Read latest serial data",
-            "description": "Read the most recent bytes received from the device. Rendered as UTF-8 text, or as a hex dump when the data looks binary. Default 4096 bytes, max 1048576.",
+            "description": format!(
+                "Read the most recent bytes received from the device. Rendered as UTF-8 text, or as a hex dump when the data looks binary. Default {DEFAULT_TAIL_BYTES} bytes, max {MAX_READ_LENGTH}. Output is capped at max_chars ({DEFAULT_MAX_CHARS} by default); when it does not fit, the most recent part is kept and a footer reports the exact byte range shown plus a serial_read_range call for the rest."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "bytes": {
                         "type": "integer", "minimum": 1, "maximum": MAX_READ_LENGTH,
                         "description": format!("How many trailing bytes to read (default {DEFAULT_TAIL_BYTES}).")
+                    },
+                    "format": {
+                        "type": "string", "enum": ["auto", "text", "hex", "lines"],
+                        "description": "auto (default): text, or hex when the data looks binary. text: always UTF-8. hex: always a hex dump (about 79 chars per 16 bytes, so it burns budget ~5x faster than text). lines: text with the partial first and last lines dropped."
+                    },
+                    "collapse_repeats": {
+                        "type": "boolean",
+                        "description": "Collapse consecutive identical lines into one line with [xN]. Applied after the byte budget, so raise 'bytes' as well when a log is highly repetitive. Not available in hex."
+                    },
+                    "max_chars": {
+                        "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS,
+                        "description": format!("Hard cap on the returned characters (default {DEFAULT_MAX_CHARS}). Roughly 3.6 chars per token for ASCII logs.")
                     }
                 }
             },
@@ -593,12 +947,26 @@ pub fn tool_definitions() -> Value {
         {
             "name": "serial_read_range",
             "title": "Read a serial byte range",
-            "description": "Read an explicit byte range of the received stream (offsets match those reported by serial_read_tail and serial_wait_for). Rendered as text, or as a hex dump when the data looks binary.",
+            "description": format!(
+                "Read an explicit byte range of the received stream (offsets match those reported by serial_read_tail and serial_wait_for). Rendered as text, or as a hex dump when the data looks binary. Output is capped at max_chars ({DEFAULT_MAX_CHARS} by default); when it does not fit, the start of the range is kept and a footer gives the exact offset to resume from."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "offset": { "type": "integer", "minimum": 0, "description": "Absolute start offset in the received stream." },
-                    "length": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LENGTH, "description": format!("How many bytes to read (max {MAX_READ_LENGTH}).") }
+                    "length": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LENGTH, "description": format!("How many bytes to read (max {MAX_READ_LENGTH}).") },
+                    "format": {
+                        "type": "string", "enum": ["auto", "text", "hex", "lines"],
+                        "description": "auto (default): text, or hex when the data looks binary. text: always UTF-8. hex: always a hex dump (about 79 chars per 16 bytes). lines: text with the partial first and last lines dropped."
+                    },
+                    "collapse_repeats": {
+                        "type": "boolean",
+                        "description": "Collapse consecutive identical lines into one line with [xN]. Not available in hex."
+                    },
+                    "max_chars": {
+                        "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS,
+                        "description": format!("Hard cap on the returned characters (default {DEFAULT_MAX_CHARS}).")
+                    }
                 },
                 "required": ["offset", "length"]
             },
@@ -667,6 +1035,28 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("bad arguments: '{key}' (string) is required"))
 }
 
+fn arg_bool(args: &Value, key: &str, default: bool) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(b)) => Ok(*b),
+        _ => Err(format!("bad arguments: '{key}' must be a boolean")),
+    }
+}
+
+/// 読み出し系ツール共通の描画引数（`format` / `collapse_repeats` / `max_chars`）
+fn render_args(args: &Value) -> Result<(RenderFormat, bool, usize), String> {
+    let format = RenderFormat::parse(args.get("format"))?;
+    let collapse = arg_bool(args, "collapse_repeats", false)?;
+    let max_chars = arg_u64(
+        args,
+        "max_chars",
+        MIN_MAX_CHARS as u64,
+        MAX_MAX_CHARS as u64,
+    )?
+    .unwrap_or(DEFAULT_MAX_CHARS as u64) as usize;
+    Ok((format, collapse, max_chars))
+}
+
 /// 1 ツール呼び出し（テキスト応答 or エラーメッセージ）。キャンセル無視版。
 /// 本番経路はワーカー側の [`run_tool_call`] → [`call_tool_with_cancel`]。
 #[cfg(test)]
@@ -694,14 +1084,17 @@ pub fn call_tool_with_cancel(
                 .get("port_name")
                 .and_then(Value::as_str)
                 .unwrap_or("(none)");
+            // `raw: {全 JSON}` は上の 4 行と同じ内容を JSON で繰り返すだけで、
+            // 情報ゼロのままトークンを倍にしていた（docs/26 §5）。
             Ok(format!(
-                "connected: {}\nport: {}\ntotal_bytes: {}\napp_version: {} (protocol {})\n\nraw: {}",
+                "connected: {}\nport: {}\ntotal_bytes: {}\napp_version: {} (protocol {})",
                 if connected { "yes" } else { "no" },
                 port,
                 res.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
-                res.get("app_version").and_then(Value::as_str).unwrap_or("unknown"),
+                res.get("app_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
                 res.get("protocol").and_then(Value::as_u64).unwrap_or(0),
-                res
             ))
         }
         "serial_ports" => {
@@ -736,22 +1129,30 @@ pub fn call_tool_with_cancel(
         "serial_read_tail" => {
             let bytes = arg_u64(args, "bytes", 1, MAX_READ_LENGTH as u64)?
                 .unwrap_or(DEFAULT_TAIL_BYTES as u64);
+            let (format, collapse, max_chars) = render_args(args)?;
             let res = bridge.request("tail", json!({ "bytes": bytes }))?;
             let buf = BASE64
                 .decode(res.get("base64").and_then(Value::as_str).unwrap_or(""))
                 .map_err(|_| "bridge returned invalid base64".to_string())?;
+            // tail は「最新」が欲しい呼び出しなので、溢れたら末尾を残す
             Ok(render_chunk(
                 &buf,
                 res.get("offset").and_then(Value::as_u64).unwrap_or(0),
                 Some(res.get("total_bytes").and_then(Value::as_u64).unwrap_or(0)),
                 &[],
-            ))
+                format,
+                collapse,
+                max_chars,
+                true,
+            )
+            .text)
         }
         "serial_read_range" => {
             let offset = arg_u64(args, "offset", 0, u64::MAX)?
                 .ok_or_else(|| "bad arguments: 'offset' (integer) is required".to_string())?;
             let length = arg_u64(args, "length", 1, MAX_READ_LENGTH as u64)?
                 .ok_or_else(|| "bad arguments: 'length' (integer) is required".to_string())?;
+            let (format, collapse, max_chars) = render_args(args)?;
             let res =
                 bridge.request("read_range", json!({ "offset": offset, "length": length }))?;
             let buf = BASE64
@@ -761,12 +1162,18 @@ pub fn call_tool_with_cancel(
                 .get("length_read")
                 .and_then(Value::as_u64)
                 .unwrap_or(buf.len() as u64);
+            // range は「この位置から」が欲しい呼び出しなので、溢れたら先頭を残す
             Ok(render_chunk(
                 &buf,
                 res.get("offset").and_then(Value::as_u64).unwrap_or(offset),
                 None,
                 &[format!("length_read={length_read}")],
-            ))
+                format,
+                collapse,
+                max_chars,
+                false,
+            )
+            .text)
         }
         "serial_send" => {
             let text = arg_str(args, "text")?;
@@ -871,7 +1278,7 @@ pub fn call_tool_with_cancel(
                         outcome.tail_offset
                     )
                 };
-                let (_, body) = render_bytes(&outcome.tail, outcome.tail_offset);
+                let body = render_bytes(&outcome.tail, outcome.tail_offset);
                 Ok(format!("{head}\n--- {tail_label}\n{body}"))
             }
         }
@@ -1174,6 +1581,259 @@ mod tests {
         assert!(looks_like_text(&mostly_text));
     }
 
+    // ---------------- 描画予算 (docs/26 §7 段階 0) ----------------
+
+    fn render_default(buf: &[u8], offset: u64, keep_tail: bool, max_chars: usize) -> Rendered {
+        render_chunk(
+            buf,
+            offset,
+            None,
+            &[],
+            RenderFormat::Auto,
+            false,
+            max_chars,
+            keep_tail,
+        )
+    }
+
+    #[test]
+    fn test_render_format_parse() {
+        assert_eq!(RenderFormat::parse(None).unwrap(), RenderFormat::Auto);
+        assert_eq!(
+            RenderFormat::parse(Some(&json!("hex"))).unwrap(),
+            RenderFormat::Hex
+        );
+        assert_eq!(
+            RenderFormat::parse(Some(&json!("lines"))).unwrap(),
+            RenderFormat::Lines
+        );
+        assert!(RenderFormat::parse(Some(&json!("yaml"))).is_err());
+    }
+
+    #[test]
+    fn test_char_budget_counts_like_lossy_utf8() {
+        // ASCII は 1 バイト = 1 文字
+        assert_eq!(head_bytes_within_char_budget(b"hello world", 5), 5);
+        assert_eq!(head_bytes_within_char_budget(b"hello", 99), 5);
+        // CJK は 3 バイト = 1 文字。バイト数で概算すると 1/3 しか使えない
+        let jp = "温度センサ".as_bytes();
+        assert_eq!(jp.len(), 15);
+        assert_eq!(head_bytes_within_char_budget(jp, 2), 6, "2 chars = 6 bytes");
+        assert_eq!(head_bytes_within_char_budget(jp, 5), 15);
+        // 不正バイト列は error_len 分をまとめて 1 個の U+FFFD
+        let bad = [b'a', 0xff, 0xfe, b'b'];
+        let lossy = String::from_utf8_lossy(&bad);
+        assert_eq!(lossy.chars().count(), 4, "a + 2x U+FFFD + b");
+        assert_eq!(head_bytes_within_char_budget(&bad, 4), 4);
+        assert_eq!(head_bytes_within_char_budget(&bad, 2), 2);
+    }
+
+    #[test]
+    fn test_tail_char_budget_does_not_split_multibyte() {
+        let jp = "温度センサ".as_bytes();
+        // 末尾 2 文字 = 6 バイト。境界を割ると U+FFFD が出るので割らないこと
+        let keep = tail_bytes_within_char_budget(jp, 2);
+        assert_eq!(keep, 6);
+        let tail = &jp[jp.len() - keep..];
+        assert_eq!(std::str::from_utf8(tail).unwrap(), "ンサ");
+    }
+
+    #[test]
+    fn test_collapse_repeated_lines() {
+        let (out, removed) = collapse_repeated_lines("a\na\na\nb\nc\nc");
+        assert_eq!(out, "a  [x3]\nb\nc  [x2]");
+        assert_eq!(removed, 3);
+        let (out, removed) = collapse_repeated_lines("x\ny");
+        assert_eq!(out, "x\ny");
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_render_chunk_never_exceeds_max_chars() {
+        // 受入基準: どんな入力・どんな予算でも、返す文字数は max_chars 以下。
+        let ascii = vec![b'A'; 40_000];
+        let binary: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let jp = "温度 25.5 度\n".repeat(3000).into_bytes();
+        let mut lines = Vec::new();
+        for i in 0..4000 {
+            lines.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        for buf in [&ascii, &binary, &jp, &lines] {
+            for &budget in &[MIN_MAX_CHARS, 500, 1000, DEFAULT_MAX_CHARS, 20_000] {
+                for keep_tail in [true, false] {
+                    for format in [
+                        RenderFormat::Auto,
+                        RenderFormat::Text,
+                        RenderFormat::Hex,
+                        RenderFormat::Lines,
+                    ] {
+                        for collapse in [false, true] {
+                            let r = render_chunk(
+                                buf,
+                                1000,
+                                None,
+                                &[],
+                                format,
+                                collapse,
+                                budget,
+                                keep_tail,
+                            );
+                            let n = r.text.chars().count();
+                            assert!(
+                                n <= budget,
+                                "budget {budget} exceeded: {n} chars (format={format:?} \
+                                 collapse={collapse} keep_tail={keep_tail} len={})",
+                                buf.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_chunk_hex_pathological_case_is_bounded() {
+        // docs/26 の動機となったケース: looks_like_text が false になった瞬間、
+        // 既定 4096 バイトの要求が約 20 KB(6〜8k トークン) を返していた。
+        let binary: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        assert!(!looks_like_text(&binary), "this must render as hex");
+
+        let unbounded = hex_dump(&binary, 0).chars().count();
+        assert!(
+            unbounded > 19_000,
+            "the old behaviour really was ~20 KB, got {unbounded}"
+        );
+
+        let r = render_default(&binary, 0, true, DEFAULT_MAX_CHARS);
+        assert!(r.truncated);
+        assert!(
+            r.text.chars().count() <= DEFAULT_MAX_CHARS,
+            "must fit the default budget"
+        );
+        assert!(
+            r.text.contains("truncated:"),
+            "truncation must be reported, never silent"
+        );
+    }
+
+    #[test]
+    fn test_render_chunk_truncation_footer_is_resumable() {
+        // range 読み (keep_tail=false): 先頭を残し、続きの正確な offset を出す
+        let buf = vec![b'x'; 10_000];
+        let r = render_chunk(
+            &buf,
+            5_000,
+            None,
+            &[],
+            RenderFormat::Text,
+            false,
+            1000,
+            false,
+        );
+        assert!(r.truncated);
+        assert_eq!(r.shown_start, 5_000, "head keeps the start of the range");
+        let dropped = 10_000 - (r.shown_end - r.shown_start);
+        assert!(r.text.contains(&format!(
+            "serial_read_range(offset={}, length={})",
+            r.shown_end, dropped
+        )));
+
+        // tail 読み (keep_tail=true): 末尾を残し、落とした先頭側を指す
+        let r = render_chunk(
+            &buf,
+            5_000,
+            None,
+            &[],
+            RenderFormat::Text,
+            false,
+            1000,
+            true,
+        );
+        assert!(r.truncated);
+        assert_eq!(r.shown_end, 15_000, "tail keeps the most recent bytes");
+        assert!(r.text.contains(&format!(
+            "serial_read_range(offset=5000, length={})",
+            r.shown_start - 5_000
+        )));
+    }
+
+    #[test]
+    fn test_render_chunk_shown_range_matches_the_bytes_rendered() {
+        // 報告した shown 範囲と実際に描いたバイトが一致すること（ハンドルの信頼性）
+        let mut buf = Vec::new();
+        for i in 0..2000 {
+            buf.extend_from_slice(format!("{i:06}\n").as_bytes());
+        }
+        let r = render_chunk(&buf, 700, None, &[], RenderFormat::Text, false, 1200, true);
+        assert!(r.truncated);
+        let body = r.text.split("\n---\n").nth(1).unwrap();
+        let expected = String::from_utf8_lossy(
+            &buf[(r.shown_start - 700) as usize..(r.shown_end - 700) as usize],
+        );
+        assert_eq!(body, expected, "body must be exactly the shown byte range");
+    }
+
+    #[test]
+    fn test_render_chunk_lines_format_drops_partial_lines() {
+        let buf = b"tail of a cut line\nfull line 1\nfull line 2\npartial".to_vec();
+        let r = render_chunk(
+            &buf,
+            0,
+            None,
+            &[],
+            RenderFormat::Lines,
+            false,
+            DEFAULT_MAX_CHARS,
+            false,
+        );
+        let body = r.text.split("\n---\n").nth(1).unwrap();
+        assert_eq!(body, "full line 1\nfull line 2\n");
+        assert_eq!(r.shown_start, 19, "offset advances past the dropped prefix");
+        assert!(r.truncated, "dropping partial lines is reported");
+    }
+
+    #[test]
+    fn test_render_chunk_untruncated_output_has_no_footer() {
+        let r = render_default(b"short\n", 42, true, DEFAULT_MAX_CHARS);
+        assert!(!r.truncated);
+        assert!(!r.text.contains("truncated:"));
+        assert!(!r.text.contains("shown="));
+        assert_eq!(r.shown_start, 42);
+        assert_eq!(r.shown_end, 48);
+    }
+
+    #[test]
+    fn test_render_chunk_collapse_shrinks_repetitive_logs() {
+        let buf = "WDT tick\n".repeat(200).into_bytes();
+        let plain = render_chunk(
+            &buf,
+            0,
+            None,
+            &[],
+            RenderFormat::Text,
+            false,
+            DEFAULT_MAX_CHARS,
+            true,
+        );
+        let collapsed = render_chunk(
+            &buf,
+            0,
+            None,
+            &[],
+            RenderFormat::Text,
+            true,
+            DEFAULT_MAX_CHARS,
+            true,
+        );
+        assert!(collapsed.text.chars().count() < plain.text.chars().count() / 4);
+        assert!(collapsed.text.contains("[x"));
+        assert!(
+            collapsed.text.contains("collapsed="),
+            "collapsing must be disclosed in the header"
+        );
+    }
+
     #[test]
     fn test_hex_dump_format() {
         let dump = hex_dump(b"0123456789abcdefG", 0x10);
@@ -1314,6 +1974,17 @@ mod tests {
         assert!(text.contains("connected: yes"));
         assert!(text.contains("port: COM3"));
         assert!(res["result"].get("isError").is_none());
+        // 以前は同じ内容を `raw: {全 JSON}` で繰り返しており、情報ゼロのまま
+        // トークンを倍にしていた（docs/26 §5）
+        assert!(
+            !text.contains("raw:"),
+            "the duplicate JSON dump must stay gone: {text}"
+        );
+        assert!(
+            text.chars().count() < 120,
+            "status must stay tiny, got {} chars",
+            text.chars().count()
+        );
 
         // ブリッジ側エラーは isError のテキストになる（プロトコルエラーではない）
         let res = rpc(
