@@ -70,7 +70,7 @@ serial-monitor-essential --mcp        # GUI を起動せず MCP stdio サーバ�
 | 項目 | 値 |
 | --- | --- |
 | 実装 | `src-tauri/src/mcp_stdio.rs`（JSON-RPC 2.0 行区切り、stdout は JSON-RPC 専用・ログは stderr） |
-| ツール | `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
+| ツール | `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
 | 接続先 | 環境変数 `SME_BRIDGE_HOST`（既定 `127.0.0.1`）/ `SME_BRIDGE_PORT`（既定 `57320`）/ `SME_BRIDGE_TOKEN` |
 | 登録例 | `claude mcp add serial-monitor -- "<exe のフルパス>" --mcp` |
 
@@ -97,6 +97,29 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
 
 `serial_status` は 4 行のみを返す（以前あった `raw: {全 JSON}` は同じ内容の
 重複だったため廃止）。
+
+### `serial_find` / ブリッジ `find`
+
+キャプチャ全体をサーバ側で正規表現走査し、**件数と少数のオフセット**だけを返す
+（[26 §7.2](26_ai_api_design.md)）。生データは返さないため、応答コストは
+キャプチャ長に依存せず、1 MiB の読み出し上限も越えられる。実装は
+`src-tauri/src/insight/find.rs`（256 KiB 窓 + 4096 B 重なりのストリーミング走査）。
+
+| パラメータ | 既定 | 意味 |
+| --- | --- | --- |
+| `pattern` | 必須 | Rust regex（複数行モード。lookaround 非対応） |
+| `from` / `to` | 全体 | 走査するバイト範囲 |
+| `max_hits` | 20（最大 200） | 引用する行数。**件数はこれに影響されない** |
+| `count_only` | `false` | 件数とカバレッジのみ（最安） |
+
+出力の規範:
+
+- 件数は `exact`、または `AT LEAST — <理由>`（3 秒で打ち切り／欠落を飛ばした）。
+  打ち切り時は再開用の `from=` を必ず添える。
+- **`matches: 0` を単独で出さない。** 走査バイト数・カバレッジ率・欠落・
+  所要時間を必ず併記し、「見つからなかった」と「見に行けなかった」を区別できる
+  ようにする。
+- ヒットを打ち切ったら `showing N of M hits` と明示する。
 
 ---
 

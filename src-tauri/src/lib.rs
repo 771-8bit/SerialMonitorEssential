@@ -1,5 +1,6 @@
 // SerialMonitorEssential - Main library entry point
 mod bridge;
+mod insight;
 mod mcp_stdio;
 mod plotter;
 mod serial;

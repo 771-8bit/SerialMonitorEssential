@@ -188,6 +188,15 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
               </tr>
               <tr>
                 <td>
+                  <code>serial_find</code>
+                </td>
+                <td>
+                  Search the whole capture with a regex, server-side. Returns match counts and
+                  offsets instead of bulk data, so it works on captures far past the read limit.
+                </td>
+              </tr>
+              <tr>
+                <td>
                   <code>serial_send</code>
                 </td>
                 <td>Send text with an optional line ending.</td>

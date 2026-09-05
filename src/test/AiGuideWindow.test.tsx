@@ -60,15 +60,17 @@ describe('AiGuideWindow', () => {
     });
   });
 
-  it('lists all seven MCP tools', async () => {
+  it('lists every MCP tool the adapter exposes', async () => {
     invokeMock.mockResolvedValue(guideInfo());
     render(<AiGuideWindow />);
 
+    // Must stay in sync with tool_definitions() in src-tauri/src/mcp_stdio.rs
     for (const tool of [
       'serial_status',
       'serial_ports',
       'serial_read_tail',
       'serial_read_range',
+      'serial_find',
       'serial_send',
       'serial_send_hex',
       'serial_wait_for',

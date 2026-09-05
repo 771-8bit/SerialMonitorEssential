@@ -410,6 +410,69 @@ export function renderBytes(buf, baseOffset = 0) {
   return { mode: 'hex', body: hexDump(buf, baseOffset) };
 }
 
+/**
+ * Render a `find` reply as a compact answer.
+ *
+ * Counts and a few handles only — never bulk data. A zero is never bare: it
+ * always carries the coverage that produced it, so "not found" cannot be
+ * confused with "could not look" (docs/26 §6.2 rule 5).
+ */
+export function renderFind(res, maxChars = DEFAULT_MAX_CHARS) {
+  const num = (k) => Number(res?.[k] ?? 0);
+  const matches = num('matches');
+  const exact = res?.exact === true;
+  const complete = res?.complete === true;
+  const start = num('range_start');
+  const end = num('range_end');
+  const scanned = num('bytes_scanned');
+  const gap = num('gap_bytes');
+
+  let qualifier;
+  if (exact) {
+    qualifier = 'exact';
+  } else {
+    const why = [];
+    if (!complete) why.push('scan cut short');
+    if (gap > 0) why.push('unreadable bytes skipped');
+    qualifier = `AT LEAST — ${why.join(', ')}`;
+  }
+  const lines = [`matches: ${matches} (${qualifier})`];
+
+  const requested = Math.max(0, end - start);
+  const coverage = requested === 0 ? 100 : Math.min(100, Math.floor((scanned * 100) / requested));
+  let cov = `scanned ${scanned} of ${requested} bytes in offset ${start}..${end} (${coverage}%)`;
+  if (gap > 0) cov += `, ${gap} bytes unreadable`;
+  cov += `, ${num('elapsed_ms')}ms`;
+  lines.push(cov);
+
+  if (matches > 0 && res?.first != null && res?.last != null) {
+    lines.push(`first @off=${res.first}  last @off=${res.last}`);
+  }
+  if (!complete && end > start) {
+    lines.push(`resume: serial_find(pattern=..., from=${start + scanned}, to=${end})`);
+  }
+
+  let body = lines.join('\n');
+  const hits = Array.isArray(res?.hits) ? res.hits : [];
+  let listed = 0;
+  for (const h of hits) {
+    const line = `\n@off=${h.offset}  ${h.excerpt ?? ''}${h.excerpt_truncated ? '…' : ''}`;
+    if ([...body].length + [...line].length + 120 > maxChars) break;
+    body += line;
+    listed += 1;
+  }
+  if (matches > listed) {
+    body +=
+      `\nshowing ${listed} of ${matches} hits (raise max_hits, or narrow with from/to). ` +
+      'Fetch context with serial_read_range(offset=<@off>, length=200).';
+  } else if (listed > 0) {
+    body += '\nall hits listed.';
+  }
+
+  const all = [...body];
+  return all.length > maxChars ? all.slice(0, maxChars).join('') : body;
+}
+
 /** Parse the `format` tool argument. */
 export function parseRenderFormat(v) {
   if (v === undefined || v === null) return 'auto';
@@ -944,6 +1007,57 @@ export function createServer(client) {
           maxChars: maxChars ?? DEFAULT_MAX_CHARS,
           keepTail: false,
         }).text;
+      }
+    )
+  );
+
+  server.registerTool(
+    'serial_find',
+    {
+      title: 'Search the capture',
+      description:
+        'Search the whole capture for a regular expression, server-side, and get back the number of matches plus a few byte offsets. Use this INSTEAD of reading bulk data to look for something: it costs the same handful of tokens whether the capture is 4 KB or 4 GB, and it works past the 1 MiB read limit. Then fetch context for one interesting offset with serial_read_range. The match count is exact unless the reply says AT LEAST (the scan was cut short or bytes were unreadable), and a zero always comes with the coverage that produced it.',
+      inputSchema: {
+        pattern: z
+          .string()
+          .describe('Regular expression (matched in multi-line mode over the raw stream).'),
+        from: z.number().int().min(0).optional().describe('Start offset of the search range (default 0).'),
+        to: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe('End offset of the search range (default: end of the capture).'),
+        max_hits: z
+          .number()
+          .int()
+          .min(0)
+          .max(200)
+          .optional()
+          .describe(
+            'How many matching lines to quote (default 20). The count is always complete regardless of this.'
+          ),
+        count_only: z
+          .boolean()
+          .optional()
+          .describe('Return only the count and coverage, quoting no lines. The cheapest answer.'),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(`Hard cap on the returned characters (default ${DEFAULT_MAX_CHARS}).`),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    handler(
+      async ({ pattern, from, to, max_hits: maxHits, count_only: countOnly, max_chars: maxChars }) => {
+        const params = { pattern, max_hits: countOnly ? 0 : (maxHits ?? 20) };
+        if (from !== undefined) params.from = from;
+        if (to !== undefined) params.to = to;
+        const res = await client.request('find', params);
+        return renderFind(res, maxChars ?? DEFAULT_MAX_CHARS);
       }
     )
   );

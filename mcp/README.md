@@ -88,16 +88,25 @@ After registering, you should see `serial-monitor` in `claude mcp list`.
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `serial_status` | none | Connection state, port name, received byte count, app version (summary + raw JSON) |
+| `serial_status` | none | Connection state, port name, received byte count, app version (four lines; the duplicate raw JSON dump was removed) |
 | `serial_ports` | none | List of serial ports the PC recognizes |
-| `serial_read_tail` | `bytes?` (default 4096 / max 1048576) | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes |
-| `serial_read_range` | `offset`, `length` (max 1048576) | Received data in the given range. Same display rules as `serial_read_tail` |
+| `serial_read_tail` | `bytes?` (default 4096 / max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes. Output is capped at `max_chars` (default 4000) |
+| `serial_read_range` | `offset`, `length` (max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | Received data in the given range. Same display and budget rules as `serial_read_tail` |
+| `serial_find` | `pattern`, `from?`, `to?`, `max_hits?` (default 20), `count_only?`, `max_chars?` | Searches the whole capture server-side and returns match counts plus a few offsets, never bulk data. Costs the same whether the capture is 4 KB or 4 GB, and is not limited to 1 MiB |
 | `serial_send` | `text`, `line_ending?` (`none`/`cr`/`lf`/`crlf`, default `lf`) | Number of bytes written. **The send is also shown in the GUI** |
 | `serial_send_hex` | `hex` (e.g. `"01 03 00 00 00 0A"`) | Validates the hex pairs and sends the raw bytes. No line ending is appended |
 | `serial_wait_for` | `pattern`, `timeout_ms?` (default 10000), `from_end?` (default true) | **The headline feature.** Polls the data that arrives after the call every 500 ms and, on a regex match, returns the matching portion and its offset. On timeout, shows the last 256 bytes |
 
 Notes:
 
+- Reading tools enforce a character budget. `format` is `auto` (default), `text`, `hex` or
+  `lines`; `collapse_repeats` folds consecutive identical lines into `[xN]`; `max_chars`
+  (default 4000, range 500..200000) is a hard cap. When the output does not fit, the bytes are
+  sliced before rendering, the header reports `shown=<start>..<end>`, and a footer gives the
+  exact `serial_read_range(...)` call for what was left out.
+- `serial_find` reports an exact count, or `AT LEAST` when the scan was cut short (3 s budget)
+  or skipped unreadable bytes. A zero always comes with the coverage that produced it, so
+  "not found" cannot be mistaken for "could not look".
 - `serial_wait_for`'s `pattern` is a JavaScript regular expression source (evaluated with the `m` flag).
 - In this Node version, the `offset` returned by `serial_wait_for` is based on lossy UTF-8
   conversion, so if invalid UTF-8 bytes appear before the match, the offset can drift by the
@@ -113,6 +122,11 @@ Notes:
 2. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
 3. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
 4. serial_read_tail         → read a little more surrounding context
+
+To investigate a long capture, search instead of reading:
+
+1. serial_find              → e.g. "E:|PANIC|timeout" → counts, plus the first and last offsets
+2. serial_read_range        → pull ~200 bytes around one interesting offset
 ```
 
 Example instruction to an agent:

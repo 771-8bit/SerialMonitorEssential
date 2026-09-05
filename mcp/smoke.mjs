@@ -24,6 +24,7 @@ import {
   parseHex,
   renderBytes,
   renderChunk,
+  renderFind,
   tailBytesWithinCharBudget,
   waitForPattern,
 } from './server.mjs';
@@ -64,6 +65,45 @@ async function createFakeBridge({ token = null, initial = Buffer.alloc(0) } = {}
           base64: slice.toString('base64'),
           offset: start,
           total_bytes: state.data.length,
+        };
+      }
+      // The real scan lives in the Rust bridge (insight/find.rs); the fake only
+      // has to answer in the same shape so the client wiring can be exercised.
+      case 'find': {
+        const re = new RegExp(String(params.pattern ?? ''), 'gm');
+        const text = state.data.toString('binary');
+        const hits = [];
+        let matches = 0;
+        let first = null;
+        let last = null;
+        for (const m of text.matchAll(re)) {
+          matches += 1;
+          if (first === null) first = m.index;
+          last = m.index;
+          if (hits.length < Number(params.max_hits ?? 20)) {
+            const lineStart = text.lastIndexOf('\n', m.index) + 1;
+            const nl = text.indexOf('\n', m.index);
+            hits.push({
+              offset: m.index,
+              len: m[0].length,
+              excerpt: text.slice(lineStart, nl < 0 ? text.length : nl),
+              excerpt_truncated: false,
+            });
+          }
+        }
+        return {
+          matches,
+          exact: true,
+          complete: true,
+          hits,
+          first,
+          last,
+          range_start: 0,
+          range_end: state.data.length,
+          bytes_scanned: state.data.length,
+          gap_bytes: 0,
+          total_bytes: state.data.length,
+          elapsed_ms: 1,
         };
       }
       case 'read_range': {
@@ -251,6 +291,19 @@ async function testMainFlow() {
       rendered.body.split('\n')[0]
     );
 
+    // find round-trip: counts and offsets come back, bulk data does not
+    const found = await client.request('find', { pattern: '\\d\\.\\d', max_hits: 5 });
+    const foundText = renderFind(found);
+    check(
+      'find returns counts and handles, not payload',
+      found.matches > 0 &&
+        found.exact === true &&
+        !JSON.stringify(found).includes('base64') &&
+        foundText.startsWith(`matches: ${found.matches} (exact)`) &&
+        foundText.includes(`first @off=${found.first}`),
+      foundText.split('\n')[0]
+    );
+
     // 4. wait_for-style polling match
     const before = bridge.state.data.length;
     setTimeout(() => bridge.append('PONG 42\r\n'), 700);
@@ -409,6 +462,38 @@ function testRenderBudget() {
     'truncation footer resumes at an exact offset',
     range.text.includes(`serial_read_range(offset=${range.shownEnd}, length=${dropped})`),
     range.text.split('\n').pop()
+  );
+
+  // find rendering: a zero must never be bare (docs/26 §6.2 rule 5).
+  const base = {
+    hits: [],
+    first: null,
+    last: null,
+    range_start: 0,
+    range_end: 52400000,
+    bytes_scanned: 52400000,
+    gap_bytes: 0,
+    elapsed_ms: 812,
+  };
+  const cleanZero = renderFind({ ...base, matches: 0, exact: true, complete: true });
+  check(
+    'find reports an exact zero with its coverage',
+    cleanZero.startsWith('matches: 0 (exact)') && cleanZero.includes('(100%)'),
+    cleanZero.split('\n')[0]
+  );
+  const cutShort = renderFind({
+    ...base,
+    matches: 0,
+    exact: false,
+    complete: false,
+    bytes_scanned: 8000000,
+  });
+  check(
+    'find never passes off a partial scan as a definitive zero',
+    cutShort.includes('AT LEAST') &&
+      cutShort.includes('scan cut short') &&
+      cutShort.includes('resume: serial_find(pattern=..., from=8000000'),
+    cutShort.split('\n')[0]
   );
 
   const { text: collapsed, removed } = collapseRepeatedLines('a\na\na\nb\nc\nc');

@@ -5,7 +5,7 @@
 プロトコル面を検証する:
 
   initialize ハンドシェイク / notifications/initialized の受け流し / ping /
-  tools/list（7 ツール）/ ブリッジ未起動時の友好的エラー / 未知ツール(-32602) /
+  tools/list（8 ツール）/ ブリッジ未起動時の友好的エラー / 未知ツール(-32602) /
   未知メソッド(-32601) / stdin EOF でのクリーン終了
 
 「ブリッジ未起動」を決定的にするため、子プロセスには未使用ポートを
@@ -95,7 +95,7 @@ def main() -> int:
         res = recv()
         check("ping-after-notification", res.get("id") == 2 and res.get("result") == {})
 
-        # 3. tools/list: 7 ツール、全てにスキーマと説明がある
+        # 3. tools/list: 想定どおりのツール一式、全てにスキーマと説明がある
         send({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
         res = recv()
         tools = res.get("result", {}).get("tools", [])
@@ -104,8 +104,12 @@ def main() -> int:
             t.get("inputSchema", {}).get("type") == "object" and t.get("description")
             for t in tools
         )
-        check("tools/list", len(tools) == 7 and "serial_wait_for" in names and shapes_ok,
-              f"tools={len(tools)}")
+        expected = [
+            "serial_status", "serial_ports", "serial_read_tail", "serial_read_range",
+            "serial_find", "serial_send", "serial_send_hex", "serial_wait_for",
+        ]
+        check("tools/list", names == expected and shapes_ok,
+              f"tools={len(tools)} names={names}")
 
         # 4. ブリッジ未起動 -> isError の友好的メッセージ（日英併記）
         send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",

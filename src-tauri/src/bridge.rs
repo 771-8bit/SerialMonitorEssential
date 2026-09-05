@@ -75,7 +75,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::serial::data_store::DataStore;
 use crate::serial::port::SerialPort;
@@ -410,6 +410,10 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
         },
+        "find" => match method_find(ctx, &req.params) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::error(id, e),
+        },
         "send" => match method_send(ctx, &req.params) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
@@ -441,6 +445,7 @@ fn method_help() -> Value {
             "read_range": { "params": { "offset": "u64", "length": "u32 (clamped to 1 MiB and to available bytes)" }, "result": { "base64": "string", "offset": "u64", "length_read": "u32" } },
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
             "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
+            "find": { "params": { "pattern": "string (Rust regex, multi-line; no lookaround)", "from": "u64 (optional, default 0)", "to": "u64 (optional, default end of stream)", "max_hits": format!("usize (optional, default {FIND_DEFAULT_HITS}, max {FIND_MAX_HITS})") }, "result": { "matches": "u64", "exact": "bool (false when the scan was cut short or skipped unreadable bytes; then 'matches' is a LOWER BOUND)", "complete": "bool", "hits": [{ "offset": "u64", "len": "usize", "excerpt": "string (the matching line)", "excerpt_truncated": "bool" }], "first": "u64|null", "last": "u64|null", "range_start": "u64", "range_end": "u64", "bytes_scanned": "u64", "gap_bytes": "u64", "elapsed_ms": "u64" }, "note": format!("Scans the capture server-side and returns counts plus a few offsets, never the bulk data. Gives up after {FIND_DEADLINE_MS}ms with complete=false rather than timing out.") },
             "ports": { "params": {}, "result": { "ports": ["string"] } },
             "subscribe": { "params": { "from_offset": "u64 (optional)" }, "result": { "subscribed": true }, "note": "after this the connection becomes push-only: frames {event:'data',offset,base64} every <=50ms, {event:'reset'} when the capture restarts; close the socket to stop" }
         },
@@ -453,6 +458,7 @@ fn method_help() -> Value {
         "hints": [
             "Poll 'tail' (or use 'subscribe') to follow live data; offsets are absolute stream offsets.",
             "Typical debug flow: status -> send -> poll tail until the reply pattern appears.",
+            "To search a large capture, use 'find' instead of pulling the bytes: it scans server-side and answers with counts and offsets, then you fetch only the interesting offset with 'read_range'.",
             "An MCP stdio adapter with higher-level tools is built into the app binary: run it with --mcp.",
         ],
     })
@@ -495,6 +501,97 @@ fn method_read_range(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         "base64": BASE64.encode(&data),
         "offset": offset,
         "length_read": data.len(),
+    }))
+}
+
+/// `find` の走査に費やしてよい時間
+///
+/// クライアント側のリクエストタイムアウト（`mcp_stdio::REQUEST_TIMEOUT_MS`
+/// = 5000ms）より十分手前で切り上げ、打ち切ったら `complete=false` として
+/// 返す。無言でタイムアウトさせて「見つからなかった」と誤解させない。
+const FIND_DEADLINE_MS: u64 = 3000;
+/// `find` が返すヒットの既定件数 / 上限
+const FIND_DEFAULT_HITS: usize = 20;
+const FIND_MAX_HITS: usize = 200;
+
+/// `DataStore` を走査ロジックへ渡すためのアダプタ
+struct StoreSource(Arc<DataStore>);
+
+impl crate::insight::find::ByteSource for StoreSource {
+    fn total_bytes(&self) -> u64 {
+        self.0.total_bytes()
+    }
+    fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>, String> {
+        self.0.get_data(offset, len)
+    }
+}
+
+/// `find`: ストリーム全体を正規表現で走査し、件数とハンドルを返す
+///
+/// 生バイトは返さない。返すのは件数・先頭/末尾オフセット・少数の抜粋で、
+/// 実データが要るときは呼び出し側が `read_range` で 1 点だけ買う。
+fn method_find(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
+    let pattern = params
+        .get("pattern")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "bad params: pattern".to_string())?;
+    let regex = regex::bytes::Regex::new(&format!("(?m){pattern}"))
+        .map_err(|e| format!("invalid pattern: {e}"))?;
+
+    let store = ctx.store().ok_or_else(|| "no capture".to_string())?;
+    let total = store.total_bytes();
+    let from = param_u64(params, "from").unwrap_or(0);
+    let to = params
+        .get("to")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::MAX)
+        .min(total);
+    let max_hits = params
+        .get("max_hits")
+        .and_then(Value::as_u64)
+        .map(|n| (n as usize).min(FIND_MAX_HITS))
+        .unwrap_or(FIND_DEFAULT_HITS);
+
+    let started = Instant::now();
+    let deadline = Duration::from_millis(FIND_DEADLINE_MS);
+    let src = StoreSource(store);
+    let result = crate::insight::find::find_matches(
+        &src,
+        &crate::insight::find::FindOptions {
+            regex: &regex,
+            from,
+            to,
+            max_hits,
+        },
+        &|| started.elapsed() >= deadline,
+    );
+
+    let hits: Vec<Value> = result
+        .hits
+        .iter()
+        .map(|h| {
+            json!({
+                "offset": h.offset,
+                "len": h.len,
+                "excerpt": h.excerpt,
+                "excerpt_truncated": h.excerpt_truncated,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "matches": result.matches,
+        "exact": result.is_exact(),
+        "complete": result.complete,
+        "hits": hits,
+        "first": result.first,
+        "last": result.last,
+        "range_start": result.range_start,
+        "range_end": result.range_end,
+        "bytes_scanned": result.bytes_scanned,
+        "gap_bytes": result.gap_bytes,
+        "total_bytes": total,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
     }))
 }
 
@@ -1278,6 +1375,90 @@ mod tests {
     fn test_tail_bad_params() {
         let (ctx, _) = test_ctx(Some(store_with(b"abc")), None);
         assert!(error_of(call(&ctx, "tail", json!({ "bytes": -5 }))).contains("bad params"));
+    }
+
+    #[test]
+    fn test_find_counts_server_side_without_returning_bulk_data() {
+        let mut data = Vec::new();
+        for i in 0..500 {
+            data.extend_from_slice(format!("tick {i}\n").as_bytes());
+            if i % 50 == 0 {
+                data.extend_from_slice(b"E: i2c nak\n");
+            }
+        }
+        let (ctx, _) = test_ctx(Some(store_with(&data)), None);
+
+        let result = result_of(call(&ctx, "find", json!({ "pattern": "E: i2c nak" })));
+        assert_eq!(result["matches"], json!(10));
+        assert_eq!(result["exact"], json!(true));
+        assert_eq!(result["complete"], json!(true));
+        assert_eq!(result["gap_bytes"], json!(0));
+        assert_eq!(result["bytes_scanned"], json!(data.len()));
+        assert_eq!(result["hits"][0]["excerpt"], json!("E: i2c nak"));
+
+        // 返答に生データ（base64）が混ざらないこと。これが find の存在意義
+        let raw = serde_json::to_string(&result).unwrap();
+        assert!(!raw.contains("base64"));
+        assert!(
+            raw.len() < 2000,
+            "the reply must stay small regardless of capture size, got {} bytes",
+            raw.len()
+        );
+
+        // オフセットは read_range にそのまま渡せる本物であること
+        let first = result["first"].as_u64().unwrap();
+        let chunk = result_of(call(
+            &ctx,
+            "read_range",
+            json!({ "offset": first, "length": 10 }),
+        ));
+        assert_eq!(decode(&chunk, "base64"), b"E: i2c nak".to_vec());
+    }
+
+    #[test]
+    fn test_find_zero_matches_is_reported_with_full_coverage() {
+        let (ctx, _) = test_ctx(Some(store_with(b"all good\n")), None);
+        let result = result_of(call(&ctx, "find", json!({ "pattern": "PANIC" })));
+        assert_eq!(result["matches"], json!(0));
+        assert_eq!(
+            result["exact"],
+            json!(true),
+            "a clean scan yields an exact 0"
+        );
+        assert_eq!(result["bytes_scanned"], json!(9));
+    }
+
+    #[test]
+    fn test_find_honours_range_and_max_hits() {
+        let (ctx, _) = test_ctx(Some(store_with(b"E a\nE b\nE c\n")), None);
+        let result = result_of(call(
+            &ctx,
+            "find",
+            json!({ "pattern": "E ", "from": 4, "to": 8 }),
+        ));
+        assert_eq!(result["matches"], json!(1));
+        assert_eq!(result["first"], json!(4));
+
+        let result = result_of(call(
+            &ctx,
+            "find",
+            json!({ "pattern": "E ", "max_hits": 1 }),
+        ));
+        assert_eq!(result["matches"], json!(3), "the count ignores max_hits");
+        assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_find_bad_params() {
+        let (ctx, _) = test_ctx(Some(store_with(b"abc")), None);
+        assert!(error_of(call(&ctx, "find", json!({}))).contains("pattern"));
+        assert!(error_of(call(&ctx, "find", json!({ "pattern": "(" }))).contains("invalid pattern"));
+
+        let (no_store, _) = test_ctx(None, None);
+        assert_eq!(
+            error_of(call(&no_store, "find", json!({ "pattern": "x" }))),
+            "no capture"
+        );
     }
 
     #[test]

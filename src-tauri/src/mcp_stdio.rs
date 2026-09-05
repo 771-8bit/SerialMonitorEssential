@@ -682,6 +682,109 @@ fn render_chunk(
     }
 }
 
+/// `find` の結果を予算内のテキストに落とす
+///
+/// 件数と少数のハンドルだけを出す。**裸のゼロを出さない**のが要点で、
+/// `matches: 0` は必ずカバレッジ（走査したバイト数・欠落・打ち切り）と
+/// 一緒に出す。「見つからなかった」と「見に行けなかった」を混同させない。
+pub fn render_find(res: &Value, max_chars: usize) -> String {
+    let g = |k: &str| res.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let matches = g("matches");
+    let exact = res.get("exact").and_then(Value::as_bool).unwrap_or(false);
+    let complete = res
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let (start, end) = (g("range_start"), g("range_end"));
+    let scanned = g("bytes_scanned");
+    let gap = g("gap_bytes");
+
+    // 1 行目: 件数とその確度。丸めない
+    let qualifier = if exact {
+        "exact".to_string()
+    } else {
+        let mut why = Vec::new();
+        if !complete {
+            why.push("scan cut short");
+        }
+        if gap > 0 {
+            why.push("unreadable bytes skipped");
+        }
+        format!("AT LEAST — {}", why.join(", "))
+    };
+    let mut lines = vec![format!("matches: {matches} ({qualifier})")];
+
+    // カバレッジは常に出す（原則 5: 裸のゼロを禁じる）
+    let requested = end.saturating_sub(start);
+    let coverage = if requested == 0 {
+        100
+    } else {
+        (scanned.saturating_mul(100) / requested).min(100)
+    };
+    let mut cov =
+        format!("scanned {scanned} of {requested} bytes in offset {start}..{end} ({coverage}%)");
+    if gap > 0 {
+        cov.push_str(&format!(", {gap} bytes unreadable"));
+    }
+    cov.push_str(&format!(", {}ms", g("elapsed_ms")));
+    lines.push(cov);
+
+    if matches > 0 {
+        let first = res.get("first").and_then(Value::as_u64);
+        let last = res.get("last").and_then(Value::as_u64);
+        if let (Some(f), Some(l)) = (first, last) {
+            lines.push(format!("first @off={f}  last @off={l}"));
+        }
+    }
+    if !complete && end > start {
+        // 続きを 1 回で再開できるハンドルを必ず渡す
+        let resume = start + scanned;
+        lines.push(format!(
+            "resume: serial_find(pattern=..., from={resume}, to={end})"
+        ));
+    }
+
+    let hits = res.get("hits").and_then(Value::as_array);
+    let shown = hits.map(|h| h.len()).unwrap_or(0);
+    let mut body = lines.join("\n");
+    if let Some(hits) = hits {
+        for h in hits {
+            let off = h.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let ex = h.get("excerpt").and_then(Value::as_str).unwrap_or("");
+            let cut = if h
+                .get("excerpt_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "…"
+            } else {
+                ""
+            };
+            let line = format!("\n@off={off}  {ex}{cut}");
+            // 予算を超えるヒットは足さない（末尾の注記ぶんを残す）
+            if body.chars().count() + line.chars().count() + 120 > max_chars {
+                break;
+            }
+            body.push_str(&line);
+        }
+    }
+
+    let listed = body.matches("\n@off=").count() as u64;
+    if matches > listed {
+        body.push_str(&format!(
+            "\nshowing {listed} of {matches} hits (raise max_hits, or narrow with from/to). \
+             Fetch context with serial_read_range(offset=<@off>, length=200)."
+        ));
+    } else if shown > 0 {
+        body.push_str("\nall hits listed.");
+    }
+
+    if body.chars().count() > max_chars {
+        body = body.chars().take(max_chars).collect();
+    }
+    body
+}
+
 /// "48 65 6c" / "0x48,0x65" / "48:65-6C" などを受け付ける
 pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
     let no_prefix = input.replace("0x", "").replace("0X", "");
@@ -973,6 +1076,27 @@ pub fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": true, "openWorldHint": true }
         },
         {
+            "name": "serial_find",
+            "title": "Search the capture",
+            "description": "Search the whole capture for a regular expression, server-side, and get back the number of matches plus a few byte offsets. Use this INSTEAD of reading bulk data to look for something: it costs the same handful of tokens whether the capture is 4 KB or 4 GB, and it works past the 1 MiB read limit. Then fetch context for one interesting offset with serial_read_range. The match count is exact unless the reply says AT LEAST (the scan was cut short or bytes were unreadable), and a zero always comes with the coverage that produced it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Regular expression (Rust regex syntax, multi-line; no lookaround or backreferences)." },
+                    "from": { "type": "integer", "minimum": 0, "description": "Start offset of the search range (default 0)." },
+                    "to": { "type": "integer", "minimum": 0, "description": "End offset of the search range (default: end of the capture)." },
+                    "max_hits": { "type": "integer", "minimum": 0, "maximum": 200, "description": "How many matching lines to quote (default 20). The count is always complete regardless of this." },
+                    "count_only": { "type": "boolean", "description": "Return only the count and coverage, quoting no lines. The cheapest possible answer." },
+                    "max_chars": {
+                        "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS,
+                        "description": format!("Hard cap on the returned characters (default {DEFAULT_MAX_CHARS}).")
+                    }
+                },
+                "required": ["pattern"]
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": true }
+        },
+        {
             "name": "serial_send",
             "title": "Send text to the device",
             "description": "Send a text command to the serial device, with an optional line ending (default \"lf\"). The GUI shows every bridge send to the human, so the operator always sees what the agent transmitted.",
@@ -1174,6 +1298,21 @@ pub fn call_tool_with_cancel(
                 false,
             )
             .text)
+        }
+        "serial_find" => {
+            let pattern = arg_str(args, "pattern")?;
+            let count_only = arg_bool(args, "count_only", false)?;
+            let max_hits =
+                arg_u64(args, "max_hits", 0, 200)?.unwrap_or(if count_only { 0 } else { 20 });
+            let (_, _, max_chars) = render_args(args)?;
+            let mut params = json!({ "pattern": pattern, "max_hits": max_hits });
+            for key in ["from", "to"] {
+                if let Some(v) = arg_u64(args, key, 0, u64::MAX)? {
+                    params[key] = json!(v);
+                }
+            }
+            let res = bridge.request("find", params)?;
+            Ok(render_find(&res, max_chars))
         }
         "serial_send" => {
             let text = arg_str(args, "text")?;
@@ -1834,6 +1973,144 @@ mod tests {
         );
     }
 
+    // ---------------- serial_find (docs/26 §7 段階 1) ----------------
+
+    fn find_reply(matches: u64, exact: bool, complete: bool, gap: u64, hits: Value) -> Value {
+        json!({
+            "matches": matches, "exact": exact, "complete": complete,
+            "hits": hits, "first": 1204, "last": 52110993,
+            "range_start": 0, "range_end": 52400000,
+            "bytes_scanned": if complete { 52400000u64 } else { 8000000 },
+            "gap_bytes": gap, "total_bytes": 52400000u64, "elapsed_ms": 812,
+        })
+    }
+
+    #[test]
+    fn test_find_reports_exact_counts_with_coverage() {
+        let res = find_reply(
+            1284,
+            true,
+            true,
+            0,
+            json!([{ "offset": 1204, "len": 3, "excerpt": "E: i2c nak addr=0x48", "excerpt_truncated": false }]),
+        );
+        let text = render_find(&res, DEFAULT_MAX_CHARS);
+        assert!(text.starts_with("matches: 1284 (exact)"));
+        assert!(text.contains("100%"), "coverage is always stated: {text}");
+        assert!(text.contains("@off=1204  E: i2c nak addr=0x48"));
+        assert!(text.contains("first @off=1204  last @off=52110993"));
+    }
+
+    #[test]
+    fn test_find_never_reports_a_bare_zero() {
+        // 「見つからなかった」と「見に行けなかった」を混同させないこと。
+        // 完走した 0 件でもカバレッジを必ず添える（docs/26 §6.2 規則 5）。
+        let clean = render_find(&find_reply(0, true, true, 0, json!([])), DEFAULT_MAX_CHARS);
+        assert!(clean.starts_with("matches: 0 (exact)"));
+        assert!(
+            clean.contains("scanned") && clean.contains("100%"),
+            "even an exact zero must carry its coverage: {clean}"
+        );
+
+        // 打ち切り / 欠落があるときは「正確」と言ってはいけない
+        let partial = render_find(
+            &find_reply(0, false, false, 0, json!([])),
+            DEFAULT_MAX_CHARS,
+        );
+        assert!(
+            partial.contains("AT LEAST") && partial.contains("scan cut short"),
+            "a truncated scan must not look like a definitive zero: {partial}"
+        );
+        assert!(!partial.contains("(exact)"));
+
+        let gappy = render_find(
+            &find_reply(3, false, true, 4096, json!([])),
+            DEFAULT_MAX_CHARS,
+        );
+        assert!(gappy.contains("AT LEAST"));
+        assert!(gappy.contains("4096 bytes unreadable"));
+    }
+
+    #[test]
+    fn test_find_incomplete_scan_offers_a_resume_handle() {
+        let text = render_find(
+            &find_reply(9, false, false, 0, json!([])),
+            DEFAULT_MAX_CHARS,
+        );
+        // bytes_scanned=8000000, range_start=0 -> 続きは 8000000 から
+        assert!(
+            text.contains("resume: serial_find(pattern=..., from=8000000, to=52400000)"),
+            "an interrupted scan must hand back a way to continue: {text}"
+        );
+    }
+
+    #[test]
+    fn test_find_discloses_that_hits_were_capped() {
+        let hits: Vec<Value> = (0..20)
+            .map(|i| json!({ "offset": 1000 + i * 10, "len": 3, "excerpt": format!("E: line {i}"), "excerpt_truncated": false }))
+            .collect();
+        let text = render_find(
+            &find_reply(1284, true, true, 0, json!(hits)),
+            DEFAULT_MAX_CHARS,
+        );
+        assert!(text.contains("showing 20 of 1284 hits"));
+        assert!(text.contains("serial_read_range"));
+
+        // 全件出せたときは「これで全部」と言い切る
+        let few =
+            json!([{ "offset": 7, "len": 3, "excerpt": "E: only", "excerpt_truncated": false }]);
+        let text = render_find(&find_reply(1, true, true, 0, few), DEFAULT_MAX_CHARS);
+        assert!(text.contains("all hits listed."));
+    }
+
+    #[test]
+    fn test_find_output_stays_within_budget() {
+        let hits: Vec<Value> = (0..200)
+            .map(|i| json!({ "offset": 1_000_000 + i * 977, "len": 5, "excerpt": "E: ".to_string() + &"x".repeat(115), "excerpt_truncated": true }))
+            .collect();
+        for budget in [MIN_MAX_CHARS, 1000, DEFAULT_MAX_CHARS] {
+            let text = render_find(&find_reply(9999, true, true, 0, json!(hits)), budget);
+            assert!(
+                text.chars().count() <= budget,
+                "budget {budget} exceeded: {} chars",
+                text.chars().count()
+            );
+            assert!(
+                text.starts_with("matches: 9999"),
+                "the count must survive any budget"
+            );
+        }
+    }
+
+    #[test]
+    fn test_find_tool_forwards_range_and_count_only() {
+        let mut bridge = MockBridge::new(vec![Ok(find_reply(2, true, true, 0, json!([])))]);
+        let out = call_tool(
+            &mut bridge,
+            "serial_find",
+            &json!({ "pattern": "E: ", "from": 100, "to": 900, "count_only": true }),
+        )
+        .unwrap();
+        assert!(out.starts_with("matches: 2 (exact)"));
+        let (method, params) = &bridge.calls[0];
+        assert_eq!(method, "find");
+        assert_eq!(params["pattern"], json!("E: "));
+        assert_eq!(params["from"], json!(100));
+        assert_eq!(params["to"], json!(900));
+        assert_eq!(
+            params["max_hits"],
+            json!(0),
+            "count_only must not pull any excerpts"
+        );
+    }
+
+    #[test]
+    fn test_find_tool_requires_a_pattern() {
+        let mut bridge = MockBridge::new(vec![]);
+        let err = call_tool(&mut bridge, "serial_find", &json!({})).unwrap_err();
+        assert!(err.contains("pattern"));
+    }
+
     #[test]
     fn test_hex_dump_format() {
         let dump = hex_dump(b"0123456789abcdefG", 0x10);
@@ -1931,21 +2208,43 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_list_has_all_seven() {
+    fn test_tools_list_is_complete_and_well_formed() {
         let mut bridge = MockBridge::new(vec![]);
         let res = rpc(
             &mut bridge,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
         );
         let tools = res["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"serial_wait_for"));
+        assert_eq!(
+            names,
+            vec![
+                "serial_status",
+                "serial_ports",
+                "serial_read_tail",
+                "serial_read_range",
+                "serial_find",
+                "serial_send",
+                "serial_send_hex",
+                "serial_wait_for",
+            ],
+            "tool set and order must stay in sync with mcp/server.mjs (DEBT-6)"
+        );
         // 全ツールにスキーマと説明がある
         for tool in tools {
             assert!(tool["inputSchema"]["type"] == json!("object"));
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
+        // 常駐コスト（スキーマ全体）が肥大していないこと。docs/26 は約 1.0k
+        // トークン以内を目標にしている
+        let schema_chars = serde_json::to_string(&res["result"]["tools"])
+            .unwrap()
+            .chars()
+            .count();
+        assert!(
+            schema_chars < 9000,
+            "tools/list schema is {schema_chars} chars; it is resident in every request"
+        );
     }
 
     #[test]
