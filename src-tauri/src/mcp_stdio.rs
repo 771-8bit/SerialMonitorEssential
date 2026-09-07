@@ -36,21 +36,15 @@ use crate::bridge::{DEFAULT_BRIDGE_PORT, DEFAULT_TAIL_BYTES, MAX_READ_LENGTH};
 pub const SERVER_NAME: &str = "serial-monitor-essential";
 /// ブリッジ 1 リクエストのタイムアウト
 const REQUEST_TIMEOUT_MS: u64 = 5000;
-/// `serial_wait_for` のポーリング間隔
-const WAIT_POLL_MS: u64 = 500;
-/// `serial_wait_for` が 1 回のポーリングで読む tail 窓の**下限**
+/// `serial_wait_for` の 1 回あたりのサーバ側待機の上限
 ///
-/// 実際の要求量は「前回判明した未読分 + この値」に広げる（`MAX_READ_LENGTH` で頭打ち）。
-/// 固定 64 KiB のままだと 64 KiB / `WAIT_POLL_MS` = 実効 131 KB/s しか走査できず、
-/// 約 1 Mbps を超えた時点でポーリングの間にデータが窓から流れ出て、デバイスの
-/// 返信を取りこぼす（docs/26 §5.1）。
-const WAIT_WINDOW_BYTES: u32 = 65536;
-/// 走査済みの接頭辞を解放したあとも蓄積に残す重なり
+/// 走査そのものはブリッジが行う（`bridge::method_wait_for`）。ここで区切るのは
+/// キャンセルに気づくためだけなので、この値がキャンセル検知の遅延の上限になる。
 ///
-/// 高レートでは蓄積が毎秒 MB 単位で伸びるため、走査済みの前方は捨てて
-/// メモリを定数に保つ。**この長さを超えるマッチは切り出し境界で取り逃がし得る**
-/// （64 KiB を超える単一マッチは実用上ないが、制限として明記しておく）。
-const WAIT_RETAIN_BYTES: usize = 65536;
+/// 旧実装はクライアント側で `tail` を 500ms ごとに固定 64 KiB 読んでいた
+/// ＝実効 131 KB/s しか走査できず、約 1 Mbps を超えると返信を取りこぼした
+/// （docs/26 §5.1 / DEBT-8）。窓も蓄積も無くなったので、その制限は消えている。
+const WAIT_CHUNK_MS: u64 = crate::bridge::WAIT_SERVER_MAX_MS;
 /// この比率を超えて非印字バイトが含まれるときは hex ダンプ表示にする
 const BINARY_RATIO: f64 = 0.1;
 /// 読み出し系ツールが返す本文の既定上限（文字数）
@@ -833,172 +827,225 @@ pub struct WaitOutcome {
     pub tail: Vec<u8>,
     pub tail_offset: u64,
     pub elapsed_ms: u64,
-    /// 走査した総バイト数（蓄積の切り詰めがあっても減らない累計）
+    /// 走査した総バイト数（再開の重なりを二重に数えない累計）
     pub bytes_scanned: u64,
     pub total_bytes: u64,
+    /// キャプチャの世代が変わった（Clear / ポート再オープン）
     pub gap: bool,
     /// `notifications/cancelled` により中断された
     pub cancelled: bool,
 }
 
-/// 呼び出し後に届いたデータへ `pattern` がマッチするまで tail をポーリングする
+/// 指定オフセット以降に `pattern` が現れるまで待つ
 ///
-/// 「コマンドを送って応答を待つ」ための基本要素。`poll_ms` はテストから
-/// 短縮できるよう引数にしてある。`cancelled` が true を返したら速やかに
-/// 中断する（MCP の `notifications/cancelled` 対応）。
+/// 走査は**ブリッジ側**（`bridge::method_wait_for`）が行う。ここがやるのは
+/// 「区切って呼び直し、間でキャンセルを見る」だけ。
+///
+/// 旧実装はここで `tail` を base64 で引いて手元の蓄積を走査していたが、
+/// 固定窓では 12 Mbps に読み負け、蓄積を切り詰めると長いマッチを取り逃がした
+/// （docs/22 DEBT-8）。ストアを直接前方走査する形にして、窓・蓄積・base64 の
+/// 3 つとも構造ごと無くした。
+///
+/// `chunk_ms` は 1 回のサーバ側待機の上限。ブロック中のソケット読み出しは
+/// 中断できないので、キャンセルに気づくまでの遅れはこの値が上限になる。
 ///
 /// 正確性の要点:
-/// - マッチは `regex::bytes` で**生バイト**に対して行う。lossy 変換した文字列の
-///   インデックスを使うと、不正 UTF-8 バイト（1 バイト）が U+FFFD（3 バイト）に
-///   置換されてオフセットが膨らみ、`serial_read_range` と噛み合わなくなる。
-/// - `total_bytes` の巻き戻り（ポート再オープン / Clear の世代交代）を検知したら
-///   蓄積をリセットする。放置すると cursor が新ストリームの先を指したまま
-///   何も取り込めず、応答が来ているのに必ずタイムアウトする。
-/// - 窓から流れ出た（gap）ときは蓄積へ**追記せず置き換える**。不連続なバイト列を
-///   連結すると、境界を跨いだ偽マッチが起き、以降のオフセットも全部ずれる。
-pub fn wait_for_pattern(
+/// - マッチは `regex::bytes` で**生バイト**に対して行う（ブリッジ側）。lossy 変換した
+///   文字列のインデックスを使うと、不正 UTF-8 バイトの置換でオフセットが膨らみ
+///   `serial_read_range` と噛み合わなくなる。
+/// - `total_bytes` の巻き戻り（世代交代）はブリッジが `reset` として報告する。
+///   放置すると「応答が来ているのに必ずタイムアウト」になる。
+/// - 再開位置 `next_from` はブリッジが重なりを含めて返す。重なりの計算が
+///   1 箇所しかないので、境界を跨ぐマッチの扱いがずれない。
+pub fn wait_for_pattern_from(
     bridge: &mut dyn Bridge,
     pattern: &str,
     timeout_ms: u64,
-    from_end: bool,
-    poll_ms: u64,
+    start: u64,
+    chunk_ms: u64,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<WaitOutcome, String> {
-    // JS 実装の 'm' フラグ相当。Rust regex は lookaround 非対応（説明文に明記）。
-    let regex = regex::bytes::Regex::new(&format!("(?m){pattern}"))
+    // ブリッジ側でも検証されるが、ここで弾くと往復せずに理由を返せる
+    regex::bytes::Regex::new(&format!("(?m){pattern}"))
         .map_err(|e| format!("パターンが不正です / invalid pattern: {e}"))?;
     let started = Instant::now();
 
-    let status = bridge.request("status", json!({}))?;
-    let initial_total = status
-        .get("total_bytes")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let mut cursor = if from_end {
-        initial_total
-    } else {
-        initial_total.saturating_sub(DEFAULT_TAIL_BYTES as u64)
-    };
-
-    let mut acc: Vec<u8> = Vec::new();
-    let mut acc_start = cursor;
-    let mut total_bytes = initial_total;
+    let mut from = start;
+    let mut scanned_to = start;
+    let mut bytes_scanned: u64 = 0;
+    let mut total_bytes = start;
     let mut gap = false;
-    let mut scanned: u64 = 0;
-
-    let unmatched = |scanned: u64, total_bytes: u64, gap: bool, was_cancelled: bool| WaitOutcome {
-        matched: false,
-        offset: 0,
-        excerpt: String::new(),
-        tail: Vec::new(),
-        tail_offset: 0,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        bytes_scanned: scanned,
-        total_bytes,
-        gap,
-        cancelled: was_cancelled,
-    };
+    let mut tail: Vec<u8> = Vec::new();
+    let mut tail_offset = start;
 
     loop {
         if cancelled() {
-            return Ok(unmatched(scanned, total_bytes, gap, true));
-        }
-
-        // 前回のポーリングで判明した未読分を丸ごと取りに行く。到着レートに応じて
-        // 自動的に広がるので、固定窓のような読み負け（docs/26 §5.1）が起きない。
-        let want = (total_bytes.saturating_sub(cursor) + WAIT_WINDOW_BYTES as u64)
-            .clamp(WAIT_WINDOW_BYTES as u64, MAX_READ_LENGTH as u64);
-        let res = bridge.request("tail", json!({ "bytes": want }))?;
-        let new_total = res
-            .get("total_bytes")
-            .and_then(Value::as_u64)
-            .unwrap_or(total_bytes);
-        // 世代交代（巻き戻り）検知: 蓄積もカーソルも新ストリーム基準でやり直す
-        if new_total < cursor {
-            acc.clear();
-            cursor = 0;
-            acc_start = 0;
-            gap = true;
-        }
-        total_bytes = new_total;
-
-        let chunk = BASE64
-            .decode(res.get("base64").and_then(Value::as_str).unwrap_or(""))
-            .unwrap_or_default();
-        let chunk_offset = res.get("offset").and_then(Value::as_u64).unwrap_or(0);
-        let chunk_end = chunk_offset + chunk.len() as u64;
-
-        if chunk_end > cursor {
-            if chunk_offset > cursor {
-                // ポーリングの間に窓から流れ出た（取りこぼしあり）。
-                // 不連続を跨いだ偽マッチとオフセット破壊を防ぐため置き換える。
-                gap = true;
-                scanned += chunk.len() as u64;
-                acc = chunk;
-                acc_start = chunk_offset;
-                cursor = chunk_end;
-            } else {
-                let take = &chunk[(cursor - chunk_offset) as usize..];
-                if !take.is_empty() {
-                    if acc.is_empty() {
-                        acc_start = cursor;
-                    }
-                    scanned += take.len() as u64;
-                    acc.extend_from_slice(take);
-                    cursor = chunk_end;
-                }
-            }
-        }
-
-        if let Some(found) = regex.find(&acc) {
-            // found.start() は生バイトのインデックス = ストリームオフセットに直結
-            let from = found.start().saturating_sub(80);
-            let to = (found.end() + 160).min(acc.len());
-            return Ok(WaitOutcome {
-                matched: true,
-                offset: acc_start + found.start() as u64,
-                excerpt: String::from_utf8_lossy(&acc[from..to]).into_owned(),
-                tail: Vec::new(),
-                tail_offset: 0,
-                elapsed_ms: started.elapsed().as_millis() as u64,
-                bytes_scanned: scanned,
-                total_bytes,
-                gap,
-                cancelled: false,
-            });
-        }
-
-        let elapsed = started.elapsed().as_millis() as u64;
-        if elapsed >= timeout_ms {
-            let tail_len = acc.len().min(256);
-            let tail = acc[acc.len() - tail_len..].to_vec();
-            let tail_offset = acc_start + (acc.len() - tail_len) as u64;
             return Ok(WaitOutcome {
                 matched: false,
                 offset: 0,
                 excerpt: String::new(),
                 tail,
                 tail_offset,
-                elapsed_ms: elapsed,
-                bytes_scanned: scanned,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                bytes_scanned,
+                total_bytes,
+                gap,
+                cancelled: true,
+            });
+        }
+        let elapsed = started.elapsed().as_millis() as u64;
+        let remaining = timeout_ms.saturating_sub(elapsed);
+        let block_ms = remaining
+            .min(chunk_ms.max(1))
+            .min(crate::bridge::WAIT_SERVER_MAX_MS);
+
+        let call_started = Instant::now();
+        let res = bridge.request(
+            "wait_for",
+            json!({ "pattern": pattern, "from": from, "timeout_ms": block_ms }),
+        )?;
+
+        if res.get("reset").and_then(Value::as_bool).unwrap_or(false) {
+            // 新しいストリームが始まった。走査済みの位置も意味を失う
+            gap = true;
+            scanned_to = 0;
+        }
+        total_bytes = res
+            .get("total_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(total_bytes);
+        let reported = res
+            .get("scanned_to")
+            .and_then(Value::as_u64)
+            .unwrap_or(scanned_to);
+        bytes_scanned += reported.saturating_sub(scanned_to);
+        scanned_to = scanned_to.max(reported);
+        if let Some(encoded) = res.get("tail_base64").and_then(Value::as_str) {
+            if !encoded.is_empty() {
+                tail = BASE64.decode(encoded).unwrap_or_default();
+                tail_offset = res
+                    .get("tail_offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(tail_offset);
+            }
+        }
+
+        if res.get("matched").and_then(Value::as_bool).unwrap_or(false) {
+            return Ok(WaitOutcome {
+                matched: true,
+                offset: res.get("offset").and_then(Value::as_u64).unwrap_or(0),
+                excerpt: res
+                    .get("excerpt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                tail: Vec::new(),
+                tail_offset: 0,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                bytes_scanned,
                 total_bytes,
                 gap,
                 cancelled: false,
             });
         }
+        from = res
+            .get("next_from")
+            .and_then(Value::as_u64)
+            .unwrap_or(scanned_to);
 
-        // 走査済みの前方を解放し、蓄積を定数メモリに保つ。重なりを残すので
-        // ポーリング境界を跨ぐマッチは拾える（`WAIT_RETAIN_BYTES` 超の単一
-        // マッチのみ取り逃がし得る）。`acc_start` を同量進めるので、返す
-        // オフセットはストリーム絶対値のまま狂わない。
-        if acc.len() > WAIT_RETAIN_BYTES {
-            let drop = acc.len() - WAIT_RETAIN_BYTES;
-            acc.drain(..drop);
-            acc_start += drop as u64;
+        if started.elapsed().as_millis() as u64 >= timeout_ms {
+            return Ok(WaitOutcome {
+                matched: false,
+                offset: 0,
+                excerpt: String::new(),
+                tail,
+                tail_offset,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                bytes_scanned,
+                total_bytes,
+                gap,
+                cancelled: false,
+            });
         }
-
-        std::thread::sleep(Duration::from_millis(poll_ms.min(timeout_ms - elapsed)));
+        // ブリッジは要求した時間だけブロックしてから返すのが正常。それより
+        // 早く返してきた相手に対して空回りしないよう、差分だけ待つ
+        let spent = call_started.elapsed().as_millis() as u64;
+        if spent < block_ms {
+            std::thread::sleep(Duration::from_millis(block_ms - spent));
+        }
     }
+}
+
+/// 呼び出し後に届いたデータへ `pattern` がマッチするまで待つ
+///
+/// 開始位置を `status` から決めて [`wait_for_pattern_from`] へ委ねる。
+/// `from_end=false` のときだけ、既にバッファにある末尾も対象にする。
+pub fn wait_for_pattern(
+    bridge: &mut dyn Bridge,
+    pattern: &str,
+    timeout_ms: u64,
+    from_end: bool,
+    chunk_ms: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<WaitOutcome, String> {
+    // 不正なパターンは往復する前に弾く（開始位置を引きに行く意味がない）
+    regex::bytes::Regex::new(&format!("(?m){pattern}"))
+        .map_err(|e| format!("パターンが不正です / invalid pattern: {e}"))?;
+    let status = bridge.request("status", json!({}))?;
+    let total = status
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let start = if from_end {
+        total
+    } else {
+        total.saturating_sub(DEFAULT_TAIL_BYTES as u64)
+    };
+    wait_for_pattern_from(bridge, pattern, timeout_ms, start, chunk_ms, cancelled)
+}
+
+/// 待機結果を AI 向けのテキストにする（`serial_wait_for` と `serial_send` で共用）
+pub fn format_wait_outcome(pattern: &str, outcome: &WaitOutcome) -> String {
+    let quoted = serde_json::to_string(pattern).unwrap_or_default();
+    if outcome.cancelled {
+        return format!(
+            "CANCELLED  pattern={}  elapsed_ms={}  bytes_scanned={}",
+            quoted, outcome.elapsed_ms, outcome.bytes_scanned
+        );
+    }
+    if outcome.matched {
+        let mut head = vec![
+            "MATCH".to_string(),
+            format!("pattern={quoted}"),
+            format!("offset={}", outcome.offset),
+            format!("elapsed_ms={}", outcome.elapsed_ms),
+            format!("total_bytes={}", outcome.total_bytes),
+        ];
+        if outcome.gap {
+            head.push("warning=capture_reset".to_string());
+        }
+        return format!("{}\n---\n{}", head.join("  "), outcome.excerpt);
+    }
+    let head = [
+        "TIMEOUT".to_string(),
+        format!("pattern={quoted}"),
+        format!("elapsed_ms={}", outcome.elapsed_ms),
+        format!("bytes_scanned={}", outcome.bytes_scanned),
+        format!("total_bytes={}", outcome.total_bytes),
+    ]
+    .join("  ");
+    // 「見つからなかった」と「見に行けなかった」を混同させない
+    let label = if outcome.bytes_scanned == 0 {
+        "no new data arrived while waiting".to_string()
+    } else {
+        format!(
+            "last {} byte(s) seen, from offset {}",
+            outcome.tail.len(),
+            outcome.tail_offset
+        )
+    };
+    let body = render_bytes(&outcome.tail, outcome.tail_offset);
+    format!("{head}\n--- {label}\n{body}")
 }
 
 // ============================================================================
@@ -1152,12 +1199,14 @@ pub fn tool_definitions() -> Value {
         {
             "name": "serial_send",
             "title": "Send text to the device",
-            "description": "Send a text command to the serial device, with an optional line ending (default \"lf\"). The GUI shows every bridge send to the human, so the operator always sees what the agent transmitted.",
+            "description": "Send a text command to the serial device, with an optional line ending (default \"lf\"). Pass 'expect' to wait for the reply in the same call: matching starts at the byte offset just before the write, so a reply that lands immediately cannot be missed. The GUI shows every bridge send to the human.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "Text to transmit (the line ending is added by the app)." },
-                    "line_ending": { "type": "string", "enum": ["none", "cr", "lf", "crlf"], "description": "Line ending appended to the text. Default \"lf\"." }
+                    "line_ending": { "type": "string", "enum": ["none", "cr", "lf", "crlf"], "description": "Line ending appended to the text. Default \"lf\"." },
+                    "expect": { "type": "string", "description": "Regular expression to wait for after sending. Saves a separate serial_wait_for round trip." },
+                    "expect_timeout_ms": { "type": "integer", "minimum": 100, "maximum": 600000, "description": "How long to wait for 'expect'. Default 10000." }
                 },
                 "required": ["text"]
             },
@@ -1166,11 +1215,13 @@ pub fn tool_definitions() -> Value {
         {
             "name": "serial_send_hex",
             "title": "Send raw bytes to the device",
-            "description": "Send raw bytes given as hex (e.g. \"01 03 00 00 00 0A\" or \"0103000000 0A\"). Separators, colons and 0x prefixes are ignored; the digit count must be even. Nothing is appended. The GUI shows every bridge send to the human.",
+            "description": "Send raw bytes given as hex (e.g. \"01 03 00 00 00 0A\"). Separators, colons and 0x prefixes are ignored; the digit count must be even. Nothing is appended. Pass 'expect' to wait for the reply in the same call. The GUI shows every bridge send to the human.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "hex": { "type": "string", "description": "Hex byte string, e.g. \"DE AD BE EF\"." }
+                    "hex": { "type": "string", "description": "Hex byte string, e.g. \"DE AD BE EF\"." },
+                    "expect": { "type": "string", "description": "Regular expression to wait for after sending." },
+                    "expect_timeout_ms": { "type": "integer", "minimum": 100, "maximum": 600000, "description": "How long to wait for 'expect'. Default 10000." }
                 },
                 "required": ["hex"]
             },
@@ -1179,7 +1230,7 @@ pub fn tool_definitions() -> Value {
         {
             "name": "serial_wait_for",
             "title": "Wait for a pattern",
-            "description": "Wait until a regular expression (Rust regex syntax; no lookaround or backreferences) matches data received after this call started (polls every 500ms). Use it right after serial_send to capture the device reply. Returns the matching excerpt and its stream offset, or a timeout report with the last 256 bytes seen.",
+            "description": "Wait until a regular expression (Rust regex syntax; no lookaround or backreferences) matches data received after this call started. The app scans the capture forward itself, so nothing is missed however fast the device talks. Prefer serial_send(expect=...) when you are waiting for a reply to something you just sent. Returns the matching excerpt and its stream offset, or a timeout report with the last 256 bytes seen.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1232,6 +1283,38 @@ fn render_args(args: &Value) -> Result<(RenderFormat, bool, usize), String> {
     )?
     .unwrap_or(DEFAULT_MAX_CHARS as u64) as usize;
     Ok((format, collapse, max_chars))
+}
+
+/// `expect` が指定されていれば、送信直前の位置から返信を待って追記する
+///
+/// 開始位置は**ブリッジが返した送信直前のオフセット**なので、返信が最初の
+/// 走査より前に着弾しても取りこぼさない。送信 -> 待機 -> tail の 3 往復を
+/// 1 ツール呼び出しに畳む（docs/26 §7 段階 4）。
+fn append_expected_reply(
+    bridge: &mut dyn Bridge,
+    args: &Value,
+    send_result: &Value,
+    head: String,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let expect = match args.get("expect") {
+        None | Some(Value::Null) => return Ok(head),
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| "bad arguments: 'expect' must be a string".to_string())?,
+    };
+    let timeout_ms = arg_u64(args, "expect_timeout_ms", 100, 600_000)?.unwrap_or(10_000);
+    let from = send_result
+        .get("offset_before")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let outcome =
+        wait_for_pattern_from(bridge, expect, timeout_ms, from, WAIT_CHUNK_MS, cancelled)?;
+    Ok(format!(
+        "{head}
+{}",
+        format_wait_outcome(expect, &outcome)
+    ))
 }
 
 /// 1 ツール呼び出し（テキスト応答 or エラーメッセージ）。キャンセル無視版。
@@ -1423,14 +1506,15 @@ pub fn call_tool_with_cancel(
                 },
             };
             let res = bridge.request("send", json!({ "text": text, "line_ending": ending }))?;
-            Ok(format!(
+            let head = format!(
                 "Sent {} + {} -> bytes_written={}",
                 serde_json::to_string(text).unwrap_or_else(|_| text.to_string()),
                 ending,
                 res.get("bytes_written")
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
-            ))
+            );
+            Ok(append_expected_reply(bridge, args, &res, head, cancelled)?)
         }
         "serial_send_hex" => {
             let hex = arg_str(args, "hex")?;
@@ -1441,14 +1525,15 @@ pub fn call_tool_with_cancel(
                 .map(|b| format!("{b:02x}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            Ok(format!(
+            let head = format!(
                 "Sent {} byte(s) [{}] -> bytes_written={}",
                 buf.len(),
                 spaced,
                 res.get("bytes_written")
                     .and_then(Value::as_u64)
                     .unwrap_or(0)
-            ))
+            );
+            Ok(append_expected_reply(bridge, args, &res, head, cancelled)?)
         }
         "serial_wait_for" => {
             let pattern = arg_str(args, "pattern")?;
@@ -1464,56 +1549,10 @@ pub fn call_tool_with_cancel(
                 pattern,
                 timeout_ms,
                 from_end,
-                WAIT_POLL_MS,
+                WAIT_CHUNK_MS,
                 cancelled,
             )?;
-            if outcome.cancelled {
-                return Ok(format!(
-                    "CANCELLED  pattern={}  elapsed_ms={}  bytes_scanned={}",
-                    serde_json::to_string(pattern).unwrap_or_default(),
-                    outcome.elapsed_ms,
-                    outcome.bytes_scanned
-                ));
-            }
-            if outcome.matched {
-                let mut head = vec![
-                    "MATCH".to_string(),
-                    format!(
-                        "pattern={}",
-                        serde_json::to_string(pattern).unwrap_or_default()
-                    ),
-                    format!("offset={}", outcome.offset),
-                    format!("elapsed_ms={}", outcome.elapsed_ms),
-                    format!("total_bytes={}", outcome.total_bytes),
-                ];
-                if outcome.gap {
-                    head.push("warning=data_gap".to_string());
-                }
-                Ok(format!("{}\n---\n{}", head.join("  "), outcome.excerpt))
-            } else {
-                let head = [
-                    "TIMEOUT".to_string(),
-                    format!(
-                        "pattern={}",
-                        serde_json::to_string(pattern).unwrap_or_default()
-                    ),
-                    format!("elapsed_ms={}", outcome.elapsed_ms),
-                    format!("bytes_scanned={}", outcome.bytes_scanned),
-                    format!("total_bytes={}", outcome.total_bytes),
-                ]
-                .join("  ");
-                let tail_label = if outcome.bytes_scanned == 0 {
-                    "no new data arrived while waiting".to_string()
-                } else {
-                    format!(
-                        "last {} byte(s) seen, from offset {}",
-                        outcome.tail.len(),
-                        outcome.tail_offset
-                    )
-                };
-                let body = render_bytes(&outcome.tail, outcome.tail_offset);
-                Ok(format!("{head}\n--- {tail_label}\n{body}"))
-            }
+            Ok(format_wait_outcome(pattern, &outcome))
         }
         other => Err(format!("unknown tool: {other}")),
     }
@@ -2494,193 +2533,162 @@ mod tests {
         assert_eq!(text, "Sent 2 byte(s) [de ad] -> bytes_written=2");
     }
 
-    // ---------------- serial_wait_for ----------------
+    // ---------------- serial_wait_for（走査はブリッジ側。docs/26 段階 4） ----------------
 
-    #[test]
-    fn test_wait_for_matches_new_data_only() {
-        // status: total=10 -> 呼び出し前のデータ "OLD OK" は無視される
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 10 })),
-            tail_response(b"OLD OK\nAT\nOK\n", 0, 13),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-        // 新規部分は offset 10 の "OK\n" のみ
-        assert_eq!(outcome.offset, 10);
-        assert!(outcome.excerpt.contains("OK"));
-        assert!(!outcome.gap);
+    /// ブリッジ `wait_for` の応答（マッチ無し）
+    fn wait_pending(scanned_to: u64, next_from: u64, total: u64) -> Result<Value, String> {
+        Ok(json!({
+            "matched": false,
+            "offset": Value::Null,
+            "len": 0,
+            "excerpt": "",
+            "from": 0,
+            "scanned_to": scanned_to,
+            "next_from": next_from,
+            "total_bytes": total,
+            "gap_bytes": 0,
+            "reset": false,
+            "tail_base64": "",
+            "tail_offset": 0,
+            "elapsed_ms": 1,
+        }))
+    }
+
+    fn wait_match(offset: u64, excerpt: &str, total: u64) -> Result<Value, String> {
+        Ok(json!({
+            "matched": true,
+            "offset": offset,
+            "len": 2,
+            "excerpt": excerpt,
+            "from": 0,
+            "scanned_to": total,
+            "next_from": total,
+            "total_bytes": total,
+            "gap_bytes": 0,
+            "reset": false,
+            "tail_base64": "",
+            "tail_offset": 0,
+            "elapsed_ms": 3,
+        }))
     }
 
     #[test]
-    fn test_wait_for_timeout_reports_tail() {
-        // ポーリング回数はスケジューリング次第なので応答は余裕を持って積む
+    fn test_wait_starts_after_the_bytes_already_captured() {
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 10 })),
+            wait_match(10, "OK\n", 13),
+        ]);
+        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
+        assert!(outcome.matched);
+        assert_eq!(outcome.offset, 10);
+        // 走査開始位置は「呼び出し時点の総バイト数」= 既存データは対象外
+        assert_eq!(bridge.calls[1].0, "wait_for");
+        assert_eq!(bridge.calls[1].1["from"], json!(10));
+    }
+
+    #[test]
+    fn test_wait_from_end_false_includes_the_recent_backlog() {
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 10_000 })),
+            wait_match(9_000, "OK", 10_000),
+        ]);
+        wait_for_pattern(&mut bridge, "OK", 1000, false, 1, &|| false).unwrap();
+        assert_eq!(
+            bridge.calls[1].1["from"],
+            json!(10_000 - DEFAULT_TAIL_BYTES as u64)
+        );
+    }
+
+    #[test]
+    fn test_wait_resumes_where_the_bridge_says_and_counts_bytes_once() {
+        // 2 回に分けて走査。next_from は重なりを含んでいるので、走査量は
+        // scanned_to の前進分だけを数える（重なりを二重に数えない）
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 100 })),
+            wait_pending(1_000, 900, 1_000),
+            wait_match(1_500, "OK", 2_000),
+        ]);
+        let outcome = wait_for_pattern(&mut bridge, "OK", 5_000, true, 1, &|| false).unwrap();
+        assert!(outcome.matched);
+        assert_eq!(bridge.calls[1].1["from"], json!(100));
+        assert_eq!(
+            bridge.calls[2].1["from"],
+            json!(900),
+            "must resume at next_from"
+        );
+        // 100 -> 1000 -> 2000 で 1900 バイト（900..1000 の重なりは 1 回だけ）
+        assert_eq!(outcome.bytes_scanned, 1_900);
+    }
+
+    #[test]
+    fn test_wait_reports_a_capture_reset_instead_of_waiting_forever() {
+        let reset = Ok(json!({
+            "matched": false, "offset": Value::Null, "len": 0, "excerpt": "",
+            "from": 5_000, "scanned_to": 0, "next_from": 0, "total_bytes": 20,
+            "gap_bytes": 0, "reset": true, "tail_base64": "", "tail_offset": 0, "elapsed_ms": 1,
+        }));
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "total_bytes": 5_000 })),
+            reset,
+            wait_match(10, "OK", 40),
+        ]);
+        let outcome = wait_for_pattern(&mut bridge, "OK", 5_000, true, 1, &|| false).unwrap();
+        assert!(outcome.matched);
+        assert!(outcome.gap, "a generation change must be reported");
+        assert_eq!(outcome.offset, 10);
+    }
+
+    #[test]
+    fn test_wait_timeout_carries_the_tail_the_bridge_saw() {
+        let pending = Ok(json!({
+            "matched": false, "offset": Value::Null, "len": 0, "excerpt": "",
+            "from": 0, "scanned_to": 7, "next_from": 7, "total_bytes": 7,
+            "gap_bytes": 0, "reset": false,
+            "tail_base64": BASE64.encode(b"partial"), "tail_offset": 0, "elapsed_ms": 1,
+        }));
         let mut responses = vec![Ok(json!({ "total_bytes": 0 }))];
-        responses.extend((0..100).map(|_| tail_response(b"partial", 0, 7)));
+        responses.extend((0..200).map(|_| pending.clone()));
         let mut bridge = MockBridge::new(responses);
         let outcome = wait_for_pattern(&mut bridge, "NEVER", 30, true, 1, &|| false).unwrap();
         assert!(!outcome.matched);
         assert_eq!(outcome.tail, b"partial");
         assert_eq!(outcome.bytes_scanned, 7);
+        let text = format_wait_outcome("NEVER", &outcome);
+        assert!(text.starts_with("TIMEOUT"), "{text}");
+        assert!(text.contains("last 7 byte(s) seen"), "{text}");
     }
 
     #[test]
-    fn test_wait_for_detects_gap() {
-        // 窓が流れて cursor より先から始まった -> gap 警告
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(b"...OK", 100, 105),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-        assert!(outcome.gap);
-        assert_eq!(outcome.offset, 103);
+    fn test_wait_timeout_says_when_nothing_arrived_at_all() {
+        let mut responses = vec![Ok(json!({ "total_bytes": 0 }))];
+        responses.extend((0..200).map(|_| wait_pending(0, 0, 0)));
+        let mut bridge = MockBridge::new(responses);
+        let outcome = wait_for_pattern(&mut bridge, "NEVER", 30, true, 1, &|| false).unwrap();
+        let text = format_wait_outcome("NEVER", &outcome);
+        // 「見つからなかった」と「見に行けなかった」を混同させない
+        assert!(text.contains("no new data arrived while waiting"), "{text}");
     }
 
     #[test]
-    fn test_wait_for_invalid_pattern() {
+    fn test_wait_invalid_pattern_fails_without_a_round_trip() {
         let mut bridge = MockBridge::new(vec![]);
         assert!(wait_for_pattern(&mut bridge, "([", 100, true, 1, &|| false)
             .unwrap_err()
             .contains("invalid pattern"));
-    }
-
-    #[test]
-    fn test_wait_for_multiline_anchor() {
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(b"line1\nERROR: x\n", 0, 15),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "^ERROR", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-        assert_eq!(outcome.offset, 6);
-    }
-
-    #[test]
-    fn test_wait_for_offset_is_byte_accurate_with_invalid_utf8() {
-        // マッチ前に不正 UTF-8 バイトが 10 個: lossy 変換基準だと各 1 バイトが
-        // U+FFFD (3 バイト) になり offset が +20 ずれる。生バイトマッチなら正確。
-        let mut data = vec![0xffu8; 10];
-        data.extend_from_slice(b"OK\r\n");
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(&data, 0, 14),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-        assert_eq!(outcome.offset, 10, "offset must index the raw stream bytes");
-    }
-
-    #[test]
-    fn test_wait_for_detects_capture_reset() {
-        // 呼び出し時 total=100 → ポート再オープンで total が巻き戻る。
-        // リセットを検知しないと cursor=100 のまま何も取り込めず必ずタイムアウトする。
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 100 })),
-            tail_response(b"BOOT OK\n", 0, 8), // 新世代: total=8 < cursor=100
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "BOOT OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched, "reset must be detected, not time out");
-        assert_eq!(outcome.offset, 0);
-        assert!(outcome.gap, "reset is reported as a discontinuity");
-    }
-
-    #[test]
-    fn test_wait_for_gap_replaces_accumulator() {
-        // 1 回目: offset 0..5 を取り込み。2 回目: 窓が 100 まで流れた（gap）。
-        // 連結すると "HELLO" + "WORLD OK" が連続に見えて跨ぎマッチやオフセット
-        // 破壊が起きる。置き換え後は offset が新窓基準で正確になる。
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(b"HELLO", 0, 5),
-            tail_response(b"WORLD OK", 100, 108),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-        assert!(outcome.gap);
-        assert_eq!(
-            outcome.offset, 106,
-            "offset must be relative to the new window"
-        );
-
-        // 跨ぎ偽マッチの検証: "LOWO" は旧末尾+新頭でしか成立しない
-        let mut responses = vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(b"HELLO", 0, 5),
-        ];
-        responses.extend((0..100).map(|_| tail_response(b"WORLD", 100, 105)));
-        let mut bridge = MockBridge::new(responses);
-        let outcome = wait_for_pattern(&mut bridge, "LOWO", 40, true, 10, &|| false).unwrap();
         assert!(
-            !outcome.matched,
-            "a pattern spanning the discontinuity must not match"
+            bridge.calls.is_empty(),
+            "a bad pattern must not hit the bridge"
         );
     }
 
     #[test]
-    fn test_wait_for_window_grows_to_cover_backlog() {
-        // 固定 64 KiB 窓では 64 KiB / WAIT_POLL_MS = 実効 131 KB/s しか走査できず、
-        // 1.5 MB/s(12 Mbps) では約 11 倍の読み負けになり返信を取りこぼす（docs/26 §5.1）。
-        // 未読分に応じて要求量が広がること、MAX_READ_LENGTH で頭打ちになることを固定する。
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            // 1 回目のポーリングの間に 1 MB 到着していたと判明する
-            tail_response(b"aaaaaaaaaa", 0, 1_000_000),
-            tail_response(b"OK", 1_000_000, 1_000_002),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 1000, true, 1, &|| false).unwrap();
-        assert!(outcome.matched);
-
-        assert_eq!(bridge.calls[0].0, "status");
-        assert_eq!(
-            bridge.calls[1].1["bytes"],
-            json!(WAIT_WINDOW_BYTES),
-            "first poll has no backlog information yet, so it uses the floor"
-        );
-        assert_eq!(
-            bridge.calls[2].1["bytes"],
-            json!(MAX_READ_LENGTH),
-            "a 1 MB backlog must widen the window, clamped to MAX_READ_LENGTH"
-        );
-    }
-
-    #[test]
-    fn test_wait_for_trims_accumulator_but_keeps_absolute_offsets() {
-        // 窓を広げると蓄積が毎秒 MB 単位で伸びるため走査済みの前方を解放する。
-        // 解放しても (1) オフセットはストリーム絶対値のまま、(2) bytes_scanned は
-        // 累計のまま、(3) データを捨てていないので gap は立たない、を固定する。
-        let big_a = vec![b'a'; 50_000];
-        let big_b = vec![b'b'; 30_000];
-        let mut bridge = MockBridge::new(vec![
-            Ok(json!({ "total_bytes": 0 })),
-            tail_response(&big_a, 0, 50_000),
-            tail_response(&big_b, 50_000, 80_000), // ここで 80_000 > WAIT_RETAIN_BYTES
-            tail_response(b"OK\n", 80_000, 80_003),
-        ]);
-        let outcome = wait_for_pattern(&mut bridge, "OK", 5000, true, 1, &|| false).unwrap();
-
-        assert!(outcome.matched);
-        assert_eq!(
-            outcome.offset, 80_000,
-            "trimming the scanned prefix must not shift the reported stream offset"
-        );
-        assert_eq!(
-            outcome.bytes_scanned, 80_003,
-            "bytes_scanned is cumulative, not the size of the retained window"
-        );
-        assert!(
-            !outcome.gap,
-            "releasing an already-scanned prefix is not a discontinuity"
-        );
-    }
-
-    #[test]
-    fn test_wait_for_cancellation_stops_promptly() {
+    fn test_wait_cancellation_stops_promptly() {
         use std::sync::atomic::{AtomicU32, Ordering};
-        // 2 回目のポーリング以降キャンセル扱いにする
+        // 2 回目の区切り以降キャンセル扱いにする
         let polls = AtomicU32::new(0);
         let cancelled = || polls.fetch_add(1, Ordering::SeqCst) >= 1;
         let mut responses = vec![Ok(json!({ "total_bytes": 0 }))];
-        responses.extend((0..100).map(|_| tail_response(b"", 0, 0)));
+        responses.extend((0..100).map(|_| wait_pending(0, 0, 0)));
         let mut bridge = MockBridge::new(responses);
         // タイムアウトは 60 秒だがキャンセルで即座に戻る
         let outcome = wait_for_pattern(&mut bridge, "NEVER", 60_000, true, 10, &cancelled).unwrap();
@@ -2690,6 +2698,112 @@ mod tests {
             outcome.elapsed_ms < 5_000,
             "must return well before timeout"
         );
+        assert!(format_wait_outcome("NEVER", &outcome).starts_with("CANCELLED"));
+    }
+
+    #[test]
+    fn test_wait_never_asks_the_bridge_to_block_longer_than_it_may() {
+        let mut responses = vec![Ok(json!({ "total_bytes": 0 }))];
+        responses.extend((0..200).map(|_| wait_pending(0, 0, 0)));
+        let mut bridge = MockBridge::new(responses);
+        // 呼び出し側が 10 分を要求しても、1 往復は上限で切られる
+        // （ブリッジの応答がクライアントのタイムアウトを越えないため）
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let seen = AtomicU32::new(0);
+        let cancelled = || seen.fetch_add(1, Ordering::SeqCst) >= 1;
+        let _ = wait_for_pattern(&mut bridge, "NEVER", 600_000, true, 60_000, &cancelled);
+        let asked = bridge.calls[1].1["timeout_ms"].as_u64().unwrap();
+        assert!(
+            asked <= crate::bridge::WAIT_SERVER_MAX_MS,
+            "asked for {asked}ms"
+        );
+    }
+
+    // ---------------- serial_send(expect=)（送信と待機を 1 呼び出しに） ----------------
+
+    #[test]
+    fn test_send_without_expect_is_unchanged() {
+        let mut bridge =
+            MockBridge::new(vec![Ok(json!({ "bytes_written": 3, "offset_before": 99 }))]);
+        let text = call_tool(&mut bridge, "serial_send", &json!({ "text": "AT" })).unwrap();
+        assert_eq!(text, "Sent \"AT\" + lf -> bytes_written=3");
+        assert_eq!(bridge.calls.len(), 1, "no wait when 'expect' is absent");
+    }
+
+    #[test]
+    fn test_send_with_expect_scans_from_just_before_the_write() {
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "bytes_written": 7, "offset_before": 4_096 })),
+            wait_match(4_100, "AT+GMR\nOK\n", 4_110),
+        ]);
+        let text = call_tool(
+            &mut bridge,
+            "serial_send",
+            &json!({ "text": "AT+GMR", "expect": "OK|ERROR" }),
+        )
+        .unwrap();
+        assert!(
+            text.starts_with("Sent \"AT+GMR\" + lf -> bytes_written=7"),
+            "{text}"
+        );
+        assert!(text.contains("MATCH"), "{text}");
+        assert!(text.contains("offset=4100"), "{text}");
+        // 走査は送信の**直前**から始まる: 即答する機器でも取りこぼさない
+        assert_eq!(bridge.calls[1].0, "wait_for");
+        assert_eq!(bridge.calls[1].1["from"], json!(4_096));
+        // status を引かない（送信が返したオフセットで足りる）
+        assert_eq!(bridge.calls.len(), 2);
+    }
+
+    #[test]
+    fn test_send_hex_with_expect_and_bad_expect_argument() {
+        let mut bridge = MockBridge::new(vec![
+            Ok(json!({ "bytes_written": 2, "offset_before": 10 })),
+            wait_match(12, "\x06", 14),
+        ]);
+        let text = call_tool(
+            &mut bridge,
+            "serial_send_hex",
+            &json!({ "hex": "DE AD", "expect": "\\x06" }),
+        )
+        .unwrap();
+        assert!(
+            text.starts_with("Sent 2 byte(s) [de ad] -> bytes_written=2"),
+            "{text}"
+        );
+        assert!(text.contains("MATCH"), "{text}");
+
+        let mut bridge =
+            MockBridge::new(vec![Ok(json!({ "bytes_written": 1, "offset_before": 0 }))]);
+        assert!(call_tool(
+            &mut bridge,
+            "serial_send",
+            &json!({ "text": "A", "expect": 7 })
+        )
+        .unwrap_err()
+        .contains("'expect' must be a string"));
+    }
+
+    #[test]
+    fn test_send_with_expect_reports_a_timeout_without_hiding_it() {
+        let pending = Ok(json!({
+            "matched": false, "offset": Value::Null, "len": 0, "excerpt": "",
+            "from": 0, "scanned_to": 5, "next_from": 5, "total_bytes": 5,
+            "gap_bytes": 0, "reset": false,
+            "tail_base64": BASE64.encode(b"noise"), "tail_offset": 0, "elapsed_ms": 1,
+        }));
+        let mut responses = vec![Ok(json!({ "bytes_written": 1, "offset_before": 0 }))];
+        responses.extend((0..200).map(|_| pending.clone()));
+        let mut bridge = MockBridge::new(responses);
+        let text = call_tool(
+            &mut bridge,
+            "serial_send",
+            &json!({ "text": "AT", "expect": "OK", "expect_timeout_ms": 100 }),
+        )
+        .unwrap();
+        assert!(text.contains("bytes_written=1"), "{text}");
+        assert!(text.contains("TIMEOUT"), "{text}");
+        assert!(text.contains("last 5 byte(s) seen"), "{text}");
     }
 
     // ---------------- dispatch（非同期化のための振り分け） ----------------

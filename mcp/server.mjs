@@ -28,22 +28,17 @@ export const DEFAULT_PORT = 57320;
 export const MAX_CHUNK_BYTES = 1048576;
 export const DEFAULT_TAIL_BYTES = 4096;
 export const REQUEST_TIMEOUT_MS = 5000;
-export const WAIT_POLL_MS = 500;
 /**
- * Lower bound for the tail window read on each `waitForPattern` poll. The
- * actual request grows to cover the backlog observed on the previous poll
- * (capped at MAX_CHUNK_BYTES). A fixed 64 KiB window only scans
- * 64 KiB / WAIT_POLL_MS = 131 KB/s, so above roughly 1 Mbps the device reply
- * scrolls out of the window between polls and is missed (docs/26 §5.1).
+ * Upper bound for one server-side wait. The scanning itself happens in the app
+ * (bridge `wait_for`); this only decides how often we come back to check for a
+ * cancellation, so it is also the worst-case cancellation latency.
+ *
+ * The old client-side loop read a fixed 64 KiB tail every 500 ms = 131 KB/s of
+ * scanning, so above roughly 1 Mbps the device reply scrolled past between
+ * polls (docs/26 §5.1 / DEBT-8). There is no window and no accumulator any
+ * more, so that limit is gone.
  */
-export const WAIT_WINDOW_BYTES = 65536;
-/**
- * Overlap retained after releasing an already-scanned prefix of the
- * accumulator. Keeps memory constant at high rates. A single match longer
- * than this may be missed at a trim boundary.
- */
-export const WAIT_RETAIN_BYTES = 65536;
-/** Above this ratio of non-printable bytes we render a hex dump instead of text. */
+export const WAIT_CHUNK_MS = 1000;
 export const BINARY_RATIO = 0.1;
 /**
  * Default cap on the characters a read tool returns.
@@ -717,116 +712,97 @@ export async function waitForPattern(client, options = {}) {
     pattern,
     timeoutMs = 10000,
     fromEnd = true,
-    pollMs = WAIT_POLL_MS,
-    windowBytes = WAIT_WINDOW_BYTES,
+    from,
+    chunkMs = WAIT_CHUNK_MS,
     backlogBytes = DEFAULT_TAIL_BYTES,
+    cancelled = () => false,
   } = options;
 
-  const regex = new RegExp(pattern, 'm');
+  // Validated here too so a bad pattern costs no round trip.
+  new RegExp(pattern, 'm');
   const started = Date.now();
   const deadline = started + timeoutMs;
 
-  const status = await client.request('status', {});
-  const initialTotal = Number(status?.total_bytes ?? 0);
-  let cursor = fromEnd ? initialTotal : Math.max(0, initialTotal - backlogBytes);
+  let start = from;
+  if (start === undefined) {
+    const status = await client.request('status', {});
+    const initialTotal = Number(status?.total_bytes ?? 0);
+    start = fromEnd ? initialTotal : Math.max(0, initialTotal - backlogBytes);
+  }
 
-  let acc = Buffer.alloc(0);
-  let accStart = cursor;
-  let totalBytes = initialTotal;
+  let cursor = start;
+  let scannedTo = start;
+  let bytesScanned = 0;
+  let totalBytes = start;
   let gap = false;
-  let scanned = 0;
+  let tail = Buffer.alloc(0);
+  let tailOffset = start;
 
   for (;;) {
-    // Ask for everything that arrived since the last poll. The window grows
-    // with the arrival rate, so a fast device cannot outrun it (docs/26 §5.1).
-    const want = Math.min(
-      MAX_CHUNK_BYTES,
-      Math.max(windowBytes, totalBytes - cursor + windowBytes),
-    );
-    const res = await client.request('tail', { bytes: want });
-    const newTotal = Number(res?.total_bytes ?? totalBytes);
-    // Capture reset (port reopen / Clear): total_bytes rewound past our cursor.
-    // Without this the cursor points past the new stream and every poll is
-    // ignored, guaranteeing a timeout even though the reply arrived.
-    if (newTotal < cursor) {
-      acc = Buffer.alloc(0);
-      accStart = 0;
-      cursor = 0;
-      gap = true;
-    }
-    totalBytes = newTotal;
-    const chunk = decodeBase64(res?.base64);
-    const chunkOffset = Number(res?.offset ?? 0);
-    const chunkEnd = chunkOffset + chunk.length;
-
-    if (chunkEnd > cursor) {
-      if (chunkOffset > cursor) {
-        // Data scrolled past our window between polls. REPLACE the accumulator:
-        // concatenating across the discontinuity allows phantom matches that
-        // span the gap and corrupts every offset computed afterwards.
-        gap = true;
-        scanned += chunk.length;
-        acc = Buffer.from(chunk);
-        accStart = chunkOffset;
-        cursor = chunkEnd;
-      } else {
-        const take = chunk.subarray(cursor - chunkOffset);
-        if (take.length > 0) {
-          if (acc.length === 0) accStart = cursor;
-          scanned += take.length;
-          acc = Buffer.concat([acc, take]);
-          cursor = chunkEnd;
-        }
-      }
-    }
-
-    const text = acc.toString('utf8');
-    const match = regex.exec(text);
-    if (match) {
-      const byteIndex = Buffer.byteLength(text.slice(0, match.index), 'utf8');
-      const from = Math.max(0, match.index - 80);
-      const to = Math.min(text.length, match.index + match[0].length + 160);
+    if (cancelled()) {
       return {
-        matched: true,
-        offset: accStart + byteIndex,
-        match: match[0],
-        excerpt: text.slice(from, to),
+        matched: false,
+        cancelled: true,
+        tail,
+        tailOffset,
         elapsedMs: Date.now() - started,
-        bytesScanned: scanned,
+        bytesScanned,
         totalBytes,
         gap,
       };
     }
+    const remaining = Math.max(0, deadline - Date.now());
+    const blockMs = Math.min(remaining, Math.max(1, chunkMs), WAIT_CHUNK_MS);
+    const callStarted = Date.now();
+    const res = await client.request('wait_for', {
+      pattern,
+      from: cursor,
+      timeout_ms: blockMs,
+    });
 
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      const tail = acc.subarray(Math.max(0, acc.length - 256));
+    if (res?.reset === true) {
+      // A new stream started; the position we had scanned to is meaningless.
+      gap = true;
+      scannedTo = 0;
+    }
+    totalBytes = Number(res?.total_bytes ?? totalBytes);
+    const reported = Number(res?.scanned_to ?? scannedTo);
+    bytesScanned += Math.max(0, reported - scannedTo);
+    scannedTo = Math.max(scannedTo, reported);
+    if (typeof res?.tail_base64 === 'string' && res.tail_base64.length > 0) {
+      tail = decodeBase64(res.tail_base64);
+      tailOffset = Number(res?.tail_offset ?? tailOffset);
+    }
+
+    if (res?.matched === true) {
+      return {
+        matched: true,
+        offset: Number(res?.offset ?? 0),
+        match: String(res?.match_text ?? ''),
+        excerpt: String(res?.excerpt ?? ''),
+        elapsedMs: Date.now() - started,
+        bytesScanned,
+        totalBytes,
+        gap,
+      };
+    }
+    cursor = Number(res?.next_from ?? scannedTo);
+
+    if (Date.now() >= deadline) {
       return {
         matched: false,
         tail,
-        tailOffset: accStart + Math.max(0, acc.length - 256),
+        tailOffset,
         elapsedMs: Date.now() - started,
-        bytesScanned: scanned,
+        bytesScanned,
         totalBytes,
         gap,
       };
     }
-
-    // Release the already-scanned prefix so memory stays constant at high
-    // rates. accStart advances by the same amount, so reported offsets stay
-    // absolute stream offsets. Not a gap: nothing unscanned was dropped.
-    if (acc.length > WAIT_RETAIN_BYTES) {
-      // Nudge the cut forward to a UTF-8 lead byte. This implementation matches
-      // on the lossy-decoded string, so cutting mid-character would inject a
-      // U+FFFD and skew byteIndex (DEBT-6 asymmetry 2). At most 3 steps for
-      // valid UTF-8; capped so arbitrary binary cannot walk the buffer.
-      let cut = acc.length - WAIT_RETAIN_BYTES;
-      for (let i = 0; i < 3 && cut < acc.length && (acc[cut] & 0xc0) === 0x80; i += 1) cut += 1;
-      accStart += cut;
-      acc = acc.subarray(cut);
-    }
-
-    await sleep(Math.min(pollMs, remaining));
+    // The bridge is supposed to block for what we asked. If it came back early
+    // (a stub, a stopped capture), wait out the difference instead of spinning.
+    const spent = Date.now() - callStarted;
+    if (spent < blockMs) await sleep(blockMs - spent);
   }
 }
 
@@ -875,6 +851,57 @@ export async function insightText(client, method, args) {
   const text = res?.text;
   if (typeof text !== 'string') throw new Error('bridge returned no text');
   return text;
+}
+
+/** Format a wait result for the agent (shared by serial_wait_for and serial_send). */
+export function formatWaitOutcome(pattern, result) {
+  const quoted = JSON.stringify(pattern);
+  if (result.cancelled) {
+    return `CANCELLED  pattern=${quoted}  elapsed_ms=${result.elapsedMs}  bytes_scanned=${result.bytesScanned}`;
+  }
+  if (result.matched) {
+    const head = [
+      'MATCH',
+      `pattern=${quoted}`,
+      `offset=${result.offset}`,
+      `elapsed_ms=${result.elapsedMs}`,
+      `total_bytes=${result.totalBytes}`,
+      result.gap ? 'warning=capture_reset' : null,
+    ]
+      .filter(Boolean)
+      .join('  ');
+    return `${head}\n---\n${result.excerpt}`;
+  }
+  const head = [
+    'TIMEOUT',
+    `pattern=${quoted}`,
+    `elapsed_ms=${result.elapsedMs}`,
+    `bytes_scanned=${result.bytesScanned}`,
+    `total_bytes=${result.totalBytes}`,
+  ].join('  ');
+  // Never let "not found" read the same as "could not look".
+  const tailLabel =
+    result.bytesScanned === 0
+      ? 'no new data arrived while waiting'
+      : `last ${result.tail.length} byte(s) seen, from offset ${result.tailOffset}`;
+  return `${head}\n--- ${tailLabel}\n${renderBytes(result.tail, result.tailOffset).body}`;
+}
+
+/**
+ * Append the awaited reply when the caller passed an `expect` pattern.
+ *
+ * Scanning starts at the offset the bridge reported from just BEFORE the write,
+ * so a device that answers instantly cannot beat us to the first scan.
+ */
+async function appendExpectedReply(client, args, sendResult, head) {
+  const expect = args?.expect;
+  if (expect === undefined || expect === null) return head;
+  const result = await waitForPattern(client, {
+    pattern: expect,
+    timeoutMs: args?.expect_timeout_ms ?? 10000,
+    from: Number(sendResult?.offset_before ?? 0),
+  });
+  return `${head}\n${formatWaitOutcome(expect, result)}`;
 }
 
 export function createServer(client) {
@@ -1222,20 +1249,34 @@ export function createServer(client) {
     {
       title: 'Send text to the device',
       description:
-        'Send a text command to the serial device, with an optional line ending (default "lf"). The GUI shows every bridge send to the human, so the operator always sees what the agent transmitted.',
+        'Send a text command to the serial device, with an optional line ending (default "lf"). Pass expect to wait for the reply in the same call: matching starts at the byte offset just before the write, so a reply that lands immediately cannot be missed. The GUI shows every bridge send to the human.',
       inputSchema: {
         text: z.string().describe('Text to transmit (the line ending is added by the app).'),
         line_ending: z
           .enum(['none', 'cr', 'lf', 'crlf'])
           .optional()
           .describe('Line ending appended to the text. Default "lf".'),
+        expect: z
+          .string()
+          .optional()
+          .describe(
+            'Regular expression to wait for after sending. Saves a separate serial_wait_for round trip.'
+          ),
+        expect_timeout_ms: z
+          .number()
+          .int()
+          .min(100)
+          .max(600000)
+          .optional()
+          .describe('How long to wait for the expect pattern. Default 10000.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    handler(async ({ text, line_ending }) => {
-      const ending = line_ending ?? 'lf';
-      const res = await client.request('send', { text, line_ending: ending });
-      return `Sent ${JSON.stringify(text)} + ${ending} -> bytes_written=${res?.bytes_written ?? 0}`;
+    handler(async (args) => {
+      const ending = args.line_ending ?? 'lf';
+      const res = await client.request('send', { text: args.text, line_ending: ending });
+      const head = `Sent ${JSON.stringify(args.text)} + ${ending} -> bytes_written=${res?.bytes_written ?? 0}`;
+      return appendExpectedReply(client, args, res, head);
     })
   );
 
@@ -1244,16 +1285,25 @@ export function createServer(client) {
     {
       title: 'Send raw bytes to the device',
       description:
-        'Send raw bytes given as hex (e.g. "01 03 00 00 00 0A" or "0103000000 0A"). Separators, colons and 0x prefixes are ignored; the digit count must be even. Nothing is appended. The GUI shows every bridge send to the human.',
+        'Send raw bytes given as hex (e.g. "01 03 00 00 00 0A"). Separators, colons and 0x prefixes are ignored; the digit count must be even. Nothing is appended. Pass expect to wait for the reply in the same call. The GUI shows every bridge send to the human.',
       inputSchema: {
         hex: z.string().describe('Hex byte string, e.g. "DE AD BE EF".'),
+        expect: z.string().optional().describe('Regular expression to wait for after sending.'),
+        expect_timeout_ms: z
+          .number()
+          .int()
+          .min(100)
+          .max(600000)
+          .optional()
+          .describe('How long to wait for the expect pattern. Default 10000.'),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    handler(async ({ hex }) => {
-      const buf = parseHex(hex);
+    handler(async (args) => {
+      const buf = parseHex(args.hex);
       const res = await client.request('send', { base64: buf.toString('base64') });
-      return `Sent ${buf.length} byte(s) [${buf.toString('hex').replace(/(..)(?=.)/g, '$1 ')}] -> bytes_written=${res?.bytes_written ?? 0}`;
+      const head = `Sent ${buf.length} byte(s) [${buf.toString('hex').replace(/(..)(?=.)/g, '$1 ')}] -> bytes_written=${res?.bytes_written ?? 0}`;
+      return appendExpectedReply(client, args, res, head);
     })
   );
 
@@ -1262,7 +1312,7 @@ export function createServer(client) {
     {
       title: 'Wait for a pattern',
       description:
-        'Wait until a JavaScript regular expression matches data received after this call started (polls every 500ms). Use it right after serial_send to capture the device reply. Returns the matching excerpt and its stream offset, or a timeout report with the last 256 bytes seen.',
+        'Wait until a regular expression matches data received after this call started. The app scans the capture forward itself, so nothing is missed however fast the device talks. Prefer serial_send with expect when you are waiting for a reply to something you just sent. Returns the matching excerpt and its stream offset, or a timeout report with the last 256 bytes seen.',
       inputSchema: {
         pattern: z
           .string()
@@ -1289,32 +1339,7 @@ export function createServer(client) {
         timeoutMs: timeout_ms ?? 10000,
         fromEnd: from_end ?? true,
       });
-      if (result.matched) {
-        const head = [
-          'MATCH',
-          `pattern=${JSON.stringify(pattern)}`,
-          `offset=${result.offset}`,
-          `elapsed_ms=${result.elapsedMs}`,
-          `total_bytes=${result.totalBytes}`,
-          result.gap ? 'warning=data_gap' : null,
-        ]
-          .filter(Boolean)
-          .join('  ');
-        return `${head}\n---\n${result.excerpt}`;
-      }
-      const rendered = renderBytes(result.tail, result.tailOffset);
-      const head = [
-        'TIMEOUT',
-        `pattern=${JSON.stringify(pattern)}`,
-        `elapsed_ms=${result.elapsedMs}`,
-        `bytes_scanned=${result.bytesScanned}`,
-        `total_bytes=${result.totalBytes}`,
-      ].join('  ');
-      const tailLabel =
-        result.bytesScanned === 0
-          ? 'no new data arrived while waiting'
-          : `last ${result.tail.length} byte(s) seen, from offset ${result.tailOffset}`;
-      return `${head}\n--- ${tailLabel}\n${rendered.body}`;
+      return formatWaitOutcome(pattern, result);
     })
   );
 

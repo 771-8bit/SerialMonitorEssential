@@ -434,6 +434,10 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
         },
+        "wait_for" => match method_wait_for(ctx, &req.params) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::error(id, e),
+        },
         "send" => match method_send(ctx, &req.params) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
@@ -464,10 +468,11 @@ fn method_help() -> Value {
             "status": { "params": {}, "result": { "connected": "bool", "port_name": "string|null", "total_bytes": "u64", "app_version": "string", "protocol": "u32" } },
             "read_range": { "params": { "offset": "u64", "length": "u32 (clamped to 1 MiB and to available bytes)" }, "result": { "base64": "string", "offset": "u64", "length_read": "u32" } },
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
-            "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
+            "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize", "offset_before": "u64 (stream offset just before the write; pass it to wait_for as 'from' to catch a reply that lands immediately)" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
             "find": { "params": { "pattern": "string (Rust regex, multi-line; no lookaround)", "from": "u64 (optional, default 0)", "to": "u64 (optional, default end of stream)", "max_hits": format!("usize (optional, default {FIND_DEFAULT_HITS}, max {FIND_MAX_HITS})") }, "result": { "matches": "u64", "exact": "bool (false when the scan was cut short or skipped unreadable bytes; then 'matches' is a LOWER BOUND)", "complete": "bool", "hits": [{ "offset": "u64", "len": "usize", "excerpt": "string (the matching line)", "excerpt_truncated": "bool" }], "first": "u64|null", "last": "u64|null", "range_start": "u64", "range_end": "u64", "bytes_scanned": "u64", "gap_bytes": "u64", "elapsed_ms": "u64" }, "note": format!("Scans the capture server-side and returns counts plus a few offsets, never the bulk data. Gives up after {FIND_DEADLINE_MS}ms with complete=false rather than timing out.") },
             "digest": { "params": { "window": "string (optional: \"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\")", "template": "string|u32 (optional: when given, returns the detail of that one template instead of the overview)", "top": "usize (optional)", "samples": "usize (optional)", "buckets": "usize (optional, 0 = none)", "max_chars": "usize (optional)" }, "result": { "text": "rendered summary (already inside the character budget)", "data": "structured equivalent", "meta": { "gen": "u64", "exact": "bool", "coverage_pct": "u64", "index_lag_bytes": "u64" }, "budget": { "max_chars": "usize", "used_chars": "usize", "truncated": "bool", "next": "string" } }, "note": "Summarises the capture from the index; never reads the bulk data. Cost does not grow with the arrival rate." },
             "watch": { "params": { "cursor": "string (optional, from a previous digest/watch)", "wait_ms": format!("u64 (optional, server-side long poll, max {WATCH_MAX_WAIT_MS})"), "top": "usize (optional)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest', reporting only what changed since the cursor", "note": "A stale-generation cursor is not an error: the reply says the generation changed and where it restarted." },
+            "wait_for": { "params": { "pattern": "string (Rust regex, multi-line)", "from": "u64 (offset to scan forward from)", "timeout_ms": format!("u64 (how long this call may block, max {WAIT_SERVER_MAX_MS})") }, "result": { "matched": "bool", "offset": "u64|null", "match_text": "string", "excerpt": "string", "next_from": "u64 (pass back to resume; already includes the overlap)", "scanned_to": "u64", "reset": "bool (the capture generation rolled back)", "tail_base64": "string (last 256 new bytes, for a timeout report)" }, "note": "Scans the capture forward server-side, so there is no polling window to fall behind. Call repeatedly with 'next_from' until it matches or your own deadline passes." },
             "sample": { "params": { "mode": "string (tail|head|around|stratified|by_template, default tail)", "n": format!("usize (optional, default {SAMPLE_DEFAULT_N}, max {SAMPLE_MAX_N})"), "offset": "u64 (mode=around)", "template": "string|u32 (mode=by_template)", "collapse_repeats": "bool (default true)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest'", "note": "Raw lines, capped and de-duplicated, each with the offset it starts at. Partial lines at the window edges are dropped rather than shown as if they were whole." },
             "ports": { "params": {}, "result": { "ports": ["string"] } },
             "subscribe": { "params": { "from_offset": "u64 (optional)" }, "result": { "subscribed": true }, "note": "after this the connection becomes push-only: frames {event:'data',offset,base64} every <=50ms, {event:'reset'} when the capture restarts; close the socket to stop" }
@@ -1702,6 +1707,163 @@ fn digest_detail(
     ))
 }
 
+// ============================================================================
+// サーバ側の待ち受け (docs/26 段階 4 / DEBT-8 の恒久対策)
+// ============================================================================
+
+/// `wait_for` が 1 回の呼び出しでブロックしてよい上限
+///
+/// クライアントの 1 リクエストタイムアウト（`mcp_stdio::REQUEST_TIMEOUT_MS`
+/// = 5000ms）より十分手前で必ず返す。短く区切るのは、MCP の
+/// `notifications/cancelled` に反応できる余地を残すため
+/// （ブロック中のソケット読み出しは中断できないので、区切り目でしか見られない）。
+pub const WAIT_SERVER_MAX_MS: u64 = 1000;
+/// 待機中に新着を見に行く間隔
+const WAIT_SERVER_POLL_MS: u64 = 5;
+/// 再開時に重ねて走査する量。これを超える長さの単一マッチは境界で取り逃がし得る
+const WAIT_SCAN_OVERLAP: u64 = crate::insight::find::SCAN_OVERLAP;
+/// マッチの前後に付ける文脈
+const WAIT_CONTEXT_BEFORE: u64 = 80;
+const WAIT_CONTEXT_AFTER: u64 = 160;
+/// タイムアウト報告に添える末尾バイト数
+const WAIT_TAIL_BYTES: u64 = 256;
+/// 1 回の走査が費やしてよい時間の安全弁（巨大な積み残しでブロックしないため）
+const WAIT_SCAN_DEADLINE_MS: u64 = 2000;
+
+/// `wait_for`: 指定オフセット以降に `pattern` が現れるまでサーバ側で待つ
+///
+/// 旧実装はクライアントが `tail` を base64 で引いて手元で走査していた
+/// （docs/22 DEBT-8）。固定窓・重なり・蓄積の切り詰めという失敗モードは、
+/// **ストアを直接前方走査する**ことで構造ごと消える:
+///
+/// - 窓が無いので「読み負け」が無い。到着レートに依存しない。
+/// - 蓄積を持たないので `WAIT_RETAIN_BYTES` を超える単一マッチも取り逃がさない
+///   （残るのは再開の重なり [`WAIT_SCAN_OVERLAP`] = 4 KiB を超える場合のみ）。
+/// - base64 の往復が無い。
+///
+/// 呼び出し側は `next_from` を渡して再開する。重なりの計算はここ 1 箇所。
+fn method_wait_for(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
+    let pattern = params
+        .get("pattern")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "bad params: pattern".to_string())?;
+    let regex = regex::bytes::Regex::new(&format!("(?m){pattern}"))
+        .map_err(|e| format!("invalid pattern: {e}"))?;
+    let requested_from = param_u64(params, "from").unwrap_or(0);
+    let timeout_ms = param_u64(params, "timeout_ms")
+        .unwrap_or(0)
+        .min(WAIT_SERVER_MAX_MS);
+
+    let store = ctx.store().ok_or_else(|| "no capture".to_string())?;
+    let started = Instant::now();
+    let deadline = Duration::from_millis(timeout_ms);
+
+    // 世代交代したら「元の開始位置」も意味を失うので、床も 0 に落とす
+    let mut floor = requested_from;
+    let mut from = requested_from;
+    let mut scanned_to = requested_from;
+    let mut gap_bytes = 0u64;
+    let mut reset = false;
+    let mut total;
+
+    loop {
+        total = store.total_bytes();
+        if total < from {
+            // Clear / ポート再オープンでオフセットが巻き戻った。
+            // 黙って待ち続けると「応答が来ているのに必ずタイムアウト」になる
+            reset = true;
+            floor = 0;
+            from = 0;
+            scanned_to = 0;
+        }
+        if total > from {
+            let src = StoreSource(store.clone());
+            let scan_deadline = Duration::from_millis(WAIT_SCAN_DEADLINE_MS);
+            let scan_started = Instant::now();
+            let result = crate::insight::find::find_matches(
+                &src,
+                &crate::insight::find::FindOptions {
+                    regex: &regex,
+                    from,
+                    to: total,
+                    max_hits: 1,
+                },
+                &|| scan_started.elapsed() >= scan_deadline,
+            );
+            gap_bytes += result.gap_bytes;
+            scanned_to = scanned_to.max(total);
+
+            if let Some(hit) = result.hits.first() {
+                let context_start = hit.offset.saturating_sub(WAIT_CONTEXT_BEFORE);
+                let context_end =
+                    (hit.offset + hit.len as u64 + WAIT_CONTEXT_AFTER).min(store.total_bytes());
+                let context = store
+                    .get_data(
+                        context_start,
+                        context_end.saturating_sub(context_start) as u32,
+                    )
+                    .unwrap_or_default();
+                let excerpt = String::from_utf8_lossy(&context).into_owned();
+                // マッチ部分そのもの。オフセットと長さから切り出すので、
+                // 呼び出し側が lossy 変換で数え直してずれることがない
+                let match_start = (hit.offset - context_start) as usize;
+                let match_text = context
+                    .get(match_start..(match_start + hit.len).min(context.len()))
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                return Ok(json!({
+                    "matched": true,
+                    "offset": hit.offset,
+                    "len": hit.len,
+                    "match_text": match_text,
+                    "excerpt": excerpt,
+                    "from": requested_from,
+                    "scanned_to": scanned_to,
+                    "next_from": scanned_to,
+                    "total_bytes": total,
+                    "gap_bytes": gap_bytes,
+                    "reset": reset,
+                    "tail_base64": "",
+                    "tail_offset": 0,
+                    "elapsed_ms": started.elapsed().as_millis() as u64,
+                }));
+            }
+            // 次はこの続きから。境界を跨ぐマッチのために少しだけ重ねる
+            from = total.saturating_sub(WAIT_SCAN_OVERLAP).max(floor);
+        }
+        if started.elapsed() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(WAIT_SERVER_POLL_MS));
+    }
+
+    // 見つからなかった: 何を見に行けたのかを必ず添える
+    let tail_start = total.saturating_sub(WAIT_TAIL_BYTES).max(requested_from);
+    let tail = if total > tail_start {
+        store
+            .get_data(tail_start, (total - tail_start) as u32)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Ok(json!({
+        "matched": false,
+        "offset": Value::Null,
+        "len": 0,
+        "match_text": "",
+        "excerpt": "",
+        "from": requested_from,
+        "scanned_to": scanned_to,
+        "next_from": from,
+        "total_bytes": total,
+        "gap_bytes": gap_bytes,
+        "reset": reset,
+        "tail_base64": BASE64.encode(&tail),
+        "tail_offset": tail_start,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+    }))
+}
+
 fn method_tail(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
     let requested = match params.get("bytes") {
         None | Some(Value::Null) => DEFAULT_TAIL_BYTES,
@@ -1733,6 +1895,10 @@ fn method_send(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         .port_handle()
         .ok_or_else(|| "port not open".to_string())?;
 
+    // 送信の**直前**の位置。ここから前方走査すれば、返信が最初のポーリングより
+    // 前に着弾しても取りこぼさない（docs/26 §5.1 の競合を構造的に消す）
+    let offset_before = ctx.store().map(|s| s.total_bytes()).unwrap_or(0);
+
     let written = {
         let mut guard = port.lock().map_err(|_| "port lock poisoned".to_string())?;
         guard.write(&payload)?
@@ -1741,7 +1907,7 @@ fn method_send(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
     // GUI 可視化要件: 人間が AI の送信内容を見られるようにする
     ctx.record_send(written, preview_of(&payload));
 
-    Ok(json!({ "bytes_written": written }))
+    Ok(json!({ "bytes_written": written, "offset_before": offset_before }))
 }
 
 fn method_subscribe(params: &Value) -> Result<Value, String> {
@@ -3403,5 +3569,172 @@ mod tests {
         let err = error_of(call(&ctx, "digest", json!({ "template": "t42" })));
         assert!(err.contains("unknown template t42"), "{err}");
         assert!(err.contains("evicted"), "{err}");
+    }
+
+    // ---------------- wait_for（走査はここ。docs/26 段階 4 / DEBT-8） ----------------
+
+    #[test]
+    fn test_wait_for_matches_data_already_present_after_from() {
+        let store = store_with(b"OLD OK\nAT\nOK\n");
+        let (ctx, _) = test_ctx(Some(store), None);
+        // from より前の "OLD OK" は対象外
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "OK", "from": 10, "timeout_ms": 0 }),
+        ));
+        assert_eq!(result["matched"], json!(true));
+        assert_eq!(result["offset"], json!(10));
+        assert!(result["excerpt"].as_str().unwrap().contains("OK"));
+        assert_eq!(result["reset"], json!(false));
+    }
+
+    #[test]
+    fn test_wait_for_offset_is_byte_accurate_with_invalid_utf8() {
+        // lossy 変換基準だと 1 バイトが U+FFFD(3 バイト) に膨らんでオフセットがずれる。
+        // 走査は生バイトに対して行うので、返るオフセットは read_range と噛み合う
+        let mut data = vec![0xffu8; 10];
+        data.extend_from_slice(b"OK\n");
+        let store = store_with(&data);
+        let (ctx, _) = test_ctx(Some(store), None);
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "OK", "from": 0, "timeout_ms": 0 }),
+        ));
+        assert_eq!(result["offset"], json!(10));
+    }
+
+    #[test]
+    fn test_wait_for_multiline_anchor() {
+        let store = store_with(b"line1\nERROR: x\n");
+        let (ctx, _) = test_ctx(Some(store), None);
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "^ERROR", "from": 0, "timeout_ms": 0 }),
+        ));
+        assert_eq!(result["offset"], json!(6));
+    }
+
+    #[test]
+    fn test_wait_for_sees_data_that_arrives_while_it_waits() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            store.push_test_data(b"PONG 42\n");
+        });
+        let started = Instant::now();
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "PONG (\\d+)", "from": 0, "timeout_ms": 900 }),
+        ));
+        writer.join().unwrap();
+        assert_eq!(result["matched"], json!(true));
+        assert_eq!(result["offset"], json!(0));
+        // 待ち上限より十分早く返る（着弾したら即座に）
+        assert!(started.elapsed() < Duration::from_millis(800));
+    }
+
+    #[test]
+    fn test_wait_for_timeout_reports_the_tail_it_saw() {
+        let store = store_with(b"before");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        store.push_test_data(b"noise");
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "NEVER", "from": 6, "timeout_ms": 20 }),
+        ));
+        assert_eq!(result["matched"], json!(false));
+        assert_eq!(result["offset"], Value::Null);
+        // 末尾は「from 以降に届いた分」だけ: 送信前のデータを返信と誤認させない
+        assert_eq!(decode(&result, "tail_base64"), b"noise".to_vec());
+        assert_eq!(result["tail_offset"], json!(6));
+        assert_eq!(result["scanned_to"], json!(11));
+    }
+
+    #[test]
+    fn test_wait_for_next_from_overlaps_so_a_split_match_is_still_found() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        store.push_test_data(b"PON");
+        let first = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "PONG", "from": 0, "timeout_ms": 0 }),
+        ));
+        assert_eq!(first["matched"], json!(false));
+        let next_from = first["next_from"].as_u64().unwrap();
+        // 重なりのぶん戻っているので、続きが来れば跨いだマッチを拾える
+        assert_eq!(next_from, 0);
+
+        store.push_test_data(b"G ok\n");
+        let second = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "PONG", "from": next_from, "timeout_ms": 0 }),
+        ));
+        assert_eq!(second["matched"], json!(true));
+        assert_eq!(second["offset"], json!(0));
+    }
+
+    #[test]
+    fn test_wait_for_reports_a_capture_reset_instead_of_waiting_forever() {
+        let store = store_with(b"short");
+        let (ctx, _) = test_ctx(Some(store), None);
+        // 世代交代でオフセットが巻き戻った状況（from がストア末尾より先）
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "short", "from": 100_000, "timeout_ms": 0 }),
+        ));
+        assert_eq!(result["reset"], json!(true));
+        assert_eq!(result["matched"], json!(true));
+        assert_eq!(result["offset"], json!(0));
+    }
+
+    #[test]
+    fn test_wait_for_bad_params() {
+        let (ctx, _) = test_ctx(Some(store_with(b"x")), None);
+        assert!(error_of(call(&ctx, "wait_for", json!({}))).contains("pattern"));
+        assert!(
+            error_of(call(&ctx, "wait_for", json!({ "pattern": "(" }))).contains("invalid pattern")
+        );
+        let (no_store, _) = test_ctx(None, None);
+        assert_eq!(
+            error_of(call(&no_store, "wait_for", json!({ "pattern": "x" }))),
+            "no capture"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_never_blocks_longer_than_the_server_cap() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let started = Instant::now();
+        // 10 分を頼まれても上限で切る（クライアントの 5s タイムアウトを越えない）
+        let result = result_of(call(
+            &ctx,
+            "wait_for",
+            json!({ "pattern": "NEVER", "from": 0, "timeout_ms": 600_000 }),
+        ));
+        assert_eq!(result["matched"], json!(false));
+        assert!(
+            started.elapsed() < Duration::from_millis(WAIT_SERVER_MAX_MS + 500),
+            "blocked for {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_send_reports_the_offset_just_before_the_write() {
+        // ポートが無いので送信自体は失敗するが、no-port でも壊れないことを固定する
+        let (ctx, _) = test_ctx(Some(store_with(b"1234")), None);
+        assert_eq!(
+            error_of(call(&ctx, "send", json!({ "text": "AT" }))),
+            "port not open"
+        );
     }
 }

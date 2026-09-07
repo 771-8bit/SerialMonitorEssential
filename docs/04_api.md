@@ -45,7 +45,7 @@ Tauri IPC とは別に、外部プロセス（MCP アダプタ等）向けの**�
 | バインド | `127.0.0.1` のみ。既定ポート `57320` |
 | 既定 | **無効**。`bridge_set(enabled=true)` でのみ起動 |
 | 形式 | NDJSON（1 行 1 JSON、UTF-8）。要求 `{id, method, params}` / 応答 `{id, ok, result\|error}` |
-| メソッド | `help` / `auth` / `status` / `digest` / `watch` / `sample` / `find` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
+| メソッド | `help` / `auth` / `status` / `digest` / `watch` / `sample` / `find` / `wait_for` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
 | push | `subscribe` した接続へ `{"event":"data",...}` / `{"event":"reset"}` を配信 |
 
 `help` は**認証不要**の自己記述メソッドで、全メソッド・制限値・使い方ヒントを機械可読で返す
@@ -122,6 +122,32 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
   所要時間を必ず併記し、「見つからなかった」と「見に行けなかった」を区別できる
   ようにする。
 - ヒットを打ち切ったら `showing N of M hits` と明示する。
+
+### `serial_wait_for` / `serial_send(expect=)` / ブリッジ `wait_for`
+
+待機の**走査はブリッジが行う**（[26 §7.5](26_ai_api_design.md)）。クライアントは
+区切って呼び直し、その合間にキャンセルを見るだけ。
+
+| パラメータ（ブリッジ `wait_for`） | 既定 | 意味 |
+| --- | --- | --- |
+| `pattern` | 必須 | Rust regex（複数行モード） |
+| `from` | 0 | ここから現在の末尾まで前方走査する |
+| `timeout_ms` | 0 | この 1 呼び出しがブロックしてよい上限（最大 1000ms） |
+
+戻り値の要点: `matched` / `offset` / `match_text` / `excerpt` /
+`next_from`（**重なりを含んだ再開位置**）/ `scanned_to` / `reset`（世代交代）/
+`tail_base64`（タイムアウト報告用の末尾 256 バイト）。
+
+- 窓も蓄積も無いので**読み負けが起きない**。旧実装（クライアント側 tail
+  ポーリング）は実効 131 KB/s しか走査できず、約 1 Mbps で返信を取りこぼしていた
+  （DEBT-8、解消済み）。
+- `send` は**書き込み直前の `total_bytes`** を `offset_before` として返す。
+  `serial_send(expect=...)` はそこから走査するので、返信が最初の走査より早く
+  着弾しても取りこぼさない（時間ではなく位置で決まる）。
+- 世代交代（Clear / ポート再オープン）は `reset` で報告する。黙って待ち続けると
+  「応答が来ているのに必ずタイムアウト」になる。
+- 残る限界: 再開の重なり（`insight::find::SCAN_OVERLAP` = 4 KiB）を超える単一
+  マッチは境界で取り逃がし得る。
 
 ### `serial_sample` / ブリッジ `sample`
 

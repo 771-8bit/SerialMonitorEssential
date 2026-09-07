@@ -95,7 +95,7 @@
 | UN-21 | 複数インスタンス | SYS-NF-503 |
 | UN-22 | 自動で回帰を止める | SYS-NF-401, 402, 403 |
 | UN-23 | 設計理由が残る | SYS-NF-404 |
-| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106, 1107, 1109, 1110, 1111 |
+| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106, 1107, 1109, 1110, 1111, 1112 |
 | UN-25 | インストール後の環境だけで AI 連携をセットアップできる（手順はアプリから参照可能） | SYS-F-1107, 1108, 1109, 1110 |
 
 ---
@@ -247,6 +247,7 @@
 | SYS-F-1110 | AI 向け応答の文字数予算と「省略による嘘をつかない」規範 | `mcp_stdio.rs`（`render_chunk`/`render_find`: バイト単位で切り出してから描画、フッタは落とさない）、`insight/render.rs`（セクション優先順位を列挙順で固定、固定枠は Header/INDEX/ALARM/cursor、落とした行はフッタで報告） | `UT`: `test_render_chunk_never_exceeds_max_chars`（プロパティ）、`insight::render::prop_render_never_exceeds_budget`、`prop_withholding_is_always_reported`、`test_alarm_survives_when_samples_do_not`、`bridge::test_digest_respects_max_chars_and_reports_what_it_dropped`、`bridge::test_digest_never_prints_a_bare_zero`、`find` の `matches: 0` にカバレッジが付くこと。`IT`: `mcp/smoke.mjs`（`render budget is never exceeded`, `find reports an exact zero with its coverage`） |
 | SYS-F-1111 | 索引に基づく導出情報（`digest` / `watch` / `digest(template=)` / `sample`）と、その所有・寿命 | `insight/mask.rs`（テンプレート化・重大度の全バイト走査）、`insight/index.rs`（有界テンプレート表・チェックポイント差分・世代）、`insight/window.rs`（ウィンドウ解決・カーソル）、`insight/thread.rs`（唯一の追加リーダ）、`insight/sample.rs`（完全な行だけの抜き取り・重複畳み込み）、`bridge.rs`（`method_digest`/`method_watch`/`method_sample`/`digest_detail`、`BridgeState` が `Arc<InsightIndex>` を所有し `bridge_set` で `IndexThread` を起動/停止） | `UT`: `insight::mask`（冪等性・スロット対応・上限・重大度の分割不変）、`insight::window`（ウィンドウ解決・時刻無しでの明示的失敗・カーソル往復）、`insight::index`（テンプレート畳み込み・行/重大度の分割跨ぎ・CR 終端・gap・表の有界性と `evicted` の一致・世代交代）、`insight::thread`（取り込み・ストア差し替え・切り離し）、`insight::sample`（オフセット付き行・端の欠け行の破棄・CR/CRLF・重複畳み込みの正確な件数・等間隔位置）、`bridge`（`digest`/`watch` の内容・応答サイズがキャプチャ長に依存しないこと・古い世代カーソルが非エラー・`sample` の全モードと不正引数・`digest(template=)` の全項目とオフセット）。`ST`: `state_transition_tests::insight_index`（0-switch 6 / 1-switch 36 + `detach_keeps_the_counts_it_already_reported`）。`IT`: `mcp/smoke.mjs`（薄い描画器としての素通し、`text` 欠落は明示的失敗）、`test_tools/e2e/mcp_stdio_smoke.py`（11 ツールの `tools/list`） |
 
+| SYS-F-1112 | サーバ側のパターン待ちと、送信直前オフセットからの照合 | `bridge.rs`（`method_wait_for`: `from` から末尾までの前方走査、重なりを含む `next_from`、世代交代の `reset`、末尾 256 バイト。`method_send` が `offset_before` を返す）、`mcp_stdio.rs`（`wait_for_pattern_from`: 区切って呼び直しキャンセルを見るだけ、`append_expected_reply`）、`mcp/server.mjs`（同一構造） | `UT`: `bridge`（既存データ・生バイトの正確なオフセット・複数行アンカー・待機中の着弾・タイムアウト時の末尾・重なりで跨いだマッチ・世代交代・不正引数・サーバ側上限）、`mcp_stdio`（開始位置の決定・`next_from` での再開と重複しない走査量・世代交代の伝播・タイムアウト表示・キャンセル即時性・要求ブロック時間の上限・`expect` が送信直前オフセットから走査すること・`expect` 無しの完全互換）。`IT`: `mcp/smoke.mjs`（`send reports the offset just before the write`、`a reply that lands before the first scan is not missed`） |
 補助: `test_parse_request_errors`, `test_unknown_method`, `test_response_json_shapes` が protocol v2 のワイヤ形式（`{id, ok, result/error}`、parse error、未知メソッド）を契約として固定している。
 
 ### 2.11 品質要求 (SYS-NF)

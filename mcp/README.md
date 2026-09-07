@@ -96,9 +96,9 @@ After registering, you should see `serial-monitor` in `claude mcp list`.
 | `serial_read_tail` | `bytes?` (default 4096 / max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes. Output is capped at `max_chars` (default 4000) |
 | `serial_read_range` | `offset`, `length` (max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | Received data in the given range. Same display and budget rules as `serial_read_tail` |
 | `serial_find` | `pattern`, `from?`, `to?`, `max_hits?` (default 20), `count_only?`, `max_chars?` | Searches the whole capture server-side and returns match counts plus a few offsets, never bulk data. Costs the same whether the capture is 4 KB or 4 GB, and is not limited to 1 MiB |
-| `serial_send` | `text`, `line_ending?` (`none`/`cr`/`lf`/`crlf`, default `lf`) | Number of bytes written. **The send is also shown in the GUI** |
-| `serial_send_hex` | `hex` (e.g. `"01 03 00 00 00 0A"`) | Validates the hex pairs and sends the raw bytes. No line ending is appended |
-| `serial_wait_for` | `pattern`, `timeout_ms?` (default 10000), `from_end?` (default true) | **The headline feature.** Polls the data that arrives after the call every 500 ms and, on a regex match, returns the matching portion and its offset. On timeout, shows the last 256 bytes |
+| `serial_send` | `text`, `line_ending?` (`none`/`cr`/`lf`/`crlf`, default `lf`), `expect?`, `expect_timeout_ms?` | Number of bytes written. With `expect`, also waits for the reply in the same call, scanning from the offset just before the write. **The send is also shown in the GUI** |
+| `serial_send_hex` | `hex` (e.g. `"01 03 00 00 00 0A"`), `expect?`, `expect_timeout_ms?` | Validates the hex pairs and sends the raw bytes. No line ending is appended. `expect` works as in `serial_send` |
+| `serial_wait_for` | `pattern`, `timeout_ms?` (default 10000), `from_end?` (default true) | Waits for a regex over the data that arrives after the call. The app scans the capture forward itself, so nothing is missed however fast the device talks. Returns the matching portion and its offset; on timeout, the last 256 bytes seen. Prefer `serial_send` with `expect` when waiting for a reply to something you just sent |
 
 Notes:
 
@@ -120,9 +120,8 @@ Notes:
 - The Node adapter is a thin renderer for these two: the character budget and the wording are
   applied once, in the app's `insight::render`, so both adapters cannot drift apart.
 - `serial_wait_for`'s `pattern` is a JavaScript regular expression source (evaluated with the `m` flag).
-- In this Node version, the `offset` returned by `serial_wait_for` is based on lossy UTF-8
-  conversion, so if invalid UTF-8 bytes appear before the match, the offset can drift by the
-  amount replaced (the built-in Rust version is exact, based on raw bytes).
+- The match offset is decided by the app on raw bytes, so both adapters report the same
+  value even when invalid UTF-8 appears before the match.
 - With `from_end: false`, the search also includes the most recent 4096 bytes already in the buffer.
 - Binary detection is "more than 10% non-printable bytes". Japanese logs that are valid UTF-8
   are treated as text.
@@ -133,9 +132,8 @@ Notes:
 1. serial_digest            → what is this device doing? (one call, fixed cost)
 2. serial_watch (+ cursor)  → follow it; only the changes come back
    serial_digest(template=)  → one template in detail; serial_sample → the real lines
-3. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
-4. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
-5. serial_read_tail         → read a little more surrounding context
+3. serial_send(expect=)     → send "AT+VER" and get the reply in the same call
+4. serial_sample / serial_read_range → look at the exact lines when you need them
 
 To investigate a long capture, search instead of reading:
 

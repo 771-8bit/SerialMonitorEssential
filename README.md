@@ -133,7 +133,7 @@ Then ask for what you need:
 
 ```text
 You    : Send AT+GMR to the board and tell me the firmware version.
-Claude : serial_send("AT+GMR") → serial_wait_for("OK|ERROR")
+Claude : serial_send("AT+GMR", expect="OK|ERROR")
          → response "AT version:2.1.0.0 ... OK". The firmware version is 2.1.0.0.
 You    : Check the recent log for CRC errors.
 Claude : serial_find("CRC mismatch") → 3 matches (offsets 12034, 40881, 91002)

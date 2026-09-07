@@ -131,7 +131,59 @@ async function createFakeBridge({ token = null, initial = Buffer.alloc(0) } = {}
           buf = Buffer.from(`${String(params.text ?? '')}${ending}`, 'utf8');
         }
         state.sent.push(buf);
-        return { bytes_written: buf.length };
+        // The real bridge reports where the stream stood just before the write,
+        // so an expect scan cannot miss an instant reply.
+        return { bytes_written: buf.length, offset_before: state.data.length };
+      }
+      // The real forward scan lives in the Rust bridge (bridge::method_wait_for).
+      // The fake answers in the same shape so the client loop can be exercised.
+      case 'wait_for': {
+        const from = Number(params.from ?? 0);
+        const total = state.data.length;
+        if (total < from) {
+          return {
+            matched: false, offset: null, len: 0, match_text: '', excerpt: '',
+            from, scanned_to: 0, next_from: 0, total_bytes: total,
+            gap_bytes: 0, reset: true, tail_base64: '', tail_offset: 0, elapsed_ms: 1,
+          };
+        }
+        const region = state.data.subarray(from, total);
+        const re = new RegExp(String(params.pattern ?? ''), 'm');
+        const m = re.exec(region.toString('binary'));
+        if (m) {
+          const offset = from + m.index;
+          const start = Math.max(0, m.index - 80);
+          const end = Math.min(region.length, m.index + m[0].length + 160);
+          return {
+            matched: true,
+            offset,
+            len: m[0].length,
+            match_text: m[0],
+            excerpt: region.subarray(start, end).toString('utf8'),
+            from,
+            scanned_to: total,
+            next_from: total,
+            total_bytes: total,
+            gap_bytes: 0,
+            reset: false,
+            tail_base64: '',
+            tail_offset: 0,
+            elapsed_ms: 2,
+          };
+        }
+        const tailStart = Math.max(from, total - 256);
+        return {
+          matched: false, offset: null, len: 0, match_text: '', excerpt: '',
+          from,
+          scanned_to: total,
+          next_from: Math.max(from, total - 4096),
+          total_bytes: total,
+          gap_bytes: 0,
+          reset: false,
+          tail_base64: state.data.subarray(tailStart, total).toString('base64'),
+          tail_offset: tailStart,
+          elapsed_ms: 1,
+        };
       }
       // The real summarising lives in the Rust bridge (insight/*). The fake
       // only has to answer in the same envelope shape, so the adapter's
@@ -373,6 +425,44 @@ async function testMainFlow() {
     }
     check('a reply without text is an error, not an empty answer', textless?.includes('no text'), String(textless));
 
+    // send(expect=) folds send + wait into one call, scanning from the offset
+    // reported just before the write.
+    const beforeExpect = bridge.state.data.length;
+    setTimeout(() => bridge.append('VER:9.9\r\n'), 150);
+    const expectSend = await client.request('send', { text: 'AT+VER', line_ending: 'crlf' });
+    const expected = await waitForPattern(client, {
+      pattern: 'VER:([0-9.]+)',
+      timeoutMs: 4000,
+      from: Number(expectSend.offset_before),
+      chunkMs: 50,
+    });
+    check(
+      'send reports the offset just before the write',
+      Number(expectSend.offset_before) === beforeExpect,
+      `offset_before=${expectSend.offset_before} expected=${beforeExpect}`
+    );
+    check(
+      'expect scan starting at that offset finds the reply',
+      expected.matched === true && expected.match === 'VER:9.9',
+      `match=${JSON.stringify(expected.match)} offset=${expected.offset}`
+    );
+
+    // A reply that is ALREADY there when the scan starts must still be found:
+    // this is the race the old client-side polling lost (docs/26 §5.1).
+    const raceFrom = bridge.state.data.length;
+    bridge.append('INSTANT-OK\r\n');
+    const raced = await waitForPattern(client, {
+      pattern: 'INSTANT-OK',
+      timeoutMs: 1000,
+      from: raceFrom,
+      chunkMs: 50,
+    });
+    check(
+      'a reply that lands before the first scan is not missed',
+      raced.matched === true && raced.offset === raceFrom,
+      `offset=${raced.offset} from=${raceFrom}`
+    );
+
     // 4. wait_for-style polling match
     const before = bridge.state.data.length;
     setTimeout(() => bridge.append('PONG 42\r\n'), 700);
@@ -380,6 +470,7 @@ async function testMainFlow() {
       pattern: 'PONG (\\d+)',
       timeoutMs: 5000,
       fromEnd: true,
+      chunkMs: 50,
     });
     check(
       'wait_for polling match',
