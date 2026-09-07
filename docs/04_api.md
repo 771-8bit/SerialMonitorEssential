@@ -45,7 +45,7 @@ Tauri IPC とは別に、外部プロセス（MCP アダプタ等）向けの**�
 | バインド | `127.0.0.1` のみ。既定ポート `57320` |
 | 既定 | **無効**。`bridge_set(enabled=true)` でのみ起動 |
 | 形式 | NDJSON（1 行 1 JSON、UTF-8）。要求 `{id, method, params}` / 応答 `{id, ok, result\|error}` |
-| メソッド | `help` / `auth` / `status` / `digest` / `watch` / `find` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
+| メソッド | `help` / `auth` / `status` / `digest` / `watch` / `sample` / `find` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
 | push | `subscribe` した接続へ `{"event":"data",...}` / `{"event":"reset"}` を配信 |
 
 `help` は**認証不要**の自己記述メソッドで、全メソッド・制限値・使い方ヒントを機械可読で返す
@@ -72,7 +72,7 @@ serial-monitor-essential --mcp        # GUI を起動せず MCP stdio サーバ�
 | 項目 | 値 |
 | --- | --- |
 | 実装 | `src-tauri/src/mcp_stdio.rs`（JSON-RPC 2.0 行区切り、stdout は JSON-RPC 専用・ログは stderr） |
-| ツール | `serial_status` / `serial_ports` / `serial_digest` / `serial_watch` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
+| ツール | `serial_status` / `serial_ports` / `serial_digest` / `serial_watch` / `serial_sample` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
 | 接続先 | 環境変数 `SME_BRIDGE_HOST`（既定 `127.0.0.1`）/ `SME_BRIDGE_PORT`（既定 `57320`）/ `SME_BRIDGE_TOKEN` |
 | 登録例 | `claude mcp add serial-monitor -- "<exe のフルパス>" --mcp` |
 
@@ -123,6 +123,26 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
   ようにする。
 - ヒットを打ち切ったら `showing N of M hits` と明示する。
 
+### `serial_sample` / ブリッジ `sample`
+
+導出情報では足りず「実際の行そのもの」が要るときの、上限付き・重複畳み込み付きの窓。
+索引が無くても `tail` / `head` / `around` / `stratified` は動く（`by_template` のみ索引が要る）。
+
+| パラメータ | 既定 | 意味 |
+| --- | --- | --- |
+| `mode` | `tail` | `tail`（最新）/ `head`（索引の先頭）/ `around`（`offset` 必須）/ `stratified`（全体に等間隔）/ `by_template`（`template` 必須） |
+| `n` | 10（最大 50） | 行数 |
+| `collapse_repeats` | `true` | 連続する同一行を `[xN]` に畳む。**N は正確**（丸めない） |
+| `max_chars` | 1400 | 返す文字数の硬い上限 |
+
+規範:
+
+- **読み出し窓の端で切れた行は捨てる**。途中から始まる行を 1 行として見せない。
+  捨てた結果 0 行になったら、その理由と次の手を必ず出す（空応答を返さない）。
+- 全ての行に行頭オフセットを付ける（`serial_read_range` で確認できる）。
+- `by_template` が返せるのは索引が覚えている**直近 4 件**まで。件数を水増しせず、
+  「直近 N 件を出している」と明記する。
+
 ### `serial_digest` / `serial_watch` / ブリッジ `digest` / `watch`
 
 アプリが持つ**索引**（`src-tauri/src/insight/`）から答えるツール。
@@ -132,6 +152,7 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
 | パラメータ | 既定 | 意味 |
 | --- | --- | --- |
 | `digest.window` | `all` | `all` / 期間（`30s` `5m` `1h` `250ms`）/ `off:FROM..TO` |
+| `digest.template` | なし | `t12` / `12`。指定すると**そのテンプレート 1 件の詳細**（全項目の範囲とオフセット、実際の行）を返す |
 | `digest.top` | 8（最大 50） | TOP に載せる頻出テンプレート数 |
 | `digest.samples` | 3（最大 8） | 引用する直近の生行数 |
 | `digest.buckets` | 0（最大 24） | 時系列バケット数。0 で TIME セクションなし |

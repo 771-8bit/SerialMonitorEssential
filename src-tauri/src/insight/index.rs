@@ -37,6 +37,12 @@ pub const MAX_PARTIAL_LINE: usize = 64 * 1024;
 pub const RECENT_LINES: usize = 8;
 /// SAMPLE 1 行の最大文字数
 pub const RECENT_LINE_CHARS: usize = 200;
+/// テンプレートごとに覚えておく直近の出現オフセット数
+///
+/// 生の行そのものは持たない（256 テンプレート分の本文はメモリを食う）。
+/// オフセットだけ覚えておけば `serial_sample(by_template)` が必要なときに
+/// `DataStore` から読み直せる。4 x 8 バイト x 256 = 8 KB。
+pub const TEMPLATE_RECENT_OFFSETS: usize = 4;
 
 /// 1 スロットの統計
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +67,8 @@ pub struct TemplateStat {
     pub first_offset: u64,
     pub last_offset: u64,
     pub slots: Vec<SlotStat>,
+    /// 直近の出現オフセット（古い順、最大 [`TEMPLATE_RECENT_OFFSETS`] 件）
+    pub recent_offsets: Vec<u64>,
 }
 
 /// ある時点の集計（デルタの基準点）
@@ -343,6 +351,10 @@ impl InsightIndex {
             if let Some(stat) = inner.by_id.get_mut(&id) {
                 stat.count += 1;
                 stat.last_offset = offset;
+                if stat.recent_offsets.len() == TEMPLATE_RECENT_OFFSETS {
+                    stat.recent_offsets.remove(0);
+                }
+                stat.recent_offsets.push(offset);
                 merge_slots(&mut stat.slots, &masked.slots, offset);
                 return;
             }
@@ -362,6 +374,7 @@ impl InsightIndex {
                 first_offset: offset,
                 last_offset: offset,
                 slots: masked.slots.iter().map(|s| new_slot(s, offset)).collect(),
+                recent_offsets: vec![offset],
             },
         );
     }

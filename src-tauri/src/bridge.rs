@@ -430,6 +430,10 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
         },
+        "sample" => match method_sample(ctx, &req.params) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::error(id, e),
+        },
         "send" => match method_send(ctx, &req.params) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
@@ -462,8 +466,9 @@ fn method_help() -> Value {
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
             "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
             "find": { "params": { "pattern": "string (Rust regex, multi-line; no lookaround)", "from": "u64 (optional, default 0)", "to": "u64 (optional, default end of stream)", "max_hits": format!("usize (optional, default {FIND_DEFAULT_HITS}, max {FIND_MAX_HITS})") }, "result": { "matches": "u64", "exact": "bool (false when the scan was cut short or skipped unreadable bytes; then 'matches' is a LOWER BOUND)", "complete": "bool", "hits": [{ "offset": "u64", "len": "usize", "excerpt": "string (the matching line)", "excerpt_truncated": "bool" }], "first": "u64|null", "last": "u64|null", "range_start": "u64", "range_end": "u64", "bytes_scanned": "u64", "gap_bytes": "u64", "elapsed_ms": "u64" }, "note": format!("Scans the capture server-side and returns counts plus a few offsets, never the bulk data. Gives up after {FIND_DEADLINE_MS}ms with complete=false rather than timing out.") },
-            "digest": { "params": { "window": "string (optional: \"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\")", "top": "usize (optional)", "samples": "usize (optional)", "buckets": "usize (optional, 0 = none)", "max_chars": "usize (optional)" }, "result": { "text": "rendered summary (already inside the character budget)", "data": "structured equivalent", "meta": { "gen": "u64", "exact": "bool", "coverage_pct": "u64", "index_lag_bytes": "u64" }, "budget": { "max_chars": "usize", "used_chars": "usize", "truncated": "bool", "next": "string" } }, "note": "Summarises the capture from the index; never reads the bulk data. Cost does not grow with the arrival rate." },
+            "digest": { "params": { "window": "string (optional: \"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\")", "template": "string|u32 (optional: when given, returns the detail of that one template instead of the overview)", "top": "usize (optional)", "samples": "usize (optional)", "buckets": "usize (optional, 0 = none)", "max_chars": "usize (optional)" }, "result": { "text": "rendered summary (already inside the character budget)", "data": "structured equivalent", "meta": { "gen": "u64", "exact": "bool", "coverage_pct": "u64", "index_lag_bytes": "u64" }, "budget": { "max_chars": "usize", "used_chars": "usize", "truncated": "bool", "next": "string" } }, "note": "Summarises the capture from the index; never reads the bulk data. Cost does not grow with the arrival rate." },
             "watch": { "params": { "cursor": "string (optional, from a previous digest/watch)", "wait_ms": format!("u64 (optional, server-side long poll, max {WATCH_MAX_WAIT_MS})"), "top": "usize (optional)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest', reporting only what changed since the cursor", "note": "A stale-generation cursor is not an error: the reply says the generation changed and where it restarted." },
+            "sample": { "params": { "mode": "string (tail|head|around|stratified|by_template, default tail)", "n": format!("usize (optional, default {SAMPLE_DEFAULT_N}, max {SAMPLE_MAX_N})"), "offset": "u64 (mode=around)", "template": "string|u32 (mode=by_template)", "collapse_repeats": "bool (default true)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest'", "note": "Raw lines, capped and de-duplicated, each with the offset it starts at. Partial lines at the window edges are dropped rather than shown as if they were whole." },
             "ports": { "params": {}, "result": { "ports": ["string"] } },
             "subscribe": { "params": { "from_offset": "u64 (optional)" }, "result": { "subscribed": true }, "note": "after this the connection becomes push-only: frames {event:'data',offset,base64} every <=50ms, {event:'reset'} when the capture restarts; close the socket to stop" }
         },
@@ -991,6 +996,10 @@ fn method_digest(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
     let time = StoreTime(ctx.store());
     let window = resolve_window(&spec, snap.start_offset, snap.indexed_up_to, &time)?;
 
+    if let Some(id) = param_template_id(params)? {
+        return digest_detail(ctx, &snap, id, max_chars);
+    }
+
     let whole = matches!(spec, WindowSpec::All);
     let (entries, lines, bytes, err, warn, elapsed_ms, baseline) = if whole {
         let entries: Vec<Entry> = snap
@@ -1282,6 +1291,407 @@ fn method_watch(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         "coverage_pct": snap.coverage_pct(),
         "index_lag_bytes": snap.lag_bytes(),
         "waited_ms": wait_ms,
+    });
+    Ok(insight_envelope(
+        rendered,
+        data,
+        meta,
+        max_chars,
+        Some(next),
+    ))
+}
+
+/// `sample` の既定 / 上限行数
+const SAMPLE_DEFAULT_N: usize = 10;
+const SAMPLE_MAX_N: usize = 50;
+/// 窓の大きさを見積もる 1 行あたりのバイト数（当たらなくても正しさには影響しない）
+const SAMPLE_BYTES_PER_LINE: u64 = 256;
+/// 1 回の抜き取りで読む上限
+const SAMPLE_MAX_READ: u64 = 256 * 1024;
+/// 1 点抜き（stratified / by_template）で 1 行を切り出すために読む量
+const SAMPLE_CHUNK: u32 = 512;
+
+/// `t12` / `12` のどちらでもテンプレート ID として受け取る
+fn param_template_id(params: &Value) -> Result<Option<u32>, String> {
+    match params.get("template") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(|v| Some(v as u32))
+            .ok_or_else(|| "bad params: template".to_string()),
+        Some(Value::String(s)) => s
+            .trim()
+            .trim_start_matches('t')
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| format!("bad params: template '{s}' (expected an id like \"t12\")")),
+        _ => Err("bad params: template must be a string or an integer".to_string()),
+    }
+}
+
+/// 指定オフセットから 1 行だけ読む
+///
+/// `offset` は行頭である前提（索引が記録したもの）。読めなければ `None`。
+fn read_line_at(store: &DataStore, offset: u64) -> Option<crate::insight::sample::SampleLine> {
+    let total = store.total_bytes();
+    if offset >= total {
+        return None;
+    }
+    let want = SAMPLE_CHUNK.min((total - offset) as u32);
+    let buf = store.get_data(offset, want).ok()?;
+    // 改行まで届かなかったときは、切れている事実を残したまま 1 行として出す
+    let complete = crate::insight::sample::lines_in(&buf, offset, false, true);
+    complete.into_iter().next().or_else(|| {
+        crate::insight::sample::lines_in(&buf, offset, false, false)
+            .into_iter()
+            .next()
+    })
+}
+
+/// `sample`: 生の行が本当に要るときの、代表・重複畳み込み・上限付きの抜き取り
+///
+/// 索引が無くても `tail` / `head` / `around` / `stratified` は動く
+/// （`by_template` だけが索引を要る）。
+fn method_sample(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
+    use crate::insight::render::{self, commas, Block, Section};
+    use crate::insight::sample::{collapse, lines_in, stratified_offsets, SampleLine};
+
+    let mode = params
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("tail")
+        .to_string();
+    let n = param_usize(params, "n")
+        .unwrap_or(SAMPLE_DEFAULT_N)
+        .clamp(1, SAMPLE_MAX_N);
+    let max_chars = param_usize(params, "max_chars").unwrap_or(render::DEFAULT_SAMPLE_CHARS);
+    let fold = params
+        .get("collapse_repeats")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let store = ctx.store().ok_or_else(|| "no capture".to_string())?;
+    let total = store.total_bytes();
+    let snap = ctx.index.snapshot();
+    let window = (n as u64)
+        .saturating_mul(SAMPLE_BYTES_PER_LINE)
+        .min(SAMPLE_MAX_READ);
+
+    // (説明, 行) を作る。読み方はモードごとに違うが、行の作り方は 1 箇所
+    let (label, mut lines): (String, Vec<SampleLine>) = match mode.as_str() {
+        "tail" => {
+            let start = total.saturating_sub(window);
+            let buf = store
+                .get_data(start, (total - start) as u32)
+                .unwrap_or_default();
+            let mut lines = lines_in(&buf, start, start > 0, false);
+            if lines.len() > n {
+                lines.drain(..lines.len() - n);
+            }
+            (format!("mode=tail n={n}"), lines)
+        }
+        "head" => {
+            let start = snap.start_offset.min(total);
+            let len = window.min(total.saturating_sub(start)) as u32;
+            let buf = store.get_data(start, len).unwrap_or_default();
+            let mut lines = lines_in(&buf, start, false, true);
+            lines.truncate(n);
+            (format!("mode=head n={n}"), lines)
+        }
+        "around" => {
+            let at = param_u64(params, "offset")
+                .ok_or_else(|| "bad params: mode=around needs 'offset'".to_string())?;
+            let start = at.saturating_sub(window / 2);
+            let len = window.min(total.saturating_sub(start)) as u32;
+            let buf = store.get_data(start, len).unwrap_or_default();
+            let lines = lines_in(&buf, start, start > 0, true);
+            // 指定オフセットを含む行を中心に n 行
+            let center = lines
+                .iter()
+                .position(|l| l.offset >= at)
+                .unwrap_or(lines.len().saturating_sub(1));
+            let from = center.saturating_sub(n / 2);
+            let to = (from + n).min(lines.len());
+            (
+                format!("mode=around offset={} n={n}", commas(at)),
+                lines[from.min(to)..to].to_vec(),
+            )
+        }
+        "stratified" => {
+            let start = snap.start_offset.min(total);
+            let mut lines = Vec::new();
+            for at in stratified_offsets(start, total, n, SAMPLE_CHUNK as u64) {
+                let buf = store.get_data(at, SAMPLE_CHUNK).unwrap_or_default();
+                // 位置は行の途中なので、最初の完全な行を採る
+                if let Some(line) = lines_in(&buf, at, at > start, true).into_iter().next() {
+                    lines.push(line);
+                }
+            }
+            (
+                format!(
+                    "mode=stratified n={} over off {}..{}",
+                    lines.len(),
+                    commas(start),
+                    commas(total)
+                ),
+                lines,
+            )
+        }
+        "by_template" => {
+            let id = param_template_id(params)?
+                .ok_or_else(|| "bad params: mode=by_template needs 'template'".to_string())?;
+            let stat = snap.templates.iter().find(|t| t.id == id).ok_or_else(|| {
+                format!("unknown template t{id} (it may have been evicted; run digest again)")
+            })?;
+            let lines: Vec<SampleLine> = stat
+                .recent_offsets
+                .iter()
+                .rev()
+                .take(n)
+                .filter_map(|off| read_line_at(&store, *off))
+                .collect();
+            (
+                format!(
+                    "mode=by_template t{id} x{} (showing the last {} occurrence(s) the index kept)",
+                    commas(stat.count),
+                    lines.len()
+                ),
+                lines,
+            )
+        }
+        other => {
+            return Err(format!(
+                "bad params: mode '{other}' (use tail|head|around|stratified|by_template)"
+            ))
+        }
+    };
+
+    if fold {
+        lines = collapse(lines);
+    }
+    let shown: u32 = lines.iter().map(|l| l.repeats).sum();
+
+    let mut blocks = vec![Block::new(
+        Section::Header,
+        vec![format!(
+            "sample gen={} {label} · {} line(s) shown · capture is {} byte(s)",
+            snap.gen,
+            commas(shown as u64),
+            commas(total)
+        )],
+    )];
+    if lines.is_empty() {
+        // 裸の空応答を返さない: 何も出せなかった理由を必ず言う
+        blocks.push(Block::new(
+            Section::IndexHealth,
+            vec![format!(
+                "NOTE  no complete line in the window that was read \
+                 (partial lines at the edges are dropped on purpose). \
+                 Try a larger n, or serial_read_range near the offset you care about."
+            )],
+        ));
+    }
+    blocks.push(Block::new(
+        Section::Samples,
+        lines
+            .iter()
+            .map(|l| {
+                let repeats = if l.repeats > 1 {
+                    format!("  [x{}]", l.repeats)
+                } else {
+                    String::new()
+                };
+                let cut = if l.truncated { "\u{2026}" } else { "" };
+                format!("@off={}  {}{cut}{repeats}", commas(l.offset), l.text)
+            })
+            .collect(),
+    ));
+    blocks.push(Block::new(
+        Section::Cursor,
+        vec![format!("cursor {}", snap.cursor().encode())],
+    ));
+
+    let next = format!(
+        "serial_sample(mode={mode:?}, n={}, max_chars={})",
+        (n * 2).min(SAMPLE_MAX_N),
+        (max_chars * 2).min(render::MAX_MAX_CHARS)
+    );
+    let rendered = render::render(blocks, Some(&next), max_chars);
+
+    let data = json!({
+        "mode": mode,
+        "lines": lines.iter().map(|l| json!({
+            "offset": l.offset,
+            "text": l.text,
+            "repeats": l.repeats,
+            "truncated": l.truncated,
+        })).collect::<Vec<Value>>(),
+        "total_bytes": total,
+    });
+    let meta = json!({
+        "gen": snap.gen,
+        "running": snap.running,
+        "collapsed": fold,
+        "line_count": lines.len(),
+        "occurrences": shown,
+    });
+    Ok(insight_envelope(
+        rendered,
+        data,
+        meta,
+        max_chars,
+        Some(next),
+    ))
+}
+
+/// `digest(template=...)`: 1 テンプレートの詳細
+///
+/// 概要モードと違い、ここは**数百バイトだけ**キャプチャを読む
+/// （索引が覚えている直近の出現オフセットから実際の行を引くため）。
+fn digest_detail(
+    ctx: &BridgeCtx,
+    snap: &crate::insight::index::Snapshot,
+    id: u32,
+    max_chars: usize,
+) -> Result<Value, String> {
+    use crate::insight::render::{self, commas, number, template_with_slots, Block, Section};
+
+    let stat = snap.templates.iter().find(|t| t.id == id).ok_or_else(|| {
+        format!(
+            "unknown template t{id}. It may never have existed, or it was evicted \
+                 ({} template(s) evicted so far). Run serial_digest() to see the current ids.",
+            commas(snap.evicted_templates)
+        )
+    })?;
+
+    let share = if snap.lines == 0 {
+        0.0
+    } else {
+        stat.count as f64 * 100.0 / snap.lines as f64
+    };
+    let mut blocks = vec![Block::new(
+        Section::Header,
+        vec![
+            format!(
+                "detail gen={} t{} x{} ({:.1}% of {} indexed lines)",
+                snap.gen,
+                stat.id,
+                commas(stat.count),
+                share,
+                commas(snap.lines)
+            ),
+            format!("\"{}\"", template_with_slots(&stat.template, &stat.slots)),
+            format!(
+                "first @off={}  last @off={}",
+                commas(stat.first_offset),
+                commas(stat.last_offset)
+            ),
+        ],
+    )];
+
+    let health = index_health_lines(snap);
+    if !health.is_empty() {
+        blocks.push(Block::new(Section::IndexHealth, health));
+    }
+    blocks.push(Block::new(
+        Section::Alarm,
+        vec![format!(
+            "ALARM {} err · {} warn across the whole index ({})",
+            commas(snap.err),
+            commas(snap.warn),
+            accuracy_note(snap)
+        )],
+    ));
+
+    // 全スロットの範囲。docs/26 §6.2-4 のとおり極値にはオフセットを添える
+    let slot_lines: Vec<String> = stat
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let tag = slot.kind.placeholder();
+            if !slot.numeric {
+                return format!("      {} {tag} (not numeric)", i + 1);
+            }
+            if slot.min == slot.max {
+                return format!(
+                    "      {} {tag} constant {} (first @off={})",
+                    i + 1,
+                    number(slot.min),
+                    commas(slot.min_offset)
+                );
+            }
+            format!(
+                "      {} {tag} min {}@off={} max {}@off={} last {}",
+                i + 1,
+                number(slot.min),
+                commas(slot.min_offset),
+                number(slot.max),
+                commas(slot.max_offset),
+                number(slot.last)
+            )
+        })
+        .collect();
+    if !slot_lines.is_empty() {
+        let mut lines = vec![format!("SLOT  {} field(s)", stat.slots.len())];
+        lines.extend(slot_lines);
+        blocks.push(Block::new(Section::Top, lines));
+    }
+
+    // 実際の行。索引はオフセットしか覚えていないので、ここで読み直す
+    let samples: Vec<String> = match ctx.store() {
+        Some(store) => stat
+            .recent_offsets
+            .iter()
+            .rev()
+            .filter_map(|off| read_line_at(&store, *off))
+            .map(|line| {
+                format!(
+                    "LINE  @off={}  {}{}",
+                    commas(line.offset),
+                    line.text,
+                    if line.truncated { "\u{2026}" } else { "" }
+                )
+            })
+            .collect(),
+        None => vec!["LINE  (no capture attached; offsets above are still valid)".to_string()],
+    };
+    if !samples.is_empty() {
+        blocks.push(Block::new(Section::Samples, samples));
+    }
+    blocks.push(Block::new(
+        Section::Cursor,
+        vec![format!("cursor {}", snap.cursor().encode())],
+    ));
+
+    let next = format!("serial_sample(mode=\"by_template\", template=\"t{id}\")");
+    let rendered = render::render(blocks, Some(&next), max_chars);
+
+    let data = json!({
+        "gen": snap.gen,
+        "id": stat.id,
+        "template": stat.template,
+        "count": stat.count,
+        "share_pct": share,
+        "first_offset": stat.first_offset,
+        "last_offset": stat.last_offset,
+        "recent_offsets": stat.recent_offsets,
+        "slots": stat.slots.iter().map(|s| json!({
+            "kind": s.kind.placeholder(),
+            "numeric": s.numeric,
+            "min": s.min,
+            "max": s.max,
+            "last": s.last,
+            "min_offset": s.min_offset,
+            "max_offset": s.max_offset,
+        })).collect::<Vec<Value>>(),
+    });
+    let meta = json!({
+        "gen": snap.gen,
+        "running": snap.running,
+        "exact": snap.is_exact(),
+        "coverage_pct": snap.coverage_pct(),
+        "evicted_templates": snap.evicted_templates,
     });
     Ok(insight_envelope(
         rendered,
@@ -2819,5 +3229,179 @@ mod tests {
         assert!(result["methods"]["digest"].is_object());
         assert!(result["methods"]["watch"].is_object());
         assert_eq!(result["protocol"], json!(PROTOCOL_VERSION));
+    }
+
+    // ---------------- sample / template detail（docs/26 段階 3） ----------------
+
+    /// ストアと索引の両方に同じデータを入れる（実運用では IndexThread の役目）
+    fn feed_both(ctx: &BridgeCtx, store: &Arc<DataStore>, text: &str, at: u64, now_ms: u64) -> u64 {
+        store.push_test_data(text.as_bytes());
+        ctx.index.ingest(at, text.as_bytes(), now_ms);
+        at + text.len() as u64
+    }
+
+    #[test]
+    fn test_sample_quotes_real_lines_with_offsets() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let mut at = 0;
+        for i in 0..40 {
+            at = feed_both(&ctx, &store, &format!("L{i}: hello\n"), at, 1000);
+        }
+        let result = result_of(call(&ctx, "sample", json!({ "n": 3 })));
+        let text = text_of(&result);
+        assert!(text.starts_with("sample gen="), "{text}");
+        // 末尾 3 行が、それぞれ検証できるオフセット付きで出る
+        assert!(text.contains("L39: hello"), "{text}");
+        assert!(text.contains("L37: hello"), "{text}");
+        assert!(!text.contains("L36: hello"), "{text}");
+        assert_eq!(result["data"]["lines"].as_array().unwrap().len(), 3);
+        let first_offset = result["data"]["lines"][0]["offset"].as_u64().unwrap();
+        // オフセットは read_range にそのまま渡せる
+        let raw = result_of(call(
+            &ctx,
+            "read_range",
+            json!({ "offset": first_offset, "length": 4 }),
+        ));
+        assert_eq!(decode(&raw, "base64"), b"L37:".to_vec());
+    }
+
+    #[test]
+    fn test_sample_folds_repeats_without_rounding() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let mut at = 0;
+        for _ in 0..7 {
+            at = feed_both(&ctx, &store, "same line\n", at, 1000);
+        }
+        let text = text_of(&result_of(call(&ctx, "sample", json!({ "n": 20 }))));
+        assert!(text.contains("[x7]"), "{text}");
+        // 畳まないよう頼めば 7 行出る
+        let raw = text_of(&result_of(call(
+            &ctx,
+            "sample",
+            json!({ "n": 20, "collapse_repeats": false }),
+        )));
+        assert_eq!(raw.matches("same line").count(), 7, "{raw}");
+    }
+
+    #[test]
+    fn test_sample_modes_and_bad_arguments() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let mut at = 0;
+        for i in 0..200 {
+            at = feed_both(&ctx, &store, &format!("L{i}: x\n"), at, 1000);
+        }
+        assert!(text_of(&result_of(call(
+            &ctx,
+            "sample",
+            json!({ "mode": "head", "n": 2 })
+        )))
+        .contains("L0: x"));
+        let around = text_of(&result_of(call(
+            &ctx,
+            "sample",
+            json!({ "mode": "around", "offset": 100, "n": 3 }),
+        )));
+        assert!(around.contains("mode=around offset=100"), "{around}");
+        let spread = text_of(&result_of(call(
+            &ctx,
+            "sample",
+            json!({ "mode": "stratified", "n": 4 }),
+        )));
+        assert!(spread.contains("mode=stratified"), "{spread}");
+        // 全体に散らばっている（先頭と末尾の両方から採れている）
+        assert!(
+            spread.contains("L0: x") || spread.contains("L1: x"),
+            "{spread}"
+        );
+
+        assert!(
+            error_of(call(&ctx, "sample", json!({ "mode": "around" }))).contains("needs 'offset'")
+        );
+        assert!(
+            error_of(call(&ctx, "sample", json!({ "mode": "nope" }))).contains("tail|head|around")
+        );
+        assert!(
+            error_of(call(&ctx, "sample", json!({ "mode": "by_template" })))
+                .contains("needs 'template'")
+        );
+    }
+
+    #[test]
+    fn test_sample_by_template_reads_the_offsets_the_index_kept() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let mut at = 0;
+        for i in 0..10 {
+            at = feed_both(&ctx, &store, &format!("T: {i}.0 C\n"), at, 1000);
+            at = feed_both(&ctx, &store, &format!("S: state={i}\n"), at, 1000);
+        }
+        let digest = text_of(&result_of(call(&ctx, "digest", json!({}))));
+        assert!(digest.contains("T: <F"), "{digest}");
+
+        let result = result_of(call(
+            &ctx,
+            "sample",
+            json!({ "mode": "by_template", "template": "t1", "n": 4 }),
+        ));
+        let text = text_of(&result);
+        assert!(text.contains("mode=by_template t1 x10"), "{text}");
+        // 索引が覚えているのは直近 4 件だけ。数を水増しせず、そう言う
+        assert!(text.contains("showing the last 4 occurrence"), "{text}");
+        for line in result["data"]["lines"].as_array().unwrap() {
+            assert!(line["text"].as_str().unwrap().starts_with("T: "), "{text}");
+        }
+        assert!(error_of(call(
+            &ctx,
+            "sample",
+            json!({ "mode": "by_template", "template": "t999" })
+        ))
+        .contains("unknown template t999"));
+    }
+
+    #[test]
+    fn test_sample_without_a_capture_is_an_explicit_error() {
+        let (ctx, _) = test_ctx(None, None);
+        assert_eq!(error_of(call(&ctx, "sample", json!({}))), "no capture");
+    }
+
+    #[test]
+    fn test_digest_template_detail_shows_every_field_with_offsets() {
+        let store = store_with(b"");
+        let (ctx, _) = test_ctx(Some(store.clone()), None);
+        let mut at = 0;
+        for i in 0..5 {
+            at = feed_both(
+                &ctx,
+                &store,
+                &format!("T: {}.0 C rh={}%\n", 20 + i, 40),
+                at,
+                1000,
+            );
+        }
+        let result = result_of(call(&ctx, "digest", json!({ "template": "t1" })));
+        let text = text_of(&result);
+        assert!(text.starts_with("detail gen="), "{text}");
+        assert!(text.contains("t1 x5 (100.0% of 5 indexed lines)"), "{text}");
+        assert!(text.contains("SLOT  2 field(s)"), "{text}");
+        // 変動する項目は min/max とその発生オフセット、固定の項目は constant
+        assert!(text.contains("min 20@off=0"), "{text}");
+        assert!(text.contains("constant 40"), "{text}");
+        // 実際の行も出る（索引が覚えているオフセットから読み直す）
+        assert!(text.contains("LINE  @off="), "{text}");
+        assert_eq!(result["data"]["id"], json!(1));
+        assert_eq!(result["data"]["slots"].as_array().unwrap().len(), 2);
+
+        // 数値 id でも受け付ける
+        assert!(
+            text_of(&result_of(call(&ctx, "digest", json!({ "template": 1 }))))
+                .starts_with("detail gen=")
+        );
+        // 存在しない id は、追い出しの可能性まで含めて説明する
+        let err = error_of(call(&ctx, "digest", json!({ "template": "t42" })));
+        assert!(err.contains("unknown template t42"), "{err}");
+        assert!(err.contains("evicted"), "{err}");
     }
 }

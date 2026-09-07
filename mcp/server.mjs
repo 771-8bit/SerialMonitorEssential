@@ -59,6 +59,7 @@ export const MAX_MAX_CHARS = 200000;
 /** Default budgets for the index-backed tools (the bridge owns the real defaults). */
 export const DEFAULT_DIGEST_CHARS = 1800;
 export const DEFAULT_WATCH_CHARS = 1200;
+export const DEFAULT_SAMPLE_CHARS = 1400;
 
 const MAX_RX_BUFFER = 8 * 1024 * 1024;
 
@@ -862,10 +863,12 @@ function handler(fn) {
  */
 export async function insightText(client, method, args) {
   const params = {};
-  for (const key of ['window', 'cursor']) {
-    if (args?.[key] !== undefined && args[key] !== null) params[key] = args[key];
-  }
-  for (const key of ['top', 'samples', 'buckets', 'max_chars', 'wait_ms']) {
+  const keys = [
+    'window', 'cursor', 'mode', 'template',
+    'top', 'samples', 'buckets', 'max_chars', 'wait_ms', 'n', 'offset',
+    'collapse_repeats',
+  ];
+  for (const key of keys) {
     if (args?.[key] !== undefined && args[key] !== null) params[key] = args[key];
   }
   const res = await client.request(method, params);
@@ -941,6 +944,12 @@ export function createServer(client) {
           .describe(
             '"all" (default), a duration like "30s"/"5m", or "off:FROM..TO". A duration needs timestamps; without them the call fails rather than guessing.'
           ),
+        template: z
+          .string()
+          .optional()
+          .describe(
+            'A template id like "t12" from a previous reply. Returns that one template in detail (each field range with offsets, plus real lines) instead of the overview.'
+          ),
         top: z
           .number()
           .int()
@@ -1013,6 +1022,39 @@ export function createServer(client) {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     handler(async (args) => insightText(client, 'watch', args))
+  );
+
+  server.registerTool(
+    'serial_sample',
+    {
+      title: 'Quote real lines',
+      description:
+        'Quote actual received lines when the summary is not enough, capped and with consecutive duplicates folded into [xN]. Every line comes with the offset it starts at, and lines cut off by the read window are dropped rather than shown as if they were whole. Use serial_digest first; reach for this when you need to see the bytes themselves.',
+      inputSchema: {
+        mode: z
+          .enum(['tail', 'head', 'around', 'stratified', 'by_template'])
+          .optional()
+          .describe(
+            'tail (default): newest lines. head: oldest indexed. around: needs offset. stratified: spread evenly over the capture. by_template: recent occurrences of one template.'
+          ),
+        n: z.number().int().min(1).max(50).optional().describe('How many lines (default 10).'),
+        offset: z.number().int().min(0).optional().describe('Centre offset for mode=around.'),
+        template: z.string().optional().describe('Template id like "t12" for mode=by_template.'),
+        collapse_repeats: z
+          .boolean()
+          .optional()
+          .describe('Fold consecutive identical lines into [xN] (default true). Counts stay exact.'),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(`Character cap (default ${DEFAULT_SAMPLE_CHARS}).`),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    handler(async (args) => insightText(client, 'sample', args))
   );
 
   server.registerTool(

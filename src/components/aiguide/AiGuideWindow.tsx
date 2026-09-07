@@ -195,6 +195,15 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
               </tr>
               <tr>
                 <td>
+                  <code>serial_sample</code>
+                </td>
+                <td>
+                  Quote real received lines, capped and with duplicates folded, each with the
+                  offset it starts at.
+                </td>
+              </tr>
+              <tr>
+                <td>
                   <code>serial_read_tail</code>
                 </td>
                 <td>Read the most recent bytes (text or hex dump).</td>

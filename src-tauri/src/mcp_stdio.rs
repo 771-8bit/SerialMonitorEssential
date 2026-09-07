@@ -68,6 +68,7 @@ pub const MIN_MAX_CHARS: usize = 500;
 /// `serial_digest` / `serial_watch` の既定予算（実体は insight::render 側）
 const DEFAULT_DIGEST_CHARS: usize = crate::insight::render::DEFAULT_DIGEST_CHARS;
 const DEFAULT_WATCH_CHARS: usize = crate::insight::render::DEFAULT_WATCH_CHARS;
+const DEFAULT_SAMPLE_CHARS: usize = crate::insight::render::DEFAULT_SAMPLE_CHARS;
 pub const MAX_MAX_CHARS: usize = 200_000;
 /// サポートする MCP プロトコル版（クライアント指定をエコーできる版）
 const KNOWN_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
@@ -1029,6 +1030,7 @@ pub fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "window": { "type": "string", "description": "\"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\". A duration needs timestamps; without them the call fails rather than guessing." },
+                    "template": { "type": "string", "description": "A template id like \"t12\" from a previous reply. Returns that one template in detail (each field range with offsets, plus real lines) instead of the overview." },
                     "top": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Frequent templates to list (default 8). Rare and new ones come first regardless." },
                     "samples": { "type": "integer", "minimum": 0, "maximum": 8, "description": "How many recent raw lines to quote (default 3)." },
                     "buckets": { "type": "integer", "minimum": 0, "maximum": 24, "description": "Split the window into N buckets, reporting lines/err/warn each (default 0 = none)." },
@@ -1048,6 +1050,23 @@ pub fn tool_definitions() -> Value {
                     "wait_ms": { "type": "integer", "minimum": 0, "maximum": 3000, "description": "Wait server-side this long for new data before answering (default 0)." },
                     "top": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Changed templates to list (default 8)." },
                     "max_chars": { "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS, "description": format!("Hard cap on the returned characters (default {DEFAULT_WATCH_CHARS}).") }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": true }
+        },
+        {
+            "name": "serial_sample",
+            "title": "Quote real lines",
+            "description": "Quote actual received lines when the summary is not enough, capped and with consecutive duplicates folded into [xN]. Every line comes with the offset it starts at, and lines cut off by the read window are dropped rather than shown as if they were whole. Use serial_digest first; reach for this when you need to see the bytes themselves.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["tail", "head", "around", "stratified", "by_template"], "description": "tail (default): newest lines. head: oldest indexed. around: needs offset. stratified: spread evenly over the capture. by_template: recent occurrences of one template." },
+                    "n": { "type": "integer", "minimum": 1, "maximum": 50, "description": "How many lines (default 10)." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Centre offset for mode=around." },
+                    "template": { "type": "string", "description": "Template id like \"t12\" for mode=by_template." },
+                    "collapse_repeats": { "type": "boolean", "description": "Fold consecutive identical lines into [xN] (default true). Counts stay exact." },
+                    "max_chars": { "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS, "description": format!("Character cap (default {DEFAULT_SAMPLE_CHARS}).") }
                 }
             },
             "annotations": { "readOnlyHint": true, "openWorldHint": true }
@@ -1348,24 +1367,39 @@ pub fn call_tool_with_cancel(
             let res = bridge.request("find", params)?;
             Ok(render_find(&res, max_chars))
         }
-        "serial_digest" | "serial_watch" => {
+        "serial_digest" | "serial_watch" | "serial_sample" => {
             // MCP 側は薄い描画器に徹する: 予算の適用も文言もブリッジの
             // insight::render が唯一の担当（docs/26 §2.3）
             let method = name.trim_start_matches("serial_");
             let mut params = json!({});
-            for key in ["top", "samples", "buckets", "max_chars", "wait_ms"] {
-                if let Some(v) = arg_u64(args, key, 0, MAX_MAX_CHARS as u64)? {
+            for key in [
+                "top",
+                "samples",
+                "buckets",
+                "max_chars",
+                "wait_ms",
+                "n",
+                "offset",
+            ] {
+                if let Some(v) = arg_u64(args, key, 0, u64::MAX)? {
                     params[key] = json!(v);
                 }
             }
-            for key in ["window", "cursor"] {
+            for key in ["window", "cursor", "mode", "template"] {
                 if let Some(v) = args.get(key) {
                     if !v.is_null() {
-                        let text = v
-                            .as_str()
-                            .ok_or_else(|| format!("bad arguments: '{key}' must be a string"))?;
-                        params[key] = json!(text);
+                        // template だけは "t12" と 12 の両方を許す
+                        params[key] = match v {
+                            Value::String(_) | Value::Number(_) if key == "template" => v.clone(),
+                            Value::String(s) => json!(s),
+                            _ => return Err(format!("bad arguments: '{key}' must be a string")),
+                        };
                     }
+                }
+            }
+            if let Some(v) = args.get("collapse_repeats") {
+                if !v.is_null() {
+                    params["collapse_repeats"] = json!(arg_bool(args, "collapse_repeats", true)?);
                 }
             }
             let res = bridge.request(method, params)?;
@@ -2283,6 +2317,7 @@ mod tests {
                 "serial_ports",
                 "serial_digest",
                 "serial_watch",
+                "serial_sample",
                 "serial_read_tail",
                 "serial_read_range",
                 "serial_find",
@@ -2298,17 +2333,18 @@ mod tests {
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
         // 常駐コスト（スキーマ全体）が肥大していないこと。
-        // 段階 2 で digest / watch を足して 7.1k -> 9.0k 文字（約 +500 トークン）
-        // になった。docs/26 の「約 1.0k トークン」という目標は達成できていない
-        // （既存 8 ツールの時点で約 1.9k トークンあった）。1 回の tail が
-        // 25 万トークンだったことに対する取引としては妥当だが、これ以上は
-        // 説明文を削るのではなく**ツールを増やさない**ことで守る。
+        // 段階 2 で digest / watch、段階 3 で sample を足して 7.1k -> 約 10.5k 文字
+        // （約 +900 トークン）になった。docs/26 の「約 1.0k トークン」という目標は
+        // 達成できていない（既存 8 ツールの時点で約 1.9k トークンあった）。
+        // 1 回の tail が 25 万トークンだったことに対する取引としては妥当。
+        // 段階 3 で `serial_patterns` を別ツールにせず `serial_digest(template=)`
+        // へ畳んだのは、この常駐コストを増やさないため（docs/26 §7.4）。
         let schema_chars = serde_json::to_string(&res["result"]["tools"])
             .unwrap()
             .chars()
             .count();
         assert!(
-            schema_chars < 10_000,
+            schema_chars < 11_500,
             "tools/list schema is {schema_chars} chars; it is resident in every request"
         );
     }

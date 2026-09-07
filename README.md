@@ -146,8 +146,8 @@ Every send from the agent appears in the GUI's AI Bridge row (byte count, time, 
 so you can always see what the agent did.
 
 Available tools: `serial_status`, `serial_ports`, `serial_digest`, `serial_watch`,
-`serial_read_tail`, `serial_read_range`, `serial_find`, `serial_send`, `serial_send_hex`,
-`serial_wait_for`.
+`serial_sample`, `serial_read_tail`, `serial_read_range`, `serial_find`, `serial_send`,
+`serial_send_hex`, `serial_wait_for`.
 
 `serial_digest` and `serial_watch` answer from an index the app keeps while the bridge is on,
 so their replies stay the same size whether the device sent 4 KB or 4 GB — an agent can follow

@@ -5,7 +5,7 @@
 プロトコル面を検証する:
 
   initialize ハンドシェイク / notifications/initialized の受け流し / ping /
-  tools/list（10 ツール）/ ブリッジ未起動時の友好的エラー / 未知ツール(-32602) /
+  tools/list（11 ツール）/ ブリッジ未起動時の友好的エラー / 未知ツール(-32602) /
   未知メソッド(-32601) / stdin EOF でのクリーン終了
 
 「ブリッジ未起動」を決定的にするため、子プロセスには未使用ポートを
@@ -106,7 +106,7 @@ def main() -> int:
         )
         expected = [
             "serial_status", "serial_ports", "serial_digest", "serial_watch",
-            "serial_read_tail", "serial_read_range",
+            "serial_sample", "serial_read_tail", "serial_read_range",
             "serial_find", "serial_send", "serial_send_hex", "serial_wait_for",
         ]
         check("tools/list", names == expected and shapes_ok,

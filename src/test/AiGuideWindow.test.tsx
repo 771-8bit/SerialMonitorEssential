@@ -70,6 +70,7 @@ describe('AiGuideWindow', () => {
       'serial_ports',
       'serial_digest',
       'serial_watch',
+      'serial_sample',
       'serial_read_tail',
       'serial_read_range',
       'serial_find',

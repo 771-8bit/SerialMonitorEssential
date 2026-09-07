@@ -90,7 +90,8 @@ After registering, you should see `serial-monitor` in `claude mcp list`.
 | --- | --- | --- |
 | `serial_status` | none | Connection state, port name, received byte count, app version (four lines; the duplicate raw JSON dump was removed) |
 | `serial_ports` | none | List of serial ports the PC recognizes |
-| `serial_digest` | `window?` (`all` / `30s` / `off:A..B`), `top?`, `samples?`, `buckets?`, `max_chars?` | One-call summary from the app's index: line templates with counts, alarm totals, rare and brand-new lines, optional per-bucket timeline, and a cursor for `serial_watch`. Reads no bulk data, so the reply size does not follow the arrival rate |
+| `serial_digest` | `window?` (`all` / `30s` / `off:A..B`), `template?` (`"t12"` = detail of one template), `top?`, `samples?`, `buckets?`, `max_chars?` | One-call summary from the app's index: line templates with counts, alarm totals, rare and brand-new lines, optional per-bucket timeline, and a cursor for `serial_watch`. Reads no bulk data, so the reply size does not follow the arrival rate |
+| `serial_sample` | `mode?` (`tail`/`head`/`around`/`stratified`/`by_template`), `n?` (default 10), `offset?`, `template?`, `collapse_repeats?`, `max_chars?` | Real received lines, capped, each with the offset it starts at. Consecutive duplicates fold into `[xN]` with an exact count. Lines cut off by the read window are dropped rather than shown as if they were whole |
 | `serial_watch` | `cursor?`, `wait_ms?` (max 3000), `top?`, `max_chars?` | Only what changed since the cursor. A cursor from a cleared or reopened capture is answered with "generation changed", never with a plausible-looking wrong delta |
 | `serial_read_tail` | `bytes?` (default 4096 / max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes. Output is capped at `max_chars` (default 4000) |
 | `serial_read_range` | `offset`, `length` (max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | Received data in the given range. Same display and budget rules as `serial_read_tail` |
@@ -131,6 +132,7 @@ Notes:
 ```
 1. serial_digest            → what is this device doing? (one call, fixed cost)
 2. serial_watch (+ cursor)  → follow it; only the changes come back
+   serial_digest(template=)  → one template in detail; serial_sample → the real lines
 3. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
 4. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
 5. serial_read_tail         → read a little more surrounding context

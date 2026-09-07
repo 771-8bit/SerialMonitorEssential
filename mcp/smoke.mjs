@@ -138,6 +138,7 @@ async function createFakeBridge({ token = null, initial = Buffer.alloc(0) } = {}
       // "thin renderer" contract (docs/26 §2.3) can be exercised.
       case 'digest':
       case 'watch':
+      case 'sample':
         return {
           text: `${req.method} gen=1
 ALARM 0 err · 0 warn (exact, coverage 100%)
@@ -344,6 +345,22 @@ async function testMainFlow() {
       echoed.window === '30s' && echoed.top === 12 && !('cursor' in echoed),
       JSON.stringify(echoed)
     );
+    const sampled = await insightText(client, 'sample', {
+      mode: 'by_template',
+      template: 't3',
+      n: 4,
+      collapse_repeats: false,
+    });
+    check('sample passes the bridge text through', sampled.startsWith('sample gen=1'), firstLine(sampled));
+    const sampleEcho = (
+      await client.request('sample', { mode: 'by_template', template: 't3', n: 4 })
+    ).data.echo;
+    check(
+      'sample forwards mode/template/n verbatim',
+      sampleEcho.mode === 'by_template' && sampleEcho.template === 't3' && sampleEcho.n === 4,
+      JSON.stringify(sampleEcho)
+    );
+
     const watched = await insightText(client, 'watch', { cursor: 'v1:g1:o1:l1:e1', wait_ms: 100 });
     check('watch passes the bridge text through', watched.startsWith('watch gen=1'), firstLine(watched));
 

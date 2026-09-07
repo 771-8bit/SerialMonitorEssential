@@ -256,7 +256,7 @@ enum Section { Header, IndexHealth, Alarm, NewTemplates, Rare, Top, Channels, Ti
 | ~~**0. 描画の規律**~~ **実装済（2026-09-05）** | `render_chunk` に `max_chars`（既定 4000）+ 切り詰めフッタ。`serial_status` の `raw` 廃止。`format`(`auto｜text｜hex｜lines`)/`collapse_repeats` 追加 | 病的ケース（4096 バイトのバイナリ = hex）が実測 **20,223 → 3,902 文字**。§7.1 参照 |
 | ~~**1. `serial_find`**~~ **実装済（2026-09-05）** | `insight/find.rs`（純粋・`ByteSource` 抽象）+ ブリッジ `find` + MCP `serial_find` | 「1 MiB 引いて grep」（25 万トークン・しばしば失敗）を **約 350 トークン**に。1 GB でも検索可。§7.2 参照 |
 | ~~**2. 索引 + `serial_digest` + `serial_watch`**~~ **実装済（2026-09-07）** | `mask.rs`（純粋・プロパティ試験）/ `index.rs` / `thread.rs` / `window.rs` / `render.rs`。`Arc<InsightIndex>` を `BridgeState`→`BridgeCtx` に通す | **設計の本体**。実測 digest 901 字（約 250 tok）/ watch 394 字（約 110 tok）。§7.3 参照 |
-| **3. `serial_patterns` / `serial_sample`**（約 2 日） | 表ができていればほぼ無料。`compare_to` は 2 スナップショットの差 | 「送信後に何が変わったか」が 25 万トークン → **約 450 トークン** |
+| ~~**3. `serial_patterns` / `serial_sample`**~~ **実装済（2026-09-07）** | 表ができていればほぼ無料。`compare_to` は 2 スナップショットの差 | 「送信後に何が変わったか」は段階 2 の `watch` で既に達成。段階 3 は**テンプレート詳細**と**生行の抜き取り**を足した。§7.4 参照 |
 | **4. `send(expect=)` と `serial_wait_for` のサーバ側化**（約 2 日） | 照合をブリッジへ移動。送信前 `total_bytes` から前方走査 | 1 往復あたり 1,500〜6,000 → **約 250 トークン**。かつ §5.1 の読み負けバグを解消 |
 | **5. `serial_channels` + バイナリモード**（約 3 日） | 独自のラベル付き抽出器、`binary.rs` の分類とフレーム要約 | トークン効果は中程度だが、**バイナリ/自由形式で自信満々に嘘をつくのを止める** |
 
@@ -375,6 +375,43 @@ DEBT-7 が指摘した「IO ループから純関数を抽出して細粒度検�
   （試験の上限を 10,000 文字に置いた）。
 - **12 Mbps での索引の追随性能は未実測**（§9 のまま）。単体では
   `IndexThread` が 1 MiB ずつ読んで追随することしか確認していない。
+
+### 7.4 段階 3 の実装記録（2026-09-07）
+
+`insight/sample.rs`（純粋）を追加し、ブリッジに `sample`、MCP に `serial_sample` を
+足した。テンプレート詳細は **`serial_digest(template="t12")`** として畳んだ。
+
+**`serial_patterns` を別ツールにしなかった理由**: 設計の §4 は 6 ツールを新設する
+想定だったが、実装してみると `serial_patterns` の中身は 3 つに分かれ、そのうち
+2 つは既にある:
+
+| `serial_patterns` の機能 | 実際の置き場所 |
+|---|---|
+| テンプレートのヒストグラム | `serial_digest(window=, top=)` がそのもの |
+| `compare_to=` による差分 | `serial_watch(cursor=)` がそのもの（段階 2 で実装済み） |
+| `id=` によるテンプレート詳細 | **新規**。`serial_digest(template=)` として畳んだ |
+
+残る「詳細」だけのために 1 ツール増やすと、`tools/list` の常駐コストが
+全リクエストに乗る。設計自身の原則「**機能はパラメータに畳む**」（§4 冒頭）に
+従って `digest` のパラメータにした。結果、段階 3 で増えたツールは
+`serial_sample` の 1 つだけで、常駐コストは 9.0k → 約 10.5k 文字に留まった。
+
+`serial_sample` の設計判断:
+
+- **端の欠けた行は捨てる**。読み出し窓の両端は行の途中でありうる。切れた行を
+  1 行として見せると、エージェントはそれを実データだと信じる。捨てた結果 0 行に
+  なったら、その理由と次の手（`n` を増やす / `serial_read_range`）を必ず出す。
+- **索引はテンプレートごとに直近 4 件の「オフセットだけ」を覚える**（8 KB）。
+  行本文を持つと 256 テンプレート分で数十 MB になる。`by_template` は
+  必要になった時点で `DataStore` から読み直す。覚えているのが 4 件だけである
+  ことは応答に明記する（`showing the last 4 occurrence(s) the index kept`）。
+- **`stratified` は重なったら短くする**。範囲が狭いときに同じ位置を n 回
+  読んで n 行あるように見せない。
+- 重複畳み込み `[xN]` の N は**正確**。丸めない。
+
+`digest(template=)` の詳細モードは、概要モードと違い**数百バイトだけ**
+キャプチャを読む（索引が覚えたオフセットから実際の行を引くため）。概要モードが
+`get_data` を 1 回も呼ばないことは試験で固定したままにしている。
 
 ## 8. 試験義務（本リポジトリの V&V 方針に整合）
 

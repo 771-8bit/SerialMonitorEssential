@@ -91,6 +91,7 @@ flowchart TB
 | ウィンドウ解決・カーソル | SYS-F-1111 | `insight::window::tests`（例示 5 件 + プロパティ 2 件） |
 | テンプレート表・差分・世代 | SYS-F-1111 | `insight::index::tests`（12 件） |
 | セクション優先順位と文字数予算 | SYS-F-1110 | `insight::render::tests`（例示 5 件 + プロパティ 2 件） |
+| 生行の抜き取り・重複畳み込み | SYS-F-1111 | `insight::sample::tests`（6 件） |
 | スクロール座標変換 | SYS-F-303, 305 | `src/test/scrollUtils.test.ts` |
 | Hex 入力検証・改行付加 | SYS-F-402, 403 | `src/components/SendPanel.test.ts` |
 
@@ -115,7 +116,7 @@ flowchart TB
 
 ### 2.4 実施状況
 
-**実施済み**。`cargo test --lib` で **326 passed**（うちプロパティテスト 19 件）、vitest **173 passed**（2026-09-07 時点）。
+**実施済み**。`cargo test --lib` で **338 passed**（うちプロパティテスト 19 件）、vitest **173 passed**（2026-09-07 時点）。
 ただし GAP-13（ポート設定検証）、GAP-18（export / clipboard）、GAP-22（Y レンジ計算）は未カバー。
 
 ---
@@ -778,7 +779,7 @@ thread.rs を対象に含めた。
 
 | # | 技法 | 状況 | 主な GAP |
 |---|------|------|----------|
-| 1 | 単体（EP/BVA） | **実施済**（Rust 326 / vitest 173。2026-09-07 時点） | GAP-13, 18, 22 |
+| 1 | 単体（EP/BVA） | **実施済**（Rust 338 / vitest 173。2026-09-07 時点） | GAP-13, 18, 22 |
 | 2 | プロパティベース | **部分実施済**（`proptest` 導入、19 件パス）。残: P-2, P-6 | GAP-12（残件のみ） |
 | 3 | 状態遷移（0/1-switch） | **実施済**（2026-09-03 / SM-7 は 2026-09-07）。`state_transition_tests.rs`（SM-2×SM-3: 0-switch + 49 順序対、SM-7 索引: 0-switch 6 + 36 順序対）と `src/test/PlotterViewFsm.test.tsx`（SM-5 の 0-switch + 49 順序対）。GAP-11 解消 | GAP-14（コマンド層のみ） |
 | 4 | 組合せ（ペアワイズ） | **第 1・第 2 ラウンド実施済（2026-09-03）**: 8 因子 112 ペア / 7 行、12 因子 333 ペア / 14 行、全 PASS。残: 不活性文脈 112 ペアの実効被覆（PICT の制約付き生成） | GAP-28（解消。制約付き拡張のみ残） |

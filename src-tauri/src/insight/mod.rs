@@ -16,6 +16,7 @@
 //! | [`mask`] | 行 -> テンプレート、重大度の全バイト走査 | 純粋 |
 //! | [`window`] | ウィンドウ解決、カーソルの生成 / 解釈 | 純粋 |
 //! | [`render`] | セクション組み立てと文字数予算 | 純粋 |
+//! | [`sample`] | 生行の抜き取り・重複畳み込み | 純粋 |
 //! | [`find`] | ストリーム全体の正規表現走査 | 純粋（`ByteSource` 越し） |
 //! | [`index`] | テンプレート表・チェックポイント | 共有状態 |
 //! | [`thread`] | `DataStore` を読む唯一の追加リーダ | IO |
@@ -24,6 +25,7 @@ pub mod find;
 pub mod index;
 pub mod mask;
 pub mod render;
+pub mod sample;
 pub mod thread;
 pub mod window;
 

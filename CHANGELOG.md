@@ -41,6 +41,12 @@ First release of the Tauri/Rust rewrite (succeeding the earlier C# version).
   4 GB. Counts come with the coverage that produced them, every reported extreme
   carries a byte offset, and a cursor from a cleared capture is answered with
   "generation changed" rather than a wrong delta (docs/26 stage 2).
+- AI integration: `serial_sample` quotes real received lines, capped and with
+  consecutive duplicates folded into `[xN]` (exact counts), each carrying the
+  offset it starts at; lines cut off by the read window are dropped rather than
+  shown as if they were whole. `serial_digest(template="t12")` returns one
+  template in detail: every field's range with the offsets where the extremes
+  occurred, plus the real lines behind it (docs/26 stage 3).
 - AI integration: `serial_find` searches the whole capture server-side and
   returns match counts plus offsets instead of bulk data, so it works far past
   the 1 MiB read limit (docs/26 stage 1).

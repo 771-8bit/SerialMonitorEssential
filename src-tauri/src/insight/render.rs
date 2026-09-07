@@ -17,6 +17,8 @@ pub const MAX_MAX_CHARS: usize = 200_000;
 /// `serial_digest` / `serial_watch` の既定予算
 pub const DEFAULT_DIGEST_CHARS: usize = 1800;
 pub const DEFAULT_WATCH_CHARS: usize = 1200;
+/// `serial_sample` の既定予算
+pub const DEFAULT_SAMPLE_CHARS: usize = 1400;
 /// この件数以下を「稀」として必ず列挙する
 pub const RARE_THRESHOLD: u64 = 5;
 /// RARE に載せる最大件数（超えたら "N of M shown" と明示する）
