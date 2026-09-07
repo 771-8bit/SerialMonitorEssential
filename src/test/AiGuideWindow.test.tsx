@@ -68,6 +68,8 @@ describe('AiGuideWindow', () => {
     for (const tool of [
       'serial_status',
       'serial_ports',
+      'serial_digest',
+      'serial_watch',
       'serial_read_tail',
       'serial_read_range',
       'serial_find',

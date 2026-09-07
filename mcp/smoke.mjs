@@ -20,6 +20,7 @@ import {
   decodeBase64,
   headBytesWithinCharBudget,
   hexDump,
+  insightText,
   looksLikeText,
   parseHex,
   renderBytes,
@@ -30,6 +31,9 @@ import {
 } from './server.mjs';
 
 const MAX_CHUNK = 1048576;
+
+/** First line of a multi-line report (used as the detail in check messages). */
+const firstLine = (text) => String(text).split(/\r?\n/)[0];
 
 /* ------------------------------------------------------------------ */
 /* Fake bridge (the app side of the protocol)                          */
@@ -129,6 +133,20 @@ async function createFakeBridge({ token = null, initial = Buffer.alloc(0) } = {}
         state.sent.push(buf);
         return { bytes_written: buf.length };
       }
+      // The real summarising lives in the Rust bridge (insight/*). The fake
+      // only has to answer in the same envelope shape, so the adapter's
+      // "thin renderer" contract (docs/26 §2.3) can be exercised.
+      case 'digest':
+      case 'watch':
+        return {
+          text: `${req.method} gen=1
+ALARM 0 err · 0 warn (exact, coverage 100%)
+cursor v1:g1:o${state.data.length}:l1:e1
+- nothing withheld`,
+          data: { cursor: `v1:g1:o${state.data.length}:l1:e1`, echo: params },
+          meta: { gen: 1, exact: true, coverage_pct: 100 },
+          budget: { max_chars: 1800, used_chars: 100, truncated: false },
+        };
       case 'ports':
         return ['COM3', 'COM7'];
       default:
@@ -303,6 +321,40 @@ async function testMainFlow() {
         foundText.includes(`first @off=${found.first}`),
       foundText.split('\n')[0]
     );
+
+    // digest / watch: the adapter is a pass-through, and it forwards args
+    const digest = await insightText(client, 'digest', {
+      window: '30s',
+      top: 12,
+      max_chars: 2000,
+      cursor: undefined,
+    });
+    check(
+      'digest passes the bridge text through untouched',
+      digest.startsWith('digest gen=1') &&
+        digest.includes('ALARM 0 err') &&
+        digest.includes('coverage 100%') &&
+        digest.includes('cursor v1:g1:') &&
+        !digest.includes('base64'),
+      firstLine(digest)
+    );
+    const echoed = (await client.request('digest', { window: '30s', top: 12 })).data.echo;
+    check(
+      'digest forwards only the arguments it was given',
+      echoed.window === '30s' && echoed.top === 12 && !('cursor' in echoed),
+      JSON.stringify(echoed)
+    );
+    const watched = await insightText(client, 'watch', { cursor: 'v1:g1:o1:l1:e1', wait_ms: 100 });
+    check('watch passes the bridge text through', watched.startsWith('watch gen=1'), firstLine(watched));
+
+    // A reply with no text must fail loudly rather than read as "nothing happened"
+    let textless = null;
+    try {
+      await insightText({ request: async () => ({ data: {} }) }, 'digest', {});
+    } catch (err) {
+      textless = String(err?.message ?? err);
+    }
+    check('a reply without text is an error, not an empty answer', textless?.includes('no text'), String(textless));
 
     // 4. wait_for-style polling match
     const before = bridge.state.data.length;

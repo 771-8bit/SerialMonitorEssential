@@ -87,6 +87,10 @@ flowchart TB
 | Logger のフラッシュ閾値 | SYS-F-202 | `test_process_buffer_*`（4 件） |
 | パース規則 | SYS-F-701〜709 | `test_parse_*`（17 件） |
 | 集約・LTTB・ペイロード形式 | SYS-F-511〜516, SYS-NF-601 | aggregator の 36 件 |
+| 行 -> テンプレート化 | SYS-F-1111 | `insight::mask::tests`（例示 7 件 + プロパティ 4 件） |
+| ウィンドウ解決・カーソル | SYS-F-1111 | `insight::window::tests`（例示 5 件 + プロパティ 2 件） |
+| テンプレート表・差分・世代 | SYS-F-1111 | `insight::index::tests`（12 件） |
+| セクション優先順位と文字数予算 | SYS-F-1110 | `insight::render::tests`（例示 5 件 + プロパティ 2 件） |
 | スクロール座標変換 | SYS-F-303, 305 | `src/test/scrollUtils.test.ts` |
 | Hex 入力検証・改行付加 | SYS-F-402, 403 | `src/components/SendPanel.test.ts` |
 
@@ -111,7 +115,7 @@ flowchart TB
 
 ### 2.4 実施状況
 
-**実施済み**。Rust の例示テスト 118 件 + プロパティテスト 8 件 = `cargo test --lib` で 126 passed、vitest 93 passed。
+**実施済み**。`cargo test --lib` で **326 passed**（うちプロパティテスト 19 件）、vitest **173 passed**（2026-09-07 時点）。
 ただし GAP-13（ポート設定検証）、GAP-18（export / clipboard）、GAP-22（Y レンジ計算）は未カバー。
 
 ---
@@ -215,6 +219,40 @@ flowchart TB
 フロントエンドは version の変化のみを再取得の契機にしているため、
 後退（特に `clear` でのリセット）は「古いデータに取り残される」形で表面化する。
 
+#### P-10: マスクの冪等性・有界性 （SYS-F-1111）— **実装済: `prop_mask_is_idempotent` ほか**
+
+> 任意のバイト列に対し、`mask_line` の出力テンプレートを再度マスクしても
+> 同じテンプレートになる。テンプレート中のプレースホルダ数とスロット数は常に一致し、
+> テンプレート長は入力長によらず上限内に収まる。
+
+- 反例が出やすい箇所: 長さ上限を**バイトで数える**実装（CJK ログで 1/3 の位置で切れ、
+  再マスクで別テンプレートになる）。実際にこの経路で冪等性が壊れることを設計中に確認し、
+  文字数で数える実装に変えた。
+- 実装: `insight/mask.rs` の `prop_mask_is_idempotent` / `prop_slots_match_placeholders` /
+  `prop_template_is_bounded`。
+
+#### P-11: 重大度走査の分割不変性 （SYS-F-1111）— **実装済: `prop_severity_is_split_invariant`**
+
+> 任意のバイト列を任意の位置で 2 つに割り、持ち越し 7 バイトで再走査したときの
+> 重大語の件数は、一括で走査したときと**完全に一致**する（取り逃がしも二重計上もない）。
+
+- 根拠: 索引は 1 MiB ずつ読むので、`overflow` のような語はほぼ必ずどこかで割れる。
+  取り逃とすと `ALARM 0 err` という嘘になり、二重計上すると存在しない事象を報告する。
+
+#### P-12: 出力予算の非超過と省略の申告 （SYS-F-1110）— **実装済: `prop_render_never_exceeds_budget` ほか**
+
+> どんなブロック構成・どんな予算でも、レンダリング結果の文字数は `max_chars` を超えない。
+> かつ、落とした行が 1 行でもあれば必ずフッタにその事実が現れる。
+
+- 実装: `insight/render.rs` の `prop_render_never_exceeds_budget` /
+  `prop_withholding_is_always_reported`、`mcp_stdio.rs` の
+  `test_render_chunk_never_exceeds_max_chars`、`mcp/smoke.mjs` の `render budget is never exceeded`。
+
+#### P-13: カーソルとウィンドウの往復・収まり （SYS-F-1111）— **実装済: `prop_cursor_round_trips` ほか**
+
+> カーソルは符号化 → 復号で同じ値に戻る。解決済みウィンドウは必ず索引範囲に収まり
+> `start <= end` である（負の幅の窓を作らない）。
+
 ### 3.4 合否基準
 
 - 各プロパティについて、反例が出ないこと。実行ケース数は
@@ -224,7 +262,7 @@ flowchart TB
 
 ### 3.5 実施状況
 
-**部分実施済**。`proptest` を導入し、8 件が実装・パス済み。
+**部分実施済**。`proptest` を導入し、**19 件**が実装・パス済み。
 
 | プロパティ | 実装 | 状態 |
 |-----------|------|------|
@@ -234,13 +272,15 @@ flowchart TB
 | P-7 バッチ等価性 | `prop_batch_equivalence` | **実装済**（level-up 領域は弱化、機構文書化） |
 | P-8 読み出し一貫性 | `prop_get_data_split_read_consistency` | **実装済**（INV-13 を発見） |
 | P-9 バージョン単調性 | `prop_version_monotonic` | **実装済** |
-| P-2 パーサの単調性 | — | 未実装（低優先。集約器側で担保） |
 | P-4 点数保存 | `prop_count_conservation`, `test_count_conservation_across_level_ups` | **実装済** |
+| P-10 マスクの冪等性・有界性 | `prop_mask_is_idempotent`, `prop_slots_match_placeholders`, `prop_template_is_bounded` | **実装済** |
+| P-11 重大度の分割不変性 | `prop_severity_is_split_invariant` | **実装済** |
+| P-12 予算の非超過と省略の申告 | `prop_render_never_exceeds_budget`, `prop_withholding_is_always_reported` | **実装済** |
+| P-13 カーソル / ウィンドウ | `prop_cursor_round_trips`, `prop_resolved_window_stays_inside_the_index` | **実装済** |
+| P-2 パーサの単調性 | — | 未実装（低優先。集約器側で担保） |
 | P-6 量子化の性質 | — | 未実装（例示テスト 22 ケースで代替） |
-| P-7 バッチ等価性 | — | **未実装**（GAP-12 残件） |
-| P-8 読み出しの一貫性 | — | **未実装**（GAP-12 残件、最優先） |
 
-残りの着手順: P-8 → P-7 → P-4 → P-6/P-2。
+残りの着手順: P-6 → P-2。
 
 ---
 
@@ -277,6 +317,7 @@ flowchart TB
 | SM-4 プロッタウィンドウ | 2 | 4 | 4 | 8 | E2E |
 | SM-5 ビュー状態 | 3 | 9 | 9 | 約 24 | vitest（コンポーネント）+ E2E |
 | SM-6 ビューア | 2（+直交オプション） | 4 | 4 | 8 | vitest |
+| **SM-7 Insight 索引スレッド**（ストア × 索引） | 2×2 | 6 | 6 | **36**（実施済） | Rust 統合テスト |
 
 ### 4.3 重点シナリオ（SM-2 × SM-3 の 1-switch）
 
@@ -560,6 +601,12 @@ is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
 - **`data.bin` のテール**: アプリは最後の 64KB 未満チャンクをメモリに保持するため、
   送信直後の検証は最大 1 チャンク（<64KB）過小になる。**アプリを Disconnect すると
   最終チャンクがディスクへ flush** され `data.bin` が完全一致する（検証手順に明記）。
+- **未実施の追加項目（docs/26 §9 / DEBT-9）**: 上記はすべて **AI Bridge OFF** での
+  測定である。索引スレッド（`insight/thread.rs`）は `DataStore` を読む 2 本目の
+  リーダなので、**AI Bridge を ON にしたままの欠落ゼロと索引の追随**は別途測る必要が
+  ある。High Speed USB-serial 治具が入手でき次第、本 T2-5 に
+  「AI Bridge ON・12Mbps でキャプチャ欠落ゼロ、かつ `serial_digest` の
+  `index_lag_bytes` が定常で 0 に戻る」を追加する。現時点の実測は ~2 Mbps まで。
 
 **T2-4 メモリソーク（2026-09-04 実施・60 分・PASS／リークなし）**: Pico を ~2.06 Mbps で
 3600 秒連続送信し、`monitor_memory.py`（10 秒間隔・359 サンプル）で計測。約 900MB を
@@ -731,9 +778,9 @@ thread.rs を対象に含めた。
 
 | # | 技法 | 状況 | 主な GAP |
 |---|------|------|----------|
-| 1 | 単体（EP/BVA） | **実施済**（Rust 120 / vitest 93） | GAP-13, 18, 22 |
-| 2 | プロパティベース | **部分実施済**（`proptest` 導入、8 件パス）。残: P-8, P-7, P-4 | GAP-12（残件のみ） |
-| 3 | 状態遷移（0/1-switch） | **実施済**（2026-09-03）。`state_transition_tests.rs`（0-switch + 49 順序対）と `src/test/PlotterViewFsm.test.tsx`（SM-5 の 0-switch + 49 順序対）。GAP-11 解消 | GAP-14（コマンド層のみ） |
+| 1 | 単体（EP/BVA） | **実施済**（Rust 326 / vitest 173。2026-09-07 時点） | GAP-13, 18, 22 |
+| 2 | プロパティベース | **部分実施済**（`proptest` 導入、19 件パス）。残: P-2, P-6 | GAP-12（残件のみ） |
+| 3 | 状態遷移（0/1-switch） | **実施済**（2026-09-03 / SM-7 は 2026-09-07）。`state_transition_tests.rs`（SM-2×SM-3: 0-switch + 49 順序対、SM-7 索引: 0-switch 6 + 36 順序対）と `src/test/PlotterViewFsm.test.tsx`（SM-5 の 0-switch + 49 順序対）。GAP-11 解消 | GAP-14（コマンド層のみ） |
 | 4 | 組合せ（ペアワイズ） | **第 1・第 2 ラウンド実施済（2026-09-03）**: 8 因子 112 ペア / 7 行、12 因子 333 ペア / 14 行、全 PASS。残: 不活性文脈 112 ペアの実効被覆（PICT の制約付き生成） | GAP-28（解消。制約付き拡張のみ残） |
 | 5 | E2E | 一部実施済（E-1〜E-12、手動） | GAP-30、E-13〜E-20 |
 | 6 | 性能・メモリ計測 | 一部実施済（手動 + `test_tools`） | GAP-10, 26 |

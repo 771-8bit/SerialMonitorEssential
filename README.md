@@ -136,14 +136,22 @@ You    : Send AT+GMR to the board and tell me the firmware version.
 Claude : serial_send("AT+GMR") → serial_wait_for("OK|ERROR")
          → response "AT version:2.1.0.0 ... OK". The firmware version is 2.1.0.0.
 You    : Check the recent log for CRC errors.
-Claude : serial_read_tail(16384) → 3 lines contain "CRC mismatch" (offsets 12034–...)
+Claude : serial_find("CRC mismatch") → 3 matches (offsets 12034, 40881, 91002)
+You    : What is this board doing?
+Claude : serial_digest() → 402,331 lines in 6 shapes, 0 err / 3 warn,
+         one new line "W: rx overflow q=64" first seen at offset 134,110,221
 ```
 
 Every send from the agent appears in the GUI's AI Bridge row (byte count, time, preview),
 so you can always see what the agent did.
 
-Available tools: `serial_status`, `serial_ports`, `serial_read_tail`, `serial_read_range`,
-`serial_send`, `serial_send_hex`, `serial_wait_for`.
+Available tools: `serial_status`, `serial_ports`, `serial_digest`, `serial_watch`,
+`serial_read_tail`, `serial_read_range`, `serial_find`, `serial_send`, `serial_send_hex`,
+`serial_wait_for`.
+
+`serial_digest` and `serial_watch` answer from an index the app keeps while the bridge is on,
+so their replies stay the same size whether the device sent 4 KB or 4 GB — an agent can follow
+a 12 Mbps stream without drowning in it.
 See [`mcp/README.md`](mcp/README.md) for setup details, environment variables,
 and the tool reference.
 

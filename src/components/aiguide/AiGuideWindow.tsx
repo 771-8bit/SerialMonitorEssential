@@ -176,6 +176,25 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
               </tr>
               <tr>
                 <td>
+                  <code>serial_digest</code>
+                </td>
+                <td>
+                  Summarise the whole capture in one call: line templates with counts, alarm
+                  totals, rare and brand-new lines, plus a cursor to follow it with. Costs the
+                  same whether the device sent 4 KB or 4 GB.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  <code>serial_watch</code>
+                </td>
+                <td>
+                  Report only what changed since a cursor, so following a fast device does not
+                  grow the reply.
+                </td>
+              </tr>
+              <tr>
+                <td>
                   <code>serial_read_tail</code>
                 </td>
                 <td>Read the most recent bytes (text or hex dump).</td>

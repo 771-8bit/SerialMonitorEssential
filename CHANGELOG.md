@@ -34,6 +34,20 @@ First release of the Tauri/Rust rewrite (succeeding the earlier C# version).
 - Built-in MCP stdio adapter (`--mcp`) so AI integration needs no Node.js or repo
   checkout, plus an in-app Setup Guide window that shows the exact registration
   command for the installed executable (SYS-F-1107–1109).
+- AI integration: `serial_digest` and `serial_watch`, answered from an index the
+  app keeps while the bridge is on. One call summarises a whole capture (line
+  templates with counts, alarm totals, rare and brand-new lines) and a cursor
+  follows it; both replies stay the same size whether the device sent 4 KB or
+  4 GB. Counts come with the coverage that produced them, every reported extreme
+  carries a byte offset, and a cursor from a cleared capture is answered with
+  "generation changed" rather than a wrong delta (docs/26 stage 2).
+- AI integration: `serial_find` searches the whole capture server-side and
+  returns match counts plus offsets instead of bulk data, so it works far past
+  the 1 MiB read limit (docs/26 stage 1).
+- AI integration: read tools enforce a character budget (`max_chars`, `format`,
+  `collapse_repeats`); a 4096-byte binary read went from 20,223 to 3,902
+  characters, and what was left out is named as an exact `serial_read_range`
+  call (docs/26 stage 0).
 - Windows (NSIS per-user, MSI per-machine) and Linux (deb, AppImage) packaging;
   side-by-side coexistence with the C# version.
 

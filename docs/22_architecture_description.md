@@ -177,8 +177,10 @@ flowchart TB
 | **C-PLOTW** | プロッタウィンドウ | `src/components/plotter/PlotterWindow.tsx` | 表示状態（LIVE/Inspect/Paused）の管理、更新ループ、凡例 | データの解釈・間引き（ADR-08） |
 | **C-CHART** | LineChart / uPlot | `src/components/plotter/LineChart.tsx` | 座標変換と描画、ズーム/パンの入力処理、Y レンジ計算 | データ取得 |
 | **C-STL** | State Timeline プラグイン | `src/components/plotter/stateTimelinePlugin.ts` | 状態バーの Canvas 矩形描画、DPI スケーリング | 時間軸の管理（uPlot に委ねる） |
-| **C-BRIDGE** | AI Bridge | `src-tauri/src/bridge.rs` | `127.0.0.1` 限定の NDJSON/TCP 待ち受け（既定 OFF）、プロトコル v1 の解釈、キャプチャのオフセット読み出しと push 配信、アプリ経由の送信と `bridge-activity` の emit、接続数制限（4）とトークン検証 | シリアルデータの意味解釈、MCP プロトコル、ポートの所有（`Arc` ハンドル経由で借りるだけ） |
-| **C-MCP** | MCP アダプタ（**別プロセス・アプリ内蔵**） | `src-tauri/src/mcp_stdio.rs`（`--mcp` で同一 exe が MCP stdio サーバとして起動。**配布用の正**、ADR-13） | ブリッジ protocol v1 を MCP の 7 ツール（`serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` / `serial_send` / `serial_send_hex` / `serial_wait_for`）へ変換、AI 向けの整形（テキスト/hex 判定、待ち受けポーリング）、未起動時の対処メッセージ | 状態の保持、ポートのオープン、ファイル I/O |
+| **C-BRIDGE** | AI Bridge | `src-tauri/src/bridge.rs` | `127.0.0.1` 限定の NDJSON/TCP 待ち受け（既定 OFF）、プロトコル v2 の解釈、キャプチャのオフセット読み出しと push 配信、アプリ経由の送信と `bridge-activity` の emit、接続数制限（4）とトークン検証 | シリアルデータの意味解釈、MCP プロトコル、ポートの所有（`Arc` ハンドル経由で借りるだけ） |
+| **C-MCP** | MCP アダプタ（**別プロセス・アプリ内蔵**） | `src-tauri/src/mcp_stdio.rs`（`--mcp` で同一 exe が MCP stdio サーバとして起動。**配布用の正**、ADR-13） | ブリッジ protocol v2 を MCP の 10 ツール（`serial_status` / `serial_ports` / `serial_digest` / `serial_watch` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`）へ変換、AI 向けの整形（テキスト/hex 判定、待ち受けポーリング）、未起動時の対処メッセージ | 状態の保持、ポートのオープン、ファイル I/O |
+| **C-INSIGHT** | Insight レイヤ（AI 向け導出情報） | `src-tauri/src/insight/`（`mask` / `window` / `render` / `find` は純粋関数、`index` は共有状態、`thread` は IO） | 行 -> テンプレート化、重大度の全バイト走査、テンプレート表（有界・追い出しは報告）、チェックポイントによる差分、ウィンドウ解決とカーソル、文字数予算とセクション優先順位 | 生データの配送、GUI 表示、プロッタの解釈規則（**意図的に流用しない**。docs/26 §1） |
+| **C-ITHREAD** | IndexThread | `insight/thread.rs` | 現行 DataStore の毎ポーリング解決、`Arc::ptr_eq` による差し替え検知と世代更新、1 MiB 単位の読み出し、読めない領域のスキップと `gap` 記録 | テンプレート化の規則、予算 |
 | **C-MCP-NODE** | MCP アダプタ（開発用リファレンス） | `mcp/server.mjs`（Node.js。バンドル非含有） | C-MCP と同一のツール群・出力形式（**同期義務 = DEBT-6**）。`BridgeClient` は `mcp/smoke.mjs` の結合テスト対象 | 同上 |
 
 ### 3.2 スレッド構成
@@ -188,6 +190,7 @@ flowchart TB
 | Worker | DataStore の受信期間 | ポーリング（データなし時 1 ms sleep） | `DataStore::start_reception` |
 | Logger | 同上 | 50 ms、または閾値（1 MB / 100 チャンク）到達時 | 同上 |
 | UiNotifier | 同上 | 16 ms | 同上 |
+| IndexThread | AI Bridge が ON の間 | 10 ms（未処理が残る限り連続読み） | `bridge_set(enabled=true)` |
 | PlotterThread | プロッタウィンドウの生存期間 | 10 ms（ストア不在時 50 ms） | `start_plotter_thread` |
 | Bridge listener | ブリッジ有効化 (`bridge_set(true)`) から無効化 / アプリ終了まで | `accept` を 100 ms タイムアウトで回し、停止フラグを確認 | `bridge_set` |
 | Bridge connection | 1 接続の生存期間（最大 4 本同時） | 要求駆動。`subscribe` 後は 50 ms 間隔で `total_bytes` を監視して push（1 フレーム最大 256 KiB） | Bridge listener（接続ごとに 1 本） |
@@ -370,6 +373,25 @@ stateDiagram-v2
 
 各イベントが 6 つの状態機械へ与える影響。空欄は「変化なし」。
 
+### 5.7 SM-7: Insight 索引スレッド（AI 向け）
+
+| 状態 | 意味 |
+|------|------|
+| `Stopped` | AI Bridge が OFF。索引スレッドは存在せず、CPU もメモリも払わない |
+| `Detached` | スレッドは動いているが、共有スロットにストアが無い（ポート未オープン） |
+| `Attached(gen k)` | 世代 k のストアを読み進めている |
+
+| 遷移 | 契機 | 備考 |
+|------|------|------|
+| `Stopped → Detached/Attached` | `bridge_set(enabled=true)`（**待ち受けが立ってから**起動する） | 起動時点より前のバイトは索引されない。`coverage_pct` で明示 |
+| `Attached(k) → Attached(k+1)` | ストアの差し替え（`Arc::ptr_eq` で検知） | **世代を上げ、集計を捨てる**。古いカーソルは `gen_changed` として報告され、嘘のデルタにならない |
+| `Attached → Detached` | ストアが `None` になる | 集計は**保持する**（消すと「0 err」という嘘になる） |
+| `* → Stopped` | `bridge_set(enabled=false)` / アプリ終了 | `IndexThread::drop` が join する |
+
+SM-2 との対応は SM-3（PlotterThread）と同じ形だが、**集約器と違い GUI の窓の開閉には
+一切反応しない**（docs/26 §2.2）。検証は `state_transition_tests.rs` の `insight_index`
+モジュール（0-switch 6 / 1-switch 36）。
+
 | イベント | SM-1 ポート | SM-2 ストア | SM-3 Pスレッド | SM-4 Pウィンドウ | SM-5 ビュー | SM-6 ビューア |
 |----------|-------------|-------------|----------------|------------------|-------------|---------------|
 | **Connect** (`open_port` 成功) | →`Open` | →`Active(k+1)` | 次ポーリングで `Attached(k+1)`、集約器 clear | | LIVE を維持 | |
@@ -421,6 +443,7 @@ stateDiagram-v2
 | **DEBT-6** | MCP アダプタの実装が 2 つある（Rust 内蔵 `mcp_stdio.rs` = 配布用の正、Node `mcp/server.mjs` = 開発用リファレンス。ADR-13）。ツールの追加・変更・説明文の修正は**両方を同時に更新**しないと、GUI 版と開発版で AI の見えるツールがズレる。既知の非対称: (1) 正規表現の方言差（Rust は lookaround 非対応）、(2) `serial_wait_for` のマッチオフセットは Rust 版が生バイト基準で正確、Node 版は lossy UTF-8 変換基準（不正 UTF-8 が混じると U+FFFD 置換分ずれる）、(3) ping 即応答と `notifications/cancelled` は Rust 版が自前実装、Node 版は SDK 任せ | ツール変更時は両実装 + `docs/04_api.md` を同一コミットで更新する運用。長期的には Node 版の廃止（Rust 版が実運用で安定したら）を検討 |
 | **DEBT-7** | AI ブリッジ 2 層（`bridge.rs` / `mcp_stdio.rs`）の IO 層・コマンド配線にミューテーション生存が集中する（2026-09-04 完走測定。初回 57 missed のうち純ロジックの穴はテスト追加で縮小したが、残りは IO 系）。bridge.rs: `run_subscription`/`handle_connection`/`BridgeServer`(accept・Drop・`is_timeout`)、`bridge_set`/`bridge_guide_info`。mcp_stdio.rs: `TcpBridgeClient::exchange`/`request`(再試行・トランスポート分類)、`run_stdio`/`write_response`/`attach_parent_console`(stdio 主ループ)、`wait_for_pattern` の窓算術の一部。実ソケット結合（`test_integration_*`/`test_tcp_client_*`）と E2E（`run_bridge_e2e.ps1`）で機能は担保するが、offset 演算・タイムアウト分類・境界比較（`>`/`>=`）等の細粒度は未アサート。Tauri コマンドは `AppHandle`/`current_exe`、stdio 主ループは実 stdin/stdout を要し単体駆動不可 | IO ループから純関数を抽出（フレーム境界・offset 前進・トランスポート分類など）して細粒度に単体検証。コマンド／主ループは薄い委譲に留めロジックを純関数側へ寄せる。当面は実ソケット結合 + E2E で担保 |
 | **DEBT-8** | `serial_wait_for` の待機が**クライアント側ポーリング**である（`tail` を `WAIT_POLL_MS`(500 ms) ごとに base64 で引く）。当初は窓が固定 64 KiB で実効 131 KB/s しか走査できず、約 1 Mbps を超えると返信を取りこぼしていた（2026-09-04 に適応窓＝`未読分 + 64 KiB`／上限 `MAX_READ_LENGTH` へ修正し、約 16 Mbps まで追随。Rust 版・Node 版の両方）。残る限界: (1) 蓄積を定数メモリに保つため走査済み接頭辞を解放しており、`WAIT_RETAIN_BYTES`(64 KiB) を超える**単一マッチは切り出し境界で取り逃がし得る**、(2) 約 16 Mbps 超で再び読み負ける、(3) ポーリング遅延と base64 往復のコストは残る | 待機をブリッジ側へ移し、送信前の `total_bytes` からサーバ側で前方走査する（[26 §5.1 / §7 段階 4](26_ai_api_design.md)）。窓・重なり・base64 往復が不要になり、`gap` という失敗モードごと解消する |
+| **DEBT-9** | Insight 索引（docs/26 段階 2）の受け入れ済み制約: (1) テンプレート表は 256 件で有界。溢れると**最後に見た位置が最も古いもの**を追い出す（最も稀なものを追い出すと「稀少イベントの床」と矛盾するため）。追い出しは `evicted` として必ず報告するが、古くて稀なテンプレートは digest から消える。(2) 索引は AI Bridge が ON の間だけ動くので、ON にする前に届いたデータは索引されない（`coverage_pct` で明示）。(3) チェックポイント環は 96 個・1 秒間隔なので、`watch` の基準点は約 60〜90 秒より古いカーソルでは近似になる（`exact_baseline=false` として報告）。(4) **12 Mbps での索引の追随性能は未実測**（現時点の実測は ~2 Mbps まで） | (1)(3) は環と表を大きくすれば緩むが、定数メモリの上限とのトレードオフ。(4) は FT232H 級の治具が入手でき次第、docs/24 §6.5 の T2-5 に「AI Bridge ON のままキャプチャ欠落ゼロ + 索引が追随」を追加して測る |
 
 ---
 

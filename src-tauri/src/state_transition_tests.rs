@@ -602,3 +602,378 @@ fn one_switch_all_event_pairs() {
         started.elapsed()
     );
 }
+
+// ============================================================================
+// SM-7: Insight index thread × DataStore generation (docs/26 stage 2)
+// ============================================================================
+
+/// 1-switch coverage for SM-7 (docs/22 §5.7): the AI index thread against the
+/// same store-slot machine the plotter is checked against above.
+///
+/// # Model
+///
+/// State = (store slot, index thread)
+///
+/// | axis         | values                                        |
+/// |--------------|-----------------------------------------------|
+/// | store slot   | `None` \| `Some(gen k)` (identity = `Arc` ptr) |
+/// | index thread | `Stopped` \| `Running`                        |
+///
+/// # Event alphabet
+///
+/// | id | event         | models                                        |
+/// |----|---------------|-----------------------------------------------|
+/// | I1 | `AttachStore` | `open_port` while the slot is empty           |
+/// | I2 | `SwapStore`   | `clear_data` with the port open / port reopen |
+/// | I3 | `DetachStore` | `clear_data` with the port closed             |
+/// | I4 | `StartIndex`  | `bridge_set(enabled = true)`                  |
+/// | I5 | `StopIndex`   | `bridge_set(enabled = false)`                 |
+/// | I6 | `Data`        | one line arriving in the current store        |
+///
+/// # Invariants checked after every event
+///
+/// - **INV-gen**: the generation counter never decreases. A cursor handed to an
+///   agent is only safe because of this.
+/// - **INV-index-follow**: while `Running` + store `Some`, a new line must reach
+///   the index within the timeout.
+/// - **INV-index-halt**: while `Stopped` or store `None`, a new line must NOT be
+///   indexed (an index that quietly kept counting would report lines the agent
+///   can no longer fetch).
+/// - **INV-index-swap**: a swap observed by an attached thread starts a NEW
+///   generation with the counters reset, so a stale cursor is reported as
+///   stale instead of producing a plausible-looking wrong delta.
+mod insight_index {
+    use crate::insight::{IndexThread, InsightIndex};
+    use crate::serial::data_store::DataStore;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Instant;
+
+    use super::{NO_FLOW_GRACE, POLL, TIMEOUT};
+
+    type SharedStore = Arc<Mutex<Option<Arc<DataStore>>>>;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Event {
+        AttachStore,
+        SwapStore,
+        DetachStore,
+        StartIndex,
+        StopIndex,
+        Data,
+    }
+
+    impl Event {
+        fn name(self) -> &'static str {
+            match self {
+                Event::AttachStore => "I1:AttachStore",
+                Event::SwapStore => "I2:SwapStore",
+                Event::DetachStore => "I3:DetachStore",
+                Event::StartIndex => "I4:StartIndex",
+                Event::StopIndex => "I5:StopIndex",
+                Event::Data => "I6:Data",
+            }
+        }
+    }
+
+    const ALL_EVENTS: [Event; 6] = [
+        Event::AttachStore,
+        Event::SwapStore,
+        Event::DetachStore,
+        Event::StartIndex,
+        Event::StopIndex,
+        Event::Data,
+    ];
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Oracles {
+        follow: usize,
+        halt: usize,
+        swap: usize,
+    }
+
+    impl Oracles {
+        fn add(&mut self, other: Oracles) {
+            self.follow += other.follow;
+            self.halt += other.halt;
+            self.swap += other.swap;
+        }
+    }
+
+    struct Env {
+        handle: SharedStore,
+        /// The store that was just replaced or detached. Kept alive so the halt
+        /// oracle can push into it: "the index stopped following the OLD
+        /// capture" is the interesting half of detach, and it is unobservable
+        /// if the store is dropped with the handle.
+        previous: Option<Arc<DataStore>>,
+        index: Arc<InsightIndex>,
+        thread: Option<IndexThread>,
+        seq: u64,
+        last_gen: u64,
+        /// True once a line from the CURRENT store has been seen by the CURRENT
+        /// thread; only then must the next swap show up as a new generation.
+        attached: bool,
+        ctx: String,
+        oracles: Oracles,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            Self {
+                handle: Arc::new(Mutex::new(None)),
+                previous: None,
+                index: Arc::new(InsightIndex::new()),
+                thread: None,
+                seq: 0,
+                last_gen: 0,
+                attached: false,
+                ctx: String::from("<init>"),
+                oracles: Oracles::default(),
+            }
+        }
+
+        fn store(&self) -> Option<Arc<DataStore>> {
+            self.handle.lock().expect("store handle poisoned").clone()
+        }
+
+        fn set_store(&mut self, store: Option<Arc<DataStore>>) {
+            let mut slot = self.handle.lock().expect("store handle poisoned");
+            if let Some(old) = slot.take() {
+                self.previous = Some(old);
+            }
+            *slot = store;
+        }
+
+        fn running(&self) -> bool {
+            self.thread.is_some()
+        }
+
+        fn lines(&self) -> u64 {
+            self.index.snapshot().lines
+        }
+
+        fn gen(&self) -> u64 {
+            self.index.snapshot().gen
+        }
+
+        fn label(&self) -> String {
+            format!(
+                "at [{}]: store={}, index={}",
+                self.ctx,
+                if self.store().is_some() {
+                    "Some"
+                } else {
+                    "None"
+                },
+                if self.running() { "Running" } else { "Stopped" }
+            )
+        }
+
+        /// Push one unique line into the current store (no-op without one).
+        fn push_line(&mut self) {
+            self.seq += 1;
+            let target = self.store().or_else(|| self.previous.clone());
+            if let Some(store) = target {
+                store.push_test_data(format!("probe seq={}\n", self.seq).as_bytes());
+            }
+        }
+
+        /// Wait until the index has stopped moving.
+        ///
+        /// Without this the halt oracle is racy: a line pushed before a detach
+        /// can still be in flight inside the thread's current iteration, and
+        /// would look like "the index kept consuming after detach".
+        fn quiesce(&self) {
+            let deadline = Instant::now() + TIMEOUT;
+            let mut last = self.index.snapshot().indexed_up_to;
+            let mut stable = 0;
+            while Instant::now() < deadline {
+                thread::sleep(POLL * 4);
+                let now = self.index.snapshot().indexed_up_to;
+                if now == last {
+                    stable += 1;
+                    if stable >= 3 {
+                        return;
+                    }
+                } else {
+                    stable = 0;
+                    last = now;
+                }
+            }
+        }
+
+        fn apply(&mut self, event: Event) {
+            match event {
+                Event::AttachStore => {
+                    if self.store().is_none() {
+                        self.set_store(Some(Arc::new(DataStore::new().expect("DataStore"))));
+                        self.attached = false;
+                    }
+                }
+                Event::SwapStore => {
+                    self.set_store(Some(Arc::new(DataStore::new().expect("DataStore"))));
+                    self.attached = false;
+                }
+                Event::DetachStore => {
+                    self.set_store(None);
+                    self.attached = false;
+                }
+                Event::StartIndex => {
+                    if self.thread.is_none() {
+                        self.thread =
+                            Some(IndexThread::start(self.handle.clone(), self.index.clone()));
+                        self.attached = false;
+                    }
+                }
+                Event::StopIndex => {
+                    if let Some(mut thread) = self.thread.take() {
+                        thread.stop();
+                    }
+                    self.attached = false;
+                }
+                Event::Data => self.push_line(),
+            }
+        }
+
+        fn apply_and_check(&mut self, event: Event, note: &str) {
+            let gen_before = self.gen();
+            let was_attached = self.attached;
+            let running_before = self.running();
+            self.ctx = format!("{} ({})", event.name(), note);
+            self.apply(event);
+
+            // INV-index-swap: a swap seen by an attached thread must start a new
+            // generation with the counters cleared.
+            if event == Event::SwapStore && running_before && was_attached {
+                let index = self.index.clone();
+                super::wait_for(
+                    || index.snapshot().gen > gen_before,
+                    &format!("new generation after swap, {}", self.label()),
+                );
+                assert!(
+                    self.lines() <= 1,
+                    "swap must drop the previous generation's counts, {}",
+                    self.label()
+                );
+                self.oracles.swap += 1;
+            }
+            self.check();
+        }
+
+        fn check(&mut self) {
+            // INV-gen: the counter a cursor embeds never goes backwards.
+            let gen = self.gen();
+            assert!(
+                gen >= self.last_gen,
+                "generation went backwards ({} -> {}), {}",
+                self.last_gen,
+                gen,
+                self.label()
+            );
+            self.last_gen = gen;
+
+            if !(self.running() && self.store().is_some()) {
+                // Let anything already in flight land before taking the baseline
+                self.quiesce();
+            }
+            let before = self.lines();
+            self.push_line();
+            if self.running() && self.store().is_some() {
+                let index = self.index.clone();
+                super::wait_for(
+                    || index.snapshot().lines > before || index.snapshot().gen > gen,
+                    &format!("indexed line, {}", self.label()),
+                );
+                self.attached = true;
+                self.oracles.follow += 1;
+            } else {
+                thread::sleep(NO_FLOW_GRACE);
+                assert_eq!(
+                    self.lines(),
+                    before,
+                    "index must not advance while detached or stopped, {}",
+                    self.label()
+                );
+                self.oracles.halt += 1;
+            }
+        }
+
+        fn shutdown(&mut self) {
+            if let Some(mut thread) = self.thread.take() {
+                thread.stop();
+            }
+        }
+    }
+
+    /// A detached / stopped index still remembers what it already reported.
+    ///
+    /// Zeroing the counters on detach would make `serial_digest` answer "0 err"
+    /// for a session that did have errors - the exact "lie by omission" the
+    /// design forbids.
+    #[test]
+    fn detach_keeps_the_counts_it_already_reported() {
+        let mut env = Env::new();
+        env.apply_and_check(Event::AttachStore, "setup");
+        env.apply_and_check(Event::StartIndex, "setup");
+        env.apply_and_check(Event::Data, "setup");
+        let lines = env.lines();
+        assert!(lines > 0);
+
+        env.apply_and_check(Event::DetachStore, "detach");
+        assert_eq!(env.lines(), lines, "detach must not erase the counts");
+        env.shutdown();
+    }
+
+    #[test]
+    fn index_zero_switch_all_events() {
+        let started = Instant::now();
+        let mut oracles = Oracles::default();
+        for event in ALL_EVENTS {
+            let mut env = Env::new();
+            env.apply_and_check(event, "0-switch");
+            env.shutdown();
+            oracles.add(env.oracles);
+        }
+        eprintln!(
+            "[index 0-switch] {} events, oracles {:?}, completed in {:?}",
+            ALL_EVENTS.len(),
+            oracles,
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn index_one_switch_all_event_pairs() {
+        let started = Instant::now();
+        let mut oracles = Oracles::default();
+        let mut executed = 0;
+        for first in ALL_EVENTS {
+            for second in ALL_EVENTS {
+                let mut env = Env::new();
+                // Reach a state where both events are meaningful: the store
+                // machine needs a store, the thread needs to be running.
+                env.apply(Event::AttachStore);
+                env.apply(Event::StartIndex);
+                env.apply_and_check(first, "1st");
+                env.apply_and_check(second, "2nd");
+                env.shutdown();
+                oracles.add(env.oracles);
+                executed += 1;
+            }
+        }
+        assert_eq!(executed, 36, "all ordered pairs must run");
+        assert!(
+            oracles.follow >= 36,
+            "INV-index-follow never exercised enough"
+        );
+        assert!(oracles.halt >= 1, "INV-index-halt never exercised");
+        assert!(oracles.swap >= 1, "INV-index-swap never exercised");
+        eprintln!(
+            "[index 1-switch] {} pairs, oracles {:?}, completed in {:?}",
+            executed,
+            oracles,
+            started.elapsed()
+        );
+    }
+}

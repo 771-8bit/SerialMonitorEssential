@@ -95,8 +95,8 @@
 | UN-21 | 複数インスタンス | SYS-NF-503 |
 | UN-22 | 自動で回帰を止める | SYS-NF-401, 402, 403 |
 | UN-23 | 設計理由が残る | SYS-NF-404 |
-| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106, 1107, 1109 |
-| UN-25 | インストール後の環境だけで AI 連携をセットアップできる（手順はアプリから参照可能） | SYS-F-1107, 1108, 1109 |
+| UN-24 | AI 協調デバッグ（AI が同じセッションを読み書き、送信は人間に可視） | SYS-F-1101, 1102, 1103, 1104, 1105, 1106, 1107, 1109, 1110, 1111 |
+| UN-25 | インストール後の環境だけで AI 連携をセットアップできる（手順はアプリから参照可能） | SYS-F-1107, 1108, 1109, 1110 |
 
 ---
 
@@ -244,7 +244,10 @@
 | SYS-F-1108 | AI 連携ガイドウィンドウ（実 exe パス入り登録コマンド） | `lib.rs`（`open_ai_guide_window`、main 破棄時の道連れクローズ）、`bridge.rs`（`bridge_guide_info`: `current_exe` / enabled / port / version）、`src/components/aiguide/AiGuideWindow.tsx`（コピー可能なコマンド・ブリッジ状態表示・ツール一覧・生 TCP 説明・セキュリティ節）、`ai-guide.html`、`SettingsPanel.tsx`（Setup Guide ボタン） | `FE`: `src/test/AiGuideWindow.test.tsx`（5 件: 実パス入りコマンド・ON/OFF とポート表示・7 ツール列挙・バックエンド不通時のフォールバック）、`SettingsPanel.test.tsx`（`opens the AI guide window from the Setup Guide button`）/ `I`: 手動（ウィンドウ起動・コピー動作） |
 | SYS-F-1109 | ブリッジの自己記述 `help`（認証不要・データ非含有） | `bridge.rs`（`method_help`: 全メソッド・制限値・ヒント。認証ゲートの前で処理） | `UT`: `test_help_is_self_describing_and_needs_no_auth`（トークン設定時も未認証で通る / 全メソッド網羅 / 認証状態を変えない） |
 
-補助: `test_parse_request_errors`, `test_unknown_method`, `test_response_json_shapes` が protocol v1 のワイヤ形式（`{id, ok, result/error}`、parse error、未知メソッド）を契約として固定している。
+| SYS-F-1110 | AI 向け応答の文字数予算と「省略による嘘をつかない」規範 | `mcp_stdio.rs`（`render_chunk`/`render_find`: バイト単位で切り出してから描画、フッタは落とさない）、`insight/render.rs`（セクション優先順位を列挙順で固定、固定枠は Header/INDEX/ALARM/cursor、落とした行はフッタで報告） | `UT`: `test_render_chunk_never_exceeds_max_chars`（プロパティ）、`insight::render::prop_render_never_exceeds_budget`、`prop_withholding_is_always_reported`、`test_alarm_survives_when_samples_do_not`、`bridge::test_digest_respects_max_chars_and_reports_what_it_dropped`、`bridge::test_digest_never_prints_a_bare_zero`、`find` の `matches: 0` にカバレッジが付くこと。`IT`: `mcp/smoke.mjs`（`render budget is never exceeded`, `find reports an exact zero with its coverage`） |
+| SYS-F-1111 | 索引に基づく導出情報（`digest` / `watch`）と、その所有・寿命 | `insight/mask.rs`（テンプレート化・重大度の全バイト走査）、`insight/index.rs`（有界テンプレート表・チェックポイント差分・世代）、`insight/window.rs`（ウィンドウ解決・カーソル）、`insight/thread.rs`（唯一の追加リーダ）、`bridge.rs`（`method_digest`/`method_watch`、`BridgeState` が `Arc<InsightIndex>` を所有し `bridge_set` で `IndexThread` を起動/停止） | `UT`: `insight::mask`（冪等性・スロット対応・上限・重大度の分割不変）、`insight::window`（ウィンドウ解決・時刻無しでの明示的失敗・カーソル往復）、`insight::index`（テンプレート畳み込み・行/重大度の分割跨ぎ・CR 終端・gap・表の有界性と `evicted` の一致・世代交代）、`insight::thread`（取り込み・ストア差し替え・切り離し）、`bridge`（`digest`/`watch` の内容・応答サイズがキャプチャ長に依存しないこと・古い世代カーソルが非エラー）。`ST`: `state_transition_tests::insight_index`（0-switch 6 / 1-switch 36 + `detach_keeps_the_counts_it_already_reported`）。`IT`: `mcp/smoke.mjs`（薄い描画器としての素通し、`text` 欠落は明示的失敗）、`test_tools/e2e/mcp_stdio_smoke.py`（10 ツールの `tools/list`） |
+
+補助: `test_parse_request_errors`, `test_unknown_method`, `test_response_json_shapes` が protocol v2 のワイヤ形式（`{id, ok, result/error}`、parse error、未知メソッド）を契約として固定している。
 
 ### 2.11 品質要求 (SYS-NF)
 

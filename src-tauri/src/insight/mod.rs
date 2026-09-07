@@ -8,5 +8,24 @@
 //! 流用せず独立しているのは意図的（理由は docs/26 §1 に検証結果つきで記載）。
 //! 要点だけ言えば、集約器は GUI のライフサイクルに縛られており、プロッタ窓の
 //! 開閉でエージェントの答えが遡って変わってしまう。
+//!
+//! # 構成
+//!
+//! | モジュール | 役割 | 種別 |
+//! |---|---|---|
+//! | [`mask`] | 行 -> テンプレート、重大度の全バイト走査 | 純粋 |
+//! | [`window`] | ウィンドウ解決、カーソルの生成 / 解釈 | 純粋 |
+//! | [`render`] | セクション組み立てと文字数予算 | 純粋 |
+//! | [`find`] | ストリーム全体の正規表現走査 | 純粋（`ByteSource` 越し） |
+//! | [`index`] | テンプレート表・チェックポイント | 共有状態 |
+//! | [`thread`] | `DataStore` を読む唯一の追加リーダ | IO |
 
 pub mod find;
+pub mod index;
+pub mod mask;
+pub mod render;
+pub mod thread;
+pub mod window;
+
+pub use index::InsightIndex;
+pub use thread::IndexThread;

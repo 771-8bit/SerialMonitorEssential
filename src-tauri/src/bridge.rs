@@ -83,7 +83,10 @@ use crate::serial::port::SerialPort;
 /// 既定の待ち受けポート
 pub const DEFAULT_BRIDGE_PORT: u16 = 57320;
 /// プロトコルバージョン
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2: `digest` / `watch` を追加し、`status` に索引の状態を足した（docs/26 段階 2）。
+/// 新しいパラメータを送らない v1 クライアントの挙動は変わらない。
+pub const PROTOCOL_VERSION: u32 = 2;
 /// `read_range` / `tail` の 1 回の読み出し上限 (1 MiB)
 pub const MAX_READ_LENGTH: u32 = 1024 * 1024;
 /// `tail` の既定バイト数
@@ -146,6 +149,9 @@ pub struct BridgeCtx {
     /// 設定トークン。`Some` のときだけ `auth` が必須になる。
     pub token: Option<String>,
     pub activity: Arc<Mutex<Option<BridgeActivity>>>,
+    /// 導出情報の索引。**ブリッジの所有物**であり、GUI の窓の開閉に依存しない
+    /// （docs/26 §2.2）
+    pub index: Arc<crate::insight::InsightIndex>,
     emit: EmitFn,
 }
 
@@ -155,6 +161,7 @@ impl BridgeCtx {
         port: SharedSerialPort,
         token: Option<String>,
         activity: Arc<Mutex<Option<BridgeActivity>>>,
+        index: Arc<crate::insight::InsightIndex>,
         emit: EmitFn,
     ) -> Self {
         Self {
@@ -162,6 +169,7 @@ impl BridgeCtx {
             port,
             token,
             activity,
+            index,
             emit,
         }
     }
@@ -414,6 +422,14 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
         },
+        "digest" => match method_digest(ctx, &req.params) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::error(id, e),
+        },
+        "watch" => match method_watch(ctx, &req.params) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::error(id, e),
+        },
         "send" => match method_send(ctx, &req.params) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::error(id, e),
@@ -446,6 +462,8 @@ fn method_help() -> Value {
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
             "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
             "find": { "params": { "pattern": "string (Rust regex, multi-line; no lookaround)", "from": "u64 (optional, default 0)", "to": "u64 (optional, default end of stream)", "max_hits": format!("usize (optional, default {FIND_DEFAULT_HITS}, max {FIND_MAX_HITS})") }, "result": { "matches": "u64", "exact": "bool (false when the scan was cut short or skipped unreadable bytes; then 'matches' is a LOWER BOUND)", "complete": "bool", "hits": [{ "offset": "u64", "len": "usize", "excerpt": "string (the matching line)", "excerpt_truncated": "bool" }], "first": "u64|null", "last": "u64|null", "range_start": "u64", "range_end": "u64", "bytes_scanned": "u64", "gap_bytes": "u64", "elapsed_ms": "u64" }, "note": format!("Scans the capture server-side and returns counts plus a few offsets, never the bulk data. Gives up after {FIND_DEADLINE_MS}ms with complete=false rather than timing out.") },
+            "digest": { "params": { "window": "string (optional: \"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\")", "top": "usize (optional)", "samples": "usize (optional)", "buckets": "usize (optional, 0 = none)", "max_chars": "usize (optional)" }, "result": { "text": "rendered summary (already inside the character budget)", "data": "structured equivalent", "meta": { "gen": "u64", "exact": "bool", "coverage_pct": "u64", "index_lag_bytes": "u64" }, "budget": { "max_chars": "usize", "used_chars": "usize", "truncated": "bool", "next": "string" } }, "note": "Summarises the capture from the index; never reads the bulk data. Cost does not grow with the arrival rate." },
+            "watch": { "params": { "cursor": "string (optional, from a previous digest/watch)", "wait_ms": format!("u64 (optional, server-side long poll, max {WATCH_MAX_WAIT_MS})"), "top": "usize (optional)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest', reporting only what changed since the cursor", "note": "A stale-generation cursor is not an error: the reply says the generation changed and where it restarted." },
             "ports": { "params": {}, "result": { "ports": ["string"] } },
             "subscribe": { "params": { "from_offset": "u64 (optional)" }, "result": { "subscribed": true }, "note": "after this the connection becomes push-only: frames {event:'data',offset,base64} every <=50ms, {event:'reset'} when the capture restarts; close the socket to stop" }
         },
@@ -459,6 +477,7 @@ fn method_help() -> Value {
             "Poll 'tail' (or use 'subscribe') to follow live data; offsets are absolute stream offsets.",
             "Typical debug flow: status -> send -> poll tail until the reply pattern appears.",
             "To search a large capture, use 'find' instead of pulling the bytes: it scans server-side and answers with counts and offsets, then you fetch only the interesting offset with 'read_range'.",
+            "To understand a capture, call 'digest' once, then follow it with 'watch' + the cursor it returned: both cost a fixed number of characters no matter how fast the device talks.",
             "An MCP stdio adapter with higher-level tools is built into the app binary: run it with --mcp.",
         ],
     })
@@ -473,6 +492,7 @@ fn method_status(ctx: &BridgeCtx) -> Value {
         None => (false, None),
     };
     let total_bytes = ctx.store().map(|s| s.total_bytes()).unwrap_or(0);
+    let snap = ctx.index.snapshot();
 
     json!({
         "connected": connected,
@@ -480,6 +500,13 @@ fn method_status(ctx: &BridgeCtx) -> Value {
         "total_bytes": total_bytes,
         "app_version": env!("CARGO_PKG_VERSION"),
         "protocol": PROTOCOL_VERSION,
+        // 索引の状態。'digest'/'watch' の答えをどこまで信じてよいかの根拠
+        "gen": snap.gen,
+        "index_running": snap.running,
+        "indexed_bytes": snap.bytes_ingested,
+        "indexed_lines": snap.lines,
+        "index_lag_bytes": snap.lag_bytes(),
+        "coverage_pct": snap.coverage_pct(),
     })
 }
 
@@ -593,6 +620,676 @@ fn method_find(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         "total_bytes": total,
         "elapsed_ms": started.elapsed().as_millis() as u64,
     }))
+}
+
+// ============================================================================
+// 索引に基づく導出情報: digest / watch (docs/26 段階 2)
+// ============================================================================
+
+/// `digest` の TOP に載せる既定 / 上限件数
+const DIGEST_DEFAULT_TOP: usize = 8;
+const DIGEST_MAX_TOP: usize = 50;
+/// `digest` の SAMPLE 行数
+const DIGEST_DEFAULT_SAMPLES: usize = 3;
+/// `digest` の時系列バケット数の上限
+const DIGEST_MAX_BUCKETS: usize = 24;
+/// `watch` のサーバ側待機上限
+///
+/// MCP クライアントの 1 リクエストタイムアウト（5000ms）より十分手前で
+/// 切り上げる。ここを超えて待つと「ブリッジが答えない」という誤った案内になる。
+const WATCH_MAX_WAIT_MS: u64 = 3000;
+const WATCH_POLL_MS: u64 = 20;
+
+fn param_usize(params: &Value, key: &str) -> Option<usize> {
+    params.get(key).and_then(Value::as_u64).map(|v| v as usize)
+}
+
+/// `DataStore` の時刻索引を純粋なウィンドウ解決へ渡すアダプタ
+struct StoreTime(Option<Arc<DataStore>>);
+
+impl crate::insight::window::TimeIndex for StoreTime {
+    fn bounds(&self) -> Option<(u64, u64)> {
+        self.0.as_ref()?.timestamp_bounds()
+    }
+    fn offset_at_or_after(&self, ts: u64) -> Option<u64> {
+        self.0.as_ref()?.offset_at_or_after_timestamp(ts)
+    }
+}
+
+/// 1 テンプレートの表示単位（全期間の統計 + このウィンドウでの件数）
+struct Entry {
+    stat: crate::insight::index::TemplateStat,
+    count: u64,
+    is_new: bool,
+}
+
+/// 1 テンプレートを 1 行にする
+///
+/// `lifetime` は「この行の統計が索引全体のものか」。差分（`watch` や窓つき
+/// `digest`）では first / min / max は**窓の外**を指しうるので出さない。
+/// 窓の件数の隣に索引全体の極値を並べるのは、docs/26 が禁じている
+/// 「要約が事象を隠す」の一種なので、書けない事実は書かない。
+/// 初出テンプレートだけは例外で、全期間 = その窓なのでそのまま出せる。
+///
+/// docs/26 §6.2-4 のとおり、**出す極値には必ずバイトオフセットを併記する**。
+fn format_entry(entry: &Entry, lifetime: bool) -> String {
+    use crate::insight::render::{commas, number, template_with_slots};
+
+    let stat = &entry.stat;
+    let scoped = lifetime || entry.is_new;
+    let count = if lifetime {
+        format!("x{}", commas(entry.count))
+    } else {
+        format!("+{}", commas(entry.count))
+    };
+    let template = if scoped {
+        template_with_slots(&stat.template, &stat.slots)
+    } else {
+        stat.template.clone()
+    };
+    let mut line = if scoped {
+        format!(
+            "t{} {} \"{}\" @off {}..{}",
+            stat.id,
+            count,
+            template,
+            commas(stat.first_offset),
+            commas(stat.last_offset)
+        )
+    } else {
+        format!(
+            "t{} {} \"{}\" last @off={}",
+            stat.id,
+            count,
+            template,
+            commas(stat.last_offset)
+        )
+    };
+    if !scoped {
+        return line;
+    }
+    let numeric: Vec<_> = stat.slots.iter().filter(|s| s.numeric).collect();
+    if let Some(slot) = numeric.first() {
+        if slot.min != slot.max {
+            line.push_str(&format!(
+                " min {}@off={} max {}@off={}",
+                number(slot.min),
+                commas(slot.min_offset),
+                number(slot.max),
+                commas(slot.max_offset),
+            ));
+        }
+        if numeric.len() > 1 {
+            line.push_str(&format!(" (+{} more numeric)", numeric.len() - 1));
+        }
+    }
+    line
+}
+
+/// 件数の確度を必ず言葉にする
+///
+/// docs/26 §6.2-5「裸のゼロを禁じる」。`err=0` 単独は不正な出力であり、
+/// 常にカバレッジと欠落を添える。
+fn accuracy_note(snap: &crate::insight::index::Snapshot) -> String {
+    let coverage = snap.coverage_pct();
+    if snap.is_exact() {
+        return format!("exact, coverage {coverage}%");
+    }
+    let mut why = Vec::new();
+    if snap.lag_bytes() > 0 {
+        why.push(format!(
+            "index {} behind",
+            crate::insight::render::human_bytes(snap.lag_bytes())
+        ));
+    }
+    if snap.gap_bytes > 0 {
+        why.push(format!(
+            "{} unreadable",
+            crate::insight::render::human_bytes(snap.gap_bytes)
+        ));
+    }
+    format!("AT LEAST - coverage {coverage}%, {}", why.join(", "))
+}
+
+/// 索引の健康状態。異常が無ければ何も言わない（空の行で予算を食わない）
+fn index_health_lines(snap: &crate::insight::index::Snapshot) -> Vec<String> {
+    use crate::insight::render::{commas, human_bytes};
+    let mut notes = Vec::new();
+    if !snap.running {
+        notes.push("not running (turn on AI Bridge to index)".to_string());
+    }
+    if snap.lag_bytes() > 0 {
+        notes.push(format!(
+            "{} behind the capture",
+            human_bytes(snap.lag_bytes())
+        ));
+    }
+    if snap.gaps > 0 {
+        notes.push(format!(
+            "{} gap(s), {} unreadable",
+            snap.gaps,
+            human_bytes(snap.gap_bytes)
+        ));
+    }
+    if snap.evicted_templates > 0 {
+        notes.push(format!(
+            "evicted {} template(s) holding {} line(s)",
+            commas(snap.evicted_templates),
+            commas(snap.evicted_lines)
+        ));
+    }
+    if notes.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("INDEX {}", notes.join(" · "))]
+    }
+}
+
+/// NEW / RARE / TOP を組み立てる
+///
+/// docs/26 §6.2-2「稀少イベントの床」: top-N を出す**前に**、初出のものと
+/// 件数 <= [`RARE_THRESHOLD`](crate::insight::render::RARE_THRESHOLD) のものを
+/// 正確な件数とオフセット付きで必ず列挙する。
+fn template_blocks(
+    entries: &[Entry],
+    top: usize,
+    lifetime: bool,
+) -> Vec<crate::insight::render::Block> {
+    use crate::insight::render::{Block, Section, RARE_LIMIT, RARE_THRESHOLD};
+
+    let mut blocks = Vec::new();
+    let scope = if lifetime {
+        format!("count<={RARE_THRESHOLD}")
+    } else {
+        format!("+{RARE_THRESHOLD} or fewer since the cursor")
+    };
+
+    let new: Vec<&Entry> = entries.iter().filter(|e| e.is_new).collect();
+    if !new.is_empty() {
+        let mut lines = vec![format!("NEW   {} template(s) first seen here", new.len())];
+        lines.extend(
+            new.iter()
+                .map(|e| format!("      {}", format_entry(e, lifetime))),
+        );
+        blocks.push(Block::new(Section::New, lines));
+    }
+
+    let rare: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !e.is_new && e.count <= RARE_THRESHOLD)
+        .collect();
+    if !rare.is_empty() {
+        let shown = rare.len().min(RARE_LIMIT);
+        let head = if shown == rare.len() {
+            format!("RARE  {} template(s) with {scope} (all shown)", rare.len())
+        } else {
+            // 黙って短くしない。全件を出す呼び出しを添える
+            format!(
+                "RARE  {shown} of {} template(s) with {scope} shown; narrow window= to see the rest",
+                rare.len()
+            )
+        };
+        let mut lines = vec![head];
+        lines.extend(
+            rare.iter()
+                .take(shown)
+                .map(|e| format!("      {}", format_entry(e, lifetime))),
+        );
+        blocks.push(Block::new(Section::Rare, lines));
+    }
+
+    let common: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !e.is_new && e.count > RARE_THRESHOLD)
+        .collect();
+    if !common.is_empty() {
+        let shown = common.len().min(top);
+        let label = if lifetime { "TOP  " } else { "DELTA" };
+        let head = if shown == common.len() {
+            format!("{label} {} template(s) (all shown)", common.len())
+        } else {
+            format!("{label} {shown} of {} template(s) by count", common.len())
+        };
+        let mut lines = vec![head];
+        lines.extend(
+            common
+                .iter()
+                .take(shown)
+                .map(|e| format!("      {}", format_entry(e, lifetime))),
+        );
+        blocks.push(Block::new(Section::Top, lines));
+    }
+    blocks
+}
+
+/// チェックポイント環から時系列バケットを作る
+///
+/// docs/26 §6.2-6 に従い、平均でスパイクを消さないよう**件数の実測差分**を
+/// そのまま出す。素材が足りなければ黙って作らない（`None`）。
+fn timeline_lines(
+    checkpoints: &[(u64, u64, u64, u64, u64)],
+    start: u64,
+    end: u64,
+    buckets: usize,
+) -> Option<Vec<String>> {
+    use crate::insight::render::commas;
+    if buckets == 0 || end <= start {
+        return None;
+    }
+    let points: Vec<&(u64, u64, u64, u64, u64)> = checkpoints
+        .iter()
+        .filter(|c| c.0 >= start && c.0 <= end)
+        .collect();
+    if points.len() < 2 {
+        return None;
+    }
+    let span = end - start;
+    let mut lines = vec![0u64; buckets];
+    let mut errs = vec![0u64; buckets];
+    let mut warns = vec![0u64; buckets];
+    for pair in points.windows(2) {
+        let (prev, cur) = (pair[0], pair[1]);
+        let bucket = (((cur.0 - start) as u128 * buckets as u128) / span as u128) as usize;
+        let bucket = bucket.min(buckets - 1);
+        lines[bucket] += cur.2.saturating_sub(prev.2);
+        errs[bucket] += cur.3.saturating_sub(prev.3);
+        warns[bucket] += cur.4.saturating_sub(prev.4);
+    }
+    let join = |v: &[u64]| v.iter().map(|n| commas(*n)).collect::<Vec<_>>().join("|");
+    // どこまでを素材にできたかを必ず言う。チェックポイント環は有界なので、
+    // 長い窓では前半に素材が無い。それを黙って 0 として出すと
+    // 「その時間帯は静かだった」という嘘になる。
+    let covered_from = points.first().map(|p| p.0).unwrap_or(start);
+    Some(vec![
+        format!(
+            "TIME  {buckets} bucket(s) of {} bytes over off {}..{} (from {} checkpoint(s) covering off {}..{})",
+            commas(span / buckets as u64),
+            commas(start),
+            commas(end),
+            points.len(),
+            commas(covered_from),
+            commas(points.last().map(|p| p.0).unwrap_or(end))
+        ),
+        format!("      lines {}", join(&lines)),
+        format!("      err {} · warn {}", join(&errs), join(&warns)),
+    ])
+}
+
+fn entries_to_json(entries: &[Entry], limit: usize) -> Vec<Value> {
+    entries
+        .iter()
+        .take(limit)
+        .map(|e| {
+            json!({
+                "id": e.stat.id,
+                "template": e.stat.template,
+                "count": e.count,
+                "total_count": e.stat.count,
+                "first_offset": e.stat.first_offset,
+                "last_offset": e.stat.last_offset,
+                "is_new": e.is_new,
+            })
+        })
+        .collect()
+}
+
+/// 応答エンベロープ（docs/26 §2.3）
+fn insight_envelope(
+    rendered: crate::insight::render::Rendered,
+    data: Value,
+    meta: Value,
+    max_chars: usize,
+    next: Option<String>,
+) -> Value {
+    json!({
+        "text": rendered.text,
+        "data": data,
+        "meta": meta,
+        "budget": {
+            "max_chars": max_chars,
+            "used_chars": rendered.used_chars,
+            "truncated": rendered.truncated,
+            // 落とした行数をセクション別に。フッタの文と同じ内容を機械可読で
+            "withheld": rendered
+                .withheld
+                .iter()
+                .map(|(section, n)| json!({ "section": section.label(), "lines": n }))
+                .collect::<Vec<Value>>(),
+            "next": next,
+        },
+    })
+}
+
+/// `digest`: 1 コールで全体を把握する
+///
+/// `get_data` を 1 回も呼ばない。応答は索引の写しだけから作られるので、
+/// コストは受信レートに依存しない。
+fn method_digest(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
+    use crate::insight::render::{self, commas, human_bytes, human_ms, human_rate, Block, Section};
+    use crate::insight::window::{parse_window, resolve_window, Cursor, WindowSpec};
+
+    let spec = parse_window(
+        params
+            .get("window")
+            .and_then(Value::as_str)
+            .unwrap_or("all"),
+    )?;
+    let max_chars = param_usize(params, "max_chars").unwrap_or(render::DEFAULT_DIGEST_CHARS);
+    let top = param_usize(params, "top")
+        .unwrap_or(DIGEST_DEFAULT_TOP)
+        .min(DIGEST_MAX_TOP);
+    let samples = param_usize(params, "samples")
+        .unwrap_or(DIGEST_DEFAULT_SAMPLES)
+        .min(crate::insight::index::RECENT_LINES);
+    let buckets = param_usize(params, "buckets")
+        .unwrap_or(0)
+        .min(DIGEST_MAX_BUCKETS);
+
+    // 写しとカーソルは同じロックで取る。ここがずれると、次の `watch` が
+    // 「基準点が無い」と言うか、間の行をどちらの応答にも載せなくなる
+    let (snap, cursor) = ctx.index.snapshot_with_checkpoint(now_ms());
+    let time = StoreTime(ctx.store());
+    let window = resolve_window(&spec, snap.start_offset, snap.indexed_up_to, &time)?;
+
+    let whole = matches!(spec, WindowSpec::All);
+    let (entries, lines, bytes, err, warn, elapsed_ms, baseline) = if whole {
+        let entries: Vec<Entry> = snap
+            .templates
+            .iter()
+            .map(|s| Entry {
+                stat: s.clone(),
+                count: s.count,
+                is_new: false,
+            })
+            .collect();
+        (
+            entries,
+            snap.lines,
+            snap.bytes_ingested,
+            snap.err,
+            snap.warn,
+            snap.last_ingest_ms.saturating_sub(snap.first_ingest_ms),
+            None,
+        )
+    } else {
+        let at = Cursor {
+            gen: snap.gen,
+            offset: window.start,
+            lines: 0,
+            epoch_ms: 0,
+        };
+        let delta = ctx.index.delta_since(Some(&at), now_ms());
+        let entries: Vec<Entry> = delta
+            .changed
+            .iter()
+            .map(|(stat, count, is_new)| Entry {
+                stat: stat.clone(),
+                count: *count,
+                is_new: *is_new,
+            })
+            .collect();
+        let baseline = if delta.exact_baseline {
+            None
+        } else {
+            Some(format!(
+                "NOTE  counts measured from off {} (window starts at {}); no checkpoint at the exact offset",
+                commas(delta.from_offset),
+                commas(window.start)
+            ))
+        };
+        (
+            entries,
+            delta.to_lines.saturating_sub(delta.from_lines),
+            window.end.saturating_sub(delta.from_offset),
+            delta.err,
+            delta.warn,
+            delta.elapsed_ms,
+            baseline,
+        )
+    };
+
+    let mut blocks = vec![Block::new(
+        Section::Header,
+        vec![
+            format!(
+                "digest gen={} index={} {}",
+                snap.gen,
+                if snap.running { "on" } else { "off" },
+                window.label
+            ),
+            format!(
+                "{} lines · {} · {} · {}",
+                commas(lines),
+                human_bytes(bytes),
+                human_ms(elapsed_ms),
+                human_rate(bytes, elapsed_ms)
+            ),
+        ],
+    )];
+
+    let mut health = index_health_lines(&snap);
+    if let Some(note) = baseline {
+        health.push(note);
+    }
+    if !health.is_empty() {
+        blocks.push(Block::new(Section::IndexHealth, health));
+    }
+
+    blocks.push(Block::new(
+        Section::Alarm,
+        vec![format!(
+            "ALARM {} err · {} warn ({})",
+            commas(err),
+            commas(warn),
+            accuracy_note(&snap)
+        )],
+    ));
+    blocks.extend(template_blocks(&entries, top, whole));
+
+    if let Some(lines) = timeline_lines(&snap.checkpoints, window.start, window.end, buckets) {
+        blocks.push(Block::new(Section::Timeline, lines));
+    }
+    if samples > 0 && !snap.recent.is_empty() {
+        let lines: Vec<String> = snap
+            .recent
+            .iter()
+            .rev()
+            .take(samples)
+            .map(|(offset, text)| format!("LAST  @off={} {}", commas(*offset), text))
+            .collect();
+        blocks.push(Block::new(Section::Samples, lines));
+    }
+    blocks.push(Block::new(
+        Section::Cursor,
+        vec![format!("cursor {}", cursor.encode())],
+    ));
+
+    let next = format!(
+        "serial_digest(window={:?}, top={}, max_chars={})",
+        params
+            .get("window")
+            .and_then(Value::as_str)
+            .unwrap_or("all"),
+        (top * 2).min(DIGEST_MAX_TOP),
+        (max_chars * 2).min(render::MAX_MAX_CHARS)
+    );
+    let rendered = render::render(blocks, Some(&next), max_chars);
+
+    let data = json!({
+        "gen": snap.gen,
+        "window_start": window.start,
+        "window_end": window.end,
+        "lines": lines,
+        "bytes": bytes,
+        "err": err,
+        "warn": warn,
+        "templates": entries_to_json(&entries, top.max(crate::insight::render::RARE_LIMIT)),
+        "cursor": cursor.encode(),
+    });
+    let meta = json!({
+        "gen": snap.gen,
+        "running": snap.running,
+        "exact": snap.is_exact(),
+        "coverage_pct": snap.coverage_pct(),
+        "index_lag_bytes": snap.lag_bytes(),
+        "gaps": snap.gaps,
+        "gap_bytes": snap.gap_bytes,
+        "evicted_templates": snap.evicted_templates,
+        "evicted_lines": snap.evicted_lines,
+        "template_count": entries.len(),
+    });
+    Ok(insight_envelope(
+        rendered,
+        data,
+        meta,
+        max_chars,
+        Some(next),
+    ))
+}
+
+/// `watch`: カーソル以降の集約された変化のみを返す
+///
+/// コストは到着データ量に依存しない（4 KB でも 40 MB でも同じ行数）。
+fn method_watch(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
+    use crate::insight::render::{self, commas, human_bytes, human_ms, human_rate, Block, Section};
+    use crate::insight::window::parse_cursor;
+
+    let cursor = match params.get("cursor") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let text = v
+                .as_str()
+                .ok_or_else(|| "bad params: cursor must be a string".to_string())?;
+            Some(parse_cursor(text)?)
+        }
+    };
+    let max_chars = param_usize(params, "max_chars").unwrap_or(render::DEFAULT_WATCH_CHARS);
+    let top = param_usize(params, "top")
+        .unwrap_or(DIGEST_DEFAULT_TOP)
+        .min(DIGEST_MAX_TOP);
+    let wait_ms = param_u64(params, "wait_ms")
+        .unwrap_or(0)
+        .min(WATCH_MAX_WAIT_MS);
+
+    // サーバ側ロングポール: 変化するまで待つ（何も無ければ空の差分を返す）
+    if let Some(at) = cursor.as_ref() {
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while Instant::now() < deadline {
+            let snap = ctx.index.snapshot();
+            if snap.gen != at.gen || snap.indexed_up_to > at.offset {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(WATCH_POLL_MS));
+        }
+    }
+
+    let snap = ctx.index.snapshot();
+    let delta = ctx.index.delta_since(cursor.as_ref(), now_ms());
+    // `delta_since` は自分が返した終端にチェックポイントを打つので、
+    // そこをそのままカーソルにすれば次回の基準点が必ず一致する
+    let cursor_out = crate::insight::window::Cursor {
+        gen: snap.gen,
+        offset: delta.to_offset,
+        lines: delta.to_lines,
+        epoch_ms: delta.to_epoch_ms,
+    };
+    let entries: Vec<Entry> = delta
+        .changed
+        .iter()
+        .map(|(stat, count, is_new)| Entry {
+            stat: stat.clone(),
+            count: *count,
+            is_new: *is_new,
+        })
+        .collect();
+
+    let bytes = delta.to_offset.saturating_sub(delta.from_offset);
+    let new_lines = delta.to_lines.saturating_sub(delta.from_lines);
+    let mut blocks = vec![Block::new(
+        Section::Header,
+        vec![format!(
+            "watch gen={} · +{} · +{} lines · {} · {}",
+            snap.gen,
+            human_bytes(bytes),
+            commas(new_lines),
+            human_ms(delta.elapsed_ms),
+            human_rate(bytes, delta.elapsed_ms)
+        )],
+    )];
+
+    let mut health = index_health_lines(&snap);
+    if delta.gen_changed {
+        health.push(format!(
+            "NOTE  generation changed (capture cleared or port reopened); restarted from off {}",
+            commas(delta.from_offset)
+        ));
+    } else if cursor.is_none() {
+        health.push(
+            "NOTE  no cursor given: this covers the whole indexed range. Pass the cursor back for deltas."
+                .to_string(),
+        );
+    } else if !delta.exact_baseline {
+        health.push(format!(
+            "NOTE  measured from off {} (cursor was at {}); the checkpoint for that offset had aged out",
+            commas(delta.from_offset),
+            commas(cursor.map(|c| c.offset).unwrap_or(0))
+        ));
+    }
+    if !health.is_empty() {
+        blocks.push(Block::new(Section::IndexHealth, health));
+    }
+
+    blocks.push(Block::new(
+        Section::Alarm,
+        vec![format!(
+            "ALARM +{} err · +{} warn ({})",
+            commas(delta.err),
+            commas(delta.warn),
+            accuracy_note(&snap)
+        )],
+    ));
+    blocks.extend(template_blocks(&entries, top, false));
+    blocks.push(Block::new(
+        Section::Cursor,
+        vec![format!("cursor {}", cursor_out.encode())],
+    ));
+
+    let next = format!(
+        "serial_watch(cursor=\"{}\", top={}, max_chars={})",
+        cursor_out.encode(),
+        (top * 2).min(DIGEST_MAX_TOP),
+        (max_chars * 2).min(render::MAX_MAX_CHARS)
+    );
+    let rendered = render::render(blocks, Some(&next), max_chars);
+
+    let data = json!({
+        "gen": snap.gen,
+        "from_offset": delta.from_offset,
+        "to_offset": delta.to_offset,
+        "lines": new_lines,
+        "bytes": bytes,
+        "err": delta.err,
+        "warn": delta.warn,
+        "templates": entries_to_json(&entries, top),
+        "cursor": cursor_out.encode(),
+    });
+    let meta = json!({
+        "gen": snap.gen,
+        "running": snap.running,
+        "gen_changed": delta.gen_changed,
+        "exact": snap.is_exact() && delta.exact_baseline,
+        "exact_baseline": delta.exact_baseline,
+        "coverage_pct": snap.coverage_pct(),
+        "index_lag_bytes": snap.lag_bytes(),
+        "waited_ms": wait_ms,
+    });
+    Ok(insight_envelope(
+        rendered,
+        data,
+        meta,
+        max_chars,
+        Some(next),
+    ))
 }
 
 fn method_tail(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
@@ -1002,6 +1699,11 @@ pub struct BridgeState {
     config: Mutex<BridgeConfig>,
     activity: Arc<Mutex<Option<BridgeActivity>>>,
     connections: Arc<AtomicUsize>,
+    /// 導出情報の索引。**ブリッジが所有する**ので、プロッタ窓やメイン窓の
+    /// 開閉で中身が消えたりしない（docs/26 §2.2）
+    index: Arc<crate::insight::InsightIndex>,
+    /// 索引スレッド。`bridge_set(enabled=true)` の間だけ動く
+    index_thread: Mutex<Option<crate::insight::IndexThread>>,
 }
 
 impl Default for BridgeState {
@@ -1015,6 +1717,8 @@ impl Default for BridgeState {
             }),
             activity: Arc::new(Mutex::new(None)),
             connections: Arc::new(AtomicUsize::new(0)),
+            index: Arc::new(crate::insight::InsightIndex::new()),
+            index_thread: Mutex::new(None),
         }
     }
 }
@@ -1100,6 +1804,12 @@ pub fn bridge_set(
             server.stop();
             log::info!("[bridge] Stopped");
         }
+        // 索引も止める: OFF の利用者は CPU もメモリも払わない（docs/26 §2.2）
+        if let Ok(mut thread) = state.index_thread.lock() {
+            if let Some(mut running) = thread.take() {
+                running.stop();
+            }
+        }
         config.enabled = false;
         config.port = desired_port;
         return Ok(state.snapshot(&config));
@@ -1126,6 +1836,7 @@ pub fn bridge_set(
         serial.port.clone(),
         config.token.clone(),
         state.activity.clone(),
+        state.index.clone(),
         Box::new(move |event: BridgeActivityEvent| {
             if let Err(e) = app_handle.emit("bridge-activity", event) {
                 log::warn!("[bridge] Failed to emit bridge-activity: {}", e);
@@ -1133,8 +1844,18 @@ pub fn bridge_set(
         }),
     ));
 
+    // 待ち受けが立ってから索引を起動する。listener の bind に失敗したときに
+    // 索引だけが動き続けると、ブリッジ OFF なのに CPU とメモリを払うことになる
     let server = BridgeServer::start(desired_port, ctx, state.connections.clone())?;
     log::info!("[bridge] Started on {}", server.local_addr());
+    if let Ok(mut thread) = state.index_thread.lock() {
+        if thread.is_none() {
+            *thread = Some(crate::insight::IndexThread::start(
+                serial.data_store.clone(),
+                state.index.clone(),
+            ));
+        }
+    }
     config.port = server.port();
     config.enabled = true;
     config.server = Some(server);
@@ -1162,6 +1883,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             token,
             Arc::new(Mutex::new(None)),
+            Arc::new(crate::insight::InsightIndex::new()),
             Box::new(move |event| {
                 if let Ok(mut list) = sink.lock() {
                     list.push(event);
@@ -1709,7 +2431,7 @@ mod tests {
         assert_eq!(response["id"], json!(1));
         assert_eq!(response["ok"], json!(true));
         assert_eq!(response["result"]["total_bytes"], json!(10));
-        assert_eq!(response["result"]["protocol"], json!(1));
+        assert_eq!(response["result"]["protocol"], json!(PROTOCOL_VERSION));
 
         client.send(r#"{"id":2,"method":"read_range","params":{"offset":1,"length":3}}"#);
         let response = client.recv().unwrap();
@@ -1853,5 +2575,249 @@ mod tests {
             let answered = matches!(reader.read_line(&mut line), Ok(n) if n > 0);
             assert!(!answered, "stopped server must not answer: {}", line);
         }
+    }
+
+    // ---------------- digest / watch（docs/26 段階 2） ----------------
+
+    /// 索引へ直接流し込む。実運用では `IndexThread` がこれを行う
+    fn index_feed(ctx: &BridgeCtx, text: &str, at: u64, now_ms: u64) -> u64 {
+        ctx.index.ingest(at, text.as_bytes(), now_ms);
+        at + text.len() as u64
+    }
+
+    fn text_of(result: &Value) -> String {
+        result
+            .get("text")
+            .and_then(Value::as_str)
+            .expect("envelope must carry text")
+            .to_string()
+    }
+
+    #[test]
+    fn test_digest_answers_from_the_index_without_raw_bytes() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let mut at = 0;
+        for i in 0..300 {
+            at = index_feed(&ctx, &format!("T: {}.4 C\n", 20 + i % 5), at, 1000);
+        }
+        at = index_feed(&ctx, "E: i2c nak addr=0x48\n", at, 1000);
+        index_feed(&ctx, "W: rx overflow q=64\n", at, 1000);
+
+        let result = result_of(call(&ctx, "digest", json!({})));
+        let text = text_of(&result);
+
+        // 生データは 1 バイトも返さない（find と同じく、これが存在意義）
+        assert!(!text.contains("base64"), "{text}");
+        assert!(result.get("base64").is_none());
+        // 300 行が 1 テンプレートに畳まれる
+        assert!(text.contains("T: <F"), "{text}");
+        // 稀な事象は支配的な行より先に、正確な件数とオフセット付きで出る
+        let rare_at = text.find("RARE").expect("RARE section");
+        let top_at = text.find("TOP").expect("TOP section");
+        assert!(
+            rare_at < top_at,
+            "rare events must come before top-N:\n{text}"
+        );
+        assert!(text.contains("i2c nak addr=<X>"), "{text}");
+        assert!(text.contains("@off"), "{text}");
+        // 追随用のカーソルが必ず付く
+        assert!(text.contains("\ncursor v1:g"), "{text}");
+    }
+
+    #[test]
+    fn test_digest_never_prints_a_bare_zero() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        index_feed(&ctx, "hello\n", 0, 1000);
+        let text = text_of(&result_of(call(&ctx, "digest", json!({}))));
+        let alarm = text
+            .lines()
+            .find(|l| l.starts_with("ALARM"))
+            .expect("ALARM is mandatory");
+        // 「見つからなかった」と「見に行けなかった」を混同させない
+        assert!(alarm.contains("0 err"), "{alarm}");
+        assert!(
+            alarm.contains("exact") || alarm.contains("AT LEAST"),
+            "{alarm}"
+        );
+        assert!(alarm.contains("coverage"), "{alarm}");
+    }
+
+    #[test]
+    fn test_digest_size_does_not_grow_with_the_capture() {
+        let small = {
+            let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+            index_feed(&ctx, "T: 1.0 C\n", 0, 1000);
+            text_of(&result_of(call(&ctx, "digest", json!({}))))
+                .chars()
+                .count()
+        };
+        let large = {
+            let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+            let mut at = 0;
+            for i in 0..20_000 {
+                at = index_feed(&ctx, &format!("T: {}.0 C\n", i % 7), at, 1000);
+            }
+            text_of(&result_of(call(&ctx, "digest", json!({}))))
+                .chars()
+                .count()
+        };
+        // 2 万行を索引しても応答は同じ桁に収まる（トークン/洞察であって、
+        // バイト/呼び出しではない）
+        assert!(large < small * 3, "small={small} large={large}");
+        assert!(large <= crate::insight::render::DEFAULT_DIGEST_CHARS);
+    }
+
+    #[test]
+    fn test_digest_respects_max_chars_and_reports_what_it_dropped() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let mut at = 0;
+        for i in 0..80 {
+            at = index_feed(
+                &ctx,
+                &format!("k{i}: many distinct shapes here\n"),
+                at,
+                1000,
+            );
+        }
+        let result = result_of(call(&ctx, "digest", json!({ "max_chars": 600, "top": 50 })));
+        let text = text_of(&result);
+        assert!(text.chars().count() <= 600, "{}", text.chars().count());
+        assert!(text.contains("withheld"), "{text}");
+        assert_eq!(result["budget"]["truncated"], json!(true));
+        assert!(!result["budget"]["withheld"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_digest_time_window_without_timestamps_fails_loudly() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        index_feed(&ctx, "A: 1\n", 0, 1000);
+        // 時刻索引が空なので、時刻を捏造せずに失敗する
+        let err = error_of(call(&ctx, "digest", json!({ "window": "30s" })));
+        assert!(err.contains("no timing data"), "{err}");
+        assert!(error_of(call(&ctx, "digest", json!({ "window": "nope" }))).contains("bad window"));
+    }
+
+    #[test]
+    fn test_digest_offset_window_reports_the_resolved_range() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let mut at = 0;
+        for _ in 0..10 {
+            at = index_feed(&ctx, "A: 1\n", at, 1000);
+        }
+        let text = text_of(&result_of(call(
+            &ctx,
+            "digest",
+            json!({ "window": "off:20..40" }),
+        )));
+        // エージェントが serial_read_range で再導出できる形で範囲を出す
+        assert!(
+            text.contains("off 20..40") || text.contains("off 20.."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn test_watch_returns_only_the_delta_and_a_reusable_cursor() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let mut at = index_feed(&ctx, "T: 1.0 C\n", 0, 1000);
+
+        let first = result_of(call(&ctx, "watch", json!({})));
+        let cursor = first["data"]["cursor"].as_str().unwrap().to_string();
+        assert!(
+            text_of(&first).contains("no cursor given"),
+            "{}",
+            text_of(&first)
+        );
+
+        index_feed(&ctx, "T: 2.0 C\nW: rx overflow\n", at, 2000);
+        at = 0;
+        let _ = at;
+
+        let second = result_of(call(&ctx, "watch", json!({ "cursor": cursor })));
+        let text = text_of(&second);
+        assert!(text.starts_with("watch gen="), "{text}");
+        assert_eq!(second["data"]["lines"], json!(2));
+        assert_eq!(second["data"]["warn"], json!(1));
+        assert_eq!(second["meta"]["exact_baseline"], json!(true));
+        // 件数は「窓での増分」であって累計ではない（t1 は全期間 2 回だが +1）
+        assert!(text.contains("t1 +1 \"T: <F> C\""), "{text}");
+        // 窓の外を指しうる first / min / max は差分では出さない
+        assert!(!text.contains("min 1@off"), "{text}");
+
+        // 何も来ていなければ差分はゼロ（ただし裸のゼロにはしない）
+        let cursor2 = second["data"]["cursor"].as_str().unwrap().to_string();
+        let third = result_of(call(&ctx, "watch", json!({ "cursor": cursor2 })));
+        assert_eq!(third["data"]["lines"], json!(0));
+        assert!(text_of(&third).contains("ALARM +0 err"));
+        assert!(text_of(&third).contains("coverage"));
+    }
+
+    #[test]
+    fn test_watch_with_a_stale_generation_is_not_an_error() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        index_feed(&ctx, "A: 1\n", 0, 1000);
+        let cursor = result_of(call(&ctx, "watch", json!({})))["data"]["cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Clear / ポート再オープン相当
+        ctx.index.reset(0);
+        index_feed(&ctx, "B: 2\n", 0, 2000);
+
+        let result = result_of(call(&ctx, "watch", json!({ "cursor": cursor })));
+        let text = text_of(&result);
+        assert_eq!(result["meta"]["gen_changed"], json!(true));
+        assert!(text.contains("generation changed"), "{text}");
+        assert!(text.contains("restarted from off"), "{text}");
+    }
+
+    #[test]
+    fn test_watch_rejects_a_malformed_cursor() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        assert!(error_of(call(&ctx, "watch", json!({ "cursor": "junk" }))).contains("bad cursor"));
+        assert!(error_of(call(&ctx, "watch", json!({ "cursor": 7 })))
+            .contains("cursor must be a string"));
+    }
+
+    #[test]
+    fn test_watch_long_poll_returns_promptly_when_data_is_already_there() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        index_feed(&ctx, "A: 1\n", 0, 1000);
+        let cursor = result_of(call(&ctx, "watch", json!({})))["data"]["cursor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        index_feed(&ctx, "A: 2\n", 5, 2000);
+
+        let started = Instant::now();
+        let result = result_of(call(
+            &ctx,
+            "watch",
+            json!({ "cursor": cursor, "wait_ms": 3000 }),
+        ));
+        // 既に進んでいるので待たずに返る
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(result["data"]["lines"], json!(1));
+    }
+
+    #[test]
+    fn test_status_reports_the_index_state() {
+        let (ctx, _) = test_ctx(Some(store_with(b"hello")), None);
+        index_feed(&ctx, "hello", 0, 1000);
+        let result = result_of(call(&ctx, "status", json!({})));
+        assert_eq!(result["protocol"], json!(2));
+        assert_eq!(result["indexed_bytes"], json!(5));
+        assert_eq!(result["coverage_pct"], json!(100));
+        assert_eq!(result["index_running"], json!(false));
+    }
+
+    #[test]
+    fn test_help_documents_digest_and_watch() {
+        let (ctx, _) = test_ctx(None, None);
+        let result = result_of(call(&ctx, "help", json!({})));
+        assert!(result["methods"]["digest"].is_object());
+        assert!(result["methods"]["watch"].is_object());
+        assert_eq!(result["protocol"], json!(PROTOCOL_VERSION));
     }
 }

@@ -45,14 +45,16 @@ Tauri IPC とは別に、外部プロセス（MCP アダプタ等）向けの**�
 | バインド | `127.0.0.1` のみ。既定ポート `57320` |
 | 既定 | **無効**。`bridge_set(enabled=true)` でのみ起動 |
 | 形式 | NDJSON（1 行 1 JSON、UTF-8）。要求 `{id, method, params}` / 応答 `{id, ok, result\|error}` |
-| メソッド | `help` / `auth` / `status` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
+| メソッド | `help` / `auth` / `status` / `digest` / `watch` / `find` / `read_range` / `tail` / `subscribe` / `send` / `ports` |
 | push | `subscribe` した接続へ `{"event":"data",...}` / `{"event":"reset"}` を配信 |
 
 `help` は**認証不要**の自己記述メソッドで、全メソッド・制限値・使い方ヒントを機械可読で返す
 （SYS-F-1109）。MCP を使わず生 TCP で繋ぐエージェントは、最初に
 `{"id":1,"method":"help"}` を送れば仕様を自己取得できる。
 
-**仕様の正は `src-tauri/src/bridge.rs` のモジュールヘッダ（protocol v1）**。
+**仕様の正は `src-tauri/src/bridge.rs` のモジュールヘッダ（protocol v2）**。
+v2 で `digest` / `watch` が加わり、`status` に索引の状態が付いた。新しい
+パラメータを送らない v1 クライアントの挙動は変わらない。
 本書はその存在と入口を示すだけに留め、メソッドごとの引数・クランプ規則・エラー文字列は
 コード側のドキュメントコメントを参照する（二重管理を避けるため）。
 
@@ -70,7 +72,7 @@ serial-monitor-essential --mcp        # GUI を起動せず MCP stdio サーバ�
 | 項目 | 値 |
 | --- | --- |
 | 実装 | `src-tauri/src/mcp_stdio.rs`（JSON-RPC 2.0 行区切り、stdout は JSON-RPC 専用・ログは stderr） |
-| ツール | `serial_status` / `serial_ports` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
+| ツール | `serial_status` / `serial_ports` / `serial_digest` / `serial_watch` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`（Node 版 `mcp/server.mjs` と同一） |
 | 接続先 | 環境変数 `SME_BRIDGE_HOST`（既定 `127.0.0.1`）/ `SME_BRIDGE_PORT`（既定 `57320`）/ `SME_BRIDGE_TOKEN` |
 | 登録例 | `claude mcp add serial-monitor -- "<exe のフルパス>" --mcp` |
 
@@ -120,6 +122,51 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
   所要時間を必ず併記し、「見つからなかった」と「見に行けなかった」を区別できる
   ようにする。
 - ヒットを打ち切ったら `showing N of M hits` と明示する。
+
+### `serial_digest` / `serial_watch` / ブリッジ `digest` / `watch`
+
+アプリが持つ**索引**（`src-tauri/src/insight/`）から答えるツール。
+`get_data` を 1 回も呼ばないので、応答の大きさが到着レートに依存しない
+（[26 §7.3](26_ai_api_design.md)）。索引は **AI Bridge が ON の間だけ**動く。
+
+| パラメータ | 既定 | 意味 |
+| --- | --- | --- |
+| `digest.window` | `all` | `all` / 期間（`30s` `5m` `1h` `250ms`）/ `off:FROM..TO` |
+| `digest.top` | 8（最大 50） | TOP に載せる頻出テンプレート数 |
+| `digest.samples` | 3（最大 8） | 引用する直近の生行数 |
+| `digest.buckets` | 0（最大 24） | 時系列バケット数。0 で TIME セクションなし |
+| `watch.cursor` | なし | 前回応答のカーソル。省略時は索引全体を返して基準点を作る |
+| `watch.wait_ms` | 0（最大 3000） | サーバ側ロングポール。MCP クライアントの 5s タイムアウトより手前で切る |
+| 共通 `max_chars` | digest 1800 / watch 1200 | 返す文字数の硬い上限 |
+
+応答は共通のエンベロープ（[26 §2.3](26_ai_api_design.md)）:
+
+```json
+{ "text": "…予算内の本文…", "data": { /* 構造化等価物 */ },
+  "meta": { "gen": 3, "exact": true, "coverage_pct": 100, "index_lag_bytes": 0 },
+  "budget": { "max_chars": 1800, "used_chars": 901, "truncated": false,
+              "withheld": [], "next": "serial_digest(...)" } }
+```
+
+MCP ツールは `text` をそのまま返すだけ。予算も文言も
+`insight::render` 1 箇所で決まる（Rust 版・Node 版が食い違わない構造）。
+
+出力の規範（テストで固定）:
+
+- セクションの並び `Header → INDEX → ALARM → NEW → RARE → TOP → TIME → SAMPLES → cursor`
+  が**そのまま優先順位**。予算が足りなければ末尾（サンプル）から落ち、
+  **ALARM とカーソルは決して落ちない**。落とした行数は必ずフッタに出る。
+- **`ALARM 0 err` を単独で出さない。** 常に `(exact, coverage 100%)` か
+  `(AT LEAST - coverage 62%, index 82.10 MB behind)` を伴う。
+- 初出（NEW）と件数 5 以下（RARE）は **TOP より先に**、正確な件数と
+  オフセット付きで列挙する。RARE が上限に当たったら `N of M shown` と明示する。
+- 出す極値（first / last / min / max）には**必ずバイトオフセットを併記**し、
+  `serial_read_range` 1 回で検証できるようにする。
+- 差分（`watch` と窓つき `digest`）では、窓の外を指しうる first / min / max は
+  出さない。窓での増分の隣に全期間の極値を並べると、要約が事象を隠す。
+- 時刻指定のウィンドウは `timestamp_index` が空なら**失敗させる**（時刻を捏造しない）。
+- カーソルは世代 `gen` を内包する。Clear / ポート再オープン後の古いカーソルは
+  **エラーにせず**、世代が変わった事実と再開位置を返す。
 
 ---
 

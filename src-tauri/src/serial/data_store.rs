@@ -436,6 +436,25 @@ impl DataStore {
         }
     }
 
+    /// 記録済みタイムスタンプの (最古, 最新)
+    ///
+    /// AI 向けの時刻指定ウィンドウ（docs/26 §3.1）が「まだ時刻が無い」ことを
+    /// 検出して**捏造せずに失敗する**ために使う。
+    pub fn timestamp_bounds(&self) -> Option<(u64, u64)> {
+        let index = self.timestamp_index.read().ok()?;
+        Some((index.first()?.timestamp, index.last()?.timestamp))
+    }
+
+    /// `ts` 以降で最初に記録された累積バイト数
+    ///
+    /// [`Self::get_timestamp_for_offset`] の逆引き。`timestamp_index` は
+    /// `record_timestamp` が単調性を保証しているので二分探索できる。
+    pub fn offset_at_or_after_timestamp(&self, ts: u64) -> Option<u64> {
+        let index = self.timestamp_index.read().ok()?;
+        let pos = index.partition_point(|entry| entry.timestamp < ts);
+        index.get(pos).map(|entry| entry.cumulative_bytes)
+    }
+
     /// timestamp_indexをクリア（データクリア時に使用）
     #[allow(dead_code)] // Will be used when clear_data is implemented
     pub fn clear_timestamps(&self) {

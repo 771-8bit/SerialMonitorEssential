@@ -90,6 +90,8 @@ After registering, you should see `serial-monitor` in `claude mcp list`.
 | --- | --- | --- |
 | `serial_status` | none | Connection state, port name, received byte count, app version (four lines; the duplicate raw JSON dump was removed) |
 | `serial_ports` | none | List of serial ports the PC recognizes |
+| `serial_digest` | `window?` (`all` / `30s` / `off:A..B`), `top?`, `samples?`, `buckets?`, `max_chars?` | One-call summary from the app's index: line templates with counts, alarm totals, rare and brand-new lines, optional per-bucket timeline, and a cursor for `serial_watch`. Reads no bulk data, so the reply size does not follow the arrival rate |
+| `serial_watch` | `cursor?`, `wait_ms?` (max 3000), `top?`, `max_chars?` | Only what changed since the cursor. A cursor from a cleared or reopened capture is answered with "generation changed", never with a plausible-looking wrong delta |
 | `serial_read_tail` | `bytes?` (default 4096 / max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | The most recent received data. Text is shown as-is; data that looks binary is shown as a 16-bytes-per-line hex dump. Includes offset and total_bytes. Output is capped at `max_chars` (default 4000) |
 | `serial_read_range` | `offset`, `length` (max 1048576), `format?`, `collapse_repeats?`, `max_chars?` | Received data in the given range. Same display and budget rules as `serial_read_tail` |
 | `serial_find` | `pattern`, `from?`, `to?`, `max_hits?` (default 20), `count_only?`, `max_chars?` | Searches the whole capture server-side and returns match counts plus a few offsets, never bulk data. Costs the same whether the capture is 4 KB or 4 GB, and is not limited to 1 MiB |
@@ -107,6 +109,15 @@ Notes:
 - `serial_find` reports an exact count, or `AT LEAST` when the scan was cut short (3 s budget)
   or skipped unreadable bytes. A zero always comes with the coverage that produced it, so
   "not found" cannot be mistaken for "could not look".
+- `serial_digest` / `serial_watch` need the index, which runs only while the AI Bridge is on.
+  Turning the bridge on does not index what arrived before it: the reply states the coverage,
+  and any lag or unreadable region is reported rather than hidden. A count of zero always
+  comes with the coverage that produced it.
+- The template table is bounded. When it overflows, the template not seen for the longest time
+  is dropped and the reply says how many templates and lines were evicted, so the top-N and
+  the total never quietly disagree.
+- The Node adapter is a thin renderer for these two: the character budget and the wording are
+  applied once, in the app's `insight::render`, so both adapters cannot drift apart.
 - `serial_wait_for`'s `pattern` is a JavaScript regular expression source (evaluated with the `m` flag).
 - In this Node version, the `offset` returned by `serial_wait_for` is based on lossy UTF-8
   conversion, so if invalid UTF-8 bytes appear before the match, the offset can drift by the
@@ -118,10 +129,11 @@ Notes:
 ## Typical flow
 
 ```
-1. serial_status            → check whether the port is open and how many bytes have been received
-2. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
-3. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
-4. serial_read_tail         → read a little more surrounding context
+1. serial_digest            → what is this device doing? (one call, fixed cost)
+2. serial_watch (+ cursor)  → follow it; only the changes come back
+3. serial_send              → send a command such as "AT+VER" (also shown in the GUI)
+4. serial_wait_for          → wait for a reply like "OK|ERROR" (only data that arrives after the send)
+5. serial_read_tail         → read a little more surrounding context
 
 To investigate a long capture, search instead of reading:
 

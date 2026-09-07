@@ -65,6 +65,9 @@ pub const DEFAULT_MAX_CHARS: usize = 4000;
 /// しない（切り詰めた事実と続きの取り方を必ず伝えるため）ので、封筒すら
 /// 入らない予算を許すと本文が空でも上限を超えてしまう。
 pub const MIN_MAX_CHARS: usize = 500;
+/// `serial_digest` / `serial_watch` の既定予算（実体は insight::render 側）
+const DEFAULT_DIGEST_CHARS: usize = crate::insight::render::DEFAULT_DIGEST_CHARS;
+const DEFAULT_WATCH_CHARS: usize = crate::insight::render::DEFAULT_WATCH_CHARS;
 pub const MAX_MAX_CHARS: usize = 200_000;
 /// サポートする MCP プロトコル版（クライアント指定をエコーできる版）
 const KNOWN_PROTOCOL_VERSIONS: [&str; 3] = ["2024-11-05", "2025-03-26", "2025-06-18"];
@@ -1019,6 +1022,37 @@ pub fn tool_definitions() -> Value {
             "annotations": { "readOnlyHint": true, "openWorldHint": true }
         },
         {
+            "name": "serial_digest",
+            "title": "Summarise the capture",
+            "description": "Understand a capture in ONE call at fixed cost: line templates with counts, alarm totals, rare and brand-new lines, plus a cursor for serial_watch. Reads the app's index, not the bulk data, so 4 KB and 4 GB cost the same. Prefer it over serial_read_tail to find out what is going on. Counts are exact unless the reply says otherwise, and every extreme carries a byte offset for serial_read_range.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "window": { "type": "string", "description": "\"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\". A duration needs timestamps; without them the call fails rather than guessing." },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Frequent templates to list (default 8). Rare and new ones come first regardless." },
+                    "samples": { "type": "integer", "minimum": 0, "maximum": 8, "description": "How many recent raw lines to quote (default 3)." },
+                    "buckets": { "type": "integer", "minimum": 0, "maximum": 24, "description": "Split the window into N buckets, reporting lines/err/warn each (default 0 = none)." },
+                    "max_chars": { "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS, "description": format!("Character cap (default {DEFAULT_DIGEST_CHARS}). Alarms are never dropped to fit; samples are.") }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": true }
+        },
+        {
+            "name": "serial_watch",
+            "title": "Follow what changed",
+            "description": "Report only what changed since a cursor: new templates, per-template increases, and the alarm delta. Reply size does not depend on how much arrived, so following a 12 Mbps device costs the same as an idle one. Call it once without a cursor (or use serial_digest) to get one, then pass it back. A cursor from a cleared or reopened capture is not an error; the reply says so.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cursor": { "type": "string", "description": "Cursor from a previous reply. Omit on the first call to get one." },
+                    "wait_ms": { "type": "integer", "minimum": 0, "maximum": 3000, "description": "Wait server-side this long for new data before answering (default 0)." },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Changed templates to list (default 8)." },
+                    "max_chars": { "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS, "description": format!("Hard cap on the returned characters (default {DEFAULT_WATCH_CHARS}).") }
+                }
+            },
+            "annotations": { "readOnlyHint": true, "openWorldHint": true }
+        },
+        {
             "name": "serial_read_tail",
             "title": "Read latest serial data",
             "description": format!(
@@ -1060,11 +1094,11 @@ pub fn tool_definitions() -> Value {
                     "length": { "type": "integer", "minimum": 1, "maximum": MAX_READ_LENGTH, "description": format!("How many bytes to read (max {MAX_READ_LENGTH}).") },
                     "format": {
                         "type": "string", "enum": ["auto", "text", "hex", "lines"],
-                        "description": "auto (default): text, or hex when the data looks binary. text: always UTF-8. hex: always a hex dump (about 79 chars per 16 bytes). lines: text with the partial first and last lines dropped."
+                        "description": "Same as serial_read_tail: auto (default) | text | hex | lines."
                     },
                     "collapse_repeats": {
                         "type": "boolean",
-                        "description": "Collapse consecutive identical lines into one line with [xN]. Not available in hex."
+                        "description": "Collapse consecutive identical lines into [xN]. Not available in hex."
                     },
                     "max_chars": {
                         "type": "integer", "minimum": MIN_MAX_CHARS, "maximum": MAX_MAX_CHARS,
@@ -1313,6 +1347,32 @@ pub fn call_tool_with_cancel(
             }
             let res = bridge.request("find", params)?;
             Ok(render_find(&res, max_chars))
+        }
+        "serial_digest" | "serial_watch" => {
+            // MCP 側は薄い描画器に徹する: 予算の適用も文言もブリッジの
+            // insight::render が唯一の担当（docs/26 §2.3）
+            let method = name.trim_start_matches("serial_");
+            let mut params = json!({});
+            for key in ["top", "samples", "buckets", "max_chars", "wait_ms"] {
+                if let Some(v) = arg_u64(args, key, 0, MAX_MAX_CHARS as u64)? {
+                    params[key] = json!(v);
+                }
+            }
+            for key in ["window", "cursor"] {
+                if let Some(v) = args.get(key) {
+                    if !v.is_null() {
+                        let text = v
+                            .as_str()
+                            .ok_or_else(|| format!("bad arguments: '{key}' must be a string"))?;
+                        params[key] = json!(text);
+                    }
+                }
+            }
+            let res = bridge.request(method, params)?;
+            res.get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "bridge returned no text".to_string())
         }
         "serial_send" => {
             let text = arg_str(args, "text")?;
@@ -2221,6 +2281,8 @@ mod tests {
             vec![
                 "serial_status",
                 "serial_ports",
+                "serial_digest",
+                "serial_watch",
                 "serial_read_tail",
                 "serial_read_range",
                 "serial_find",
@@ -2235,14 +2297,18 @@ mod tests {
             assert!(tool["inputSchema"]["type"] == json!("object"));
             assert!(!tool["description"].as_str().unwrap().is_empty());
         }
-        // 常駐コスト（スキーマ全体）が肥大していないこと。docs/26 は約 1.0k
-        // トークン以内を目標にしている
+        // 常駐コスト（スキーマ全体）が肥大していないこと。
+        // 段階 2 で digest / watch を足して 7.1k -> 9.0k 文字（約 +500 トークン）
+        // になった。docs/26 の「約 1.0k トークン」という目標は達成できていない
+        // （既存 8 ツールの時点で約 1.9k トークンあった）。1 回の tail が
+        // 25 万トークンだったことに対する取引としては妥当だが、これ以上は
+        // 説明文を削るのではなく**ツールを増やさない**ことで守る。
         let schema_chars = serde_json::to_string(&res["result"]["tools"])
             .unwrap()
             .chars()
             .count();
         assert!(
-            schema_chars < 9000,
+            schema_chars < 10_000,
             "tools/list schema is {schema_chars} chars; it is resident in every request"
         );
     }
@@ -2726,6 +2792,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             Arc::new(Mutex::new(None)),
+            Arc::new(crate::insight::InsightIndex::new()),
             Box::new(|_| {}),
         ));
         let connections = Arc::new(AtomicUsize::new(0));
@@ -2781,5 +2848,146 @@ mod tests {
         );
         assert!(!err.contains("Cannot reach"), "must not claim unreachable");
         server.join().unwrap();
+    }
+
+    // ---------------- serial_digest / serial_watch（docs/26 段階 2） ----------------
+
+    #[test]
+    fn test_digest_is_a_thin_pass_through_of_the_bridge_text() {
+        // 予算も文言もブリッジの insight::render が唯一の担当。MCP 層は
+        // 何も足さず何も削らない（docs/26 §2.3）
+        let rendered = "digest gen=3 index=on window=all -> off 0..100
+ALARM 0 err · 0 warn (exact, coverage 100%)
+cursor v1:g3:o100:l4:e1
+- nothing withheld";
+        let mut bridge = MockBridge::new(vec![Ok(json!({
+            "text": rendered,
+            "data": { "cursor": "v1:g3:o100:l4:e1" },
+            "meta": { "gen": 3 },
+            "budget": { "max_chars": 1800, "used_chars": 120, "truncated": false }
+        }))]);
+        let out = call_tool(&mut bridge, "serial_digest", &json!({})).unwrap();
+        assert_eq!(out, rendered);
+        assert_eq!(bridge.calls[0].0, "digest");
+        // 省略時のパラメータは送らない（既定はブリッジ側が持つ）
+        assert_eq!(bridge.calls[0].1, json!({}));
+    }
+
+    #[test]
+    fn test_digest_and_watch_forward_their_arguments() {
+        let ok = || Ok(json!({ "text": "x", "data": {}, "meta": {}, "budget": {} }));
+        let mut bridge = MockBridge::new(vec![ok(), ok()]);
+        call_tool(
+            &mut bridge,
+            "serial_digest",
+            &json!({ "window": "30s", "top": 20, "buckets": 6, "max_chars": 3000 }),
+        )
+        .unwrap();
+        assert_eq!(
+            bridge.calls[0].1,
+            json!({ "window": "30s", "top": 20, "buckets": 6, "max_chars": 3000 })
+        );
+        call_tool(
+            &mut bridge,
+            "serial_watch",
+            &json!({ "cursor": "v1:g1:o1:l1:e1", "wait_ms": 1500 }),
+        )
+        .unwrap();
+        assert_eq!(bridge.calls[1].0, "watch");
+        assert_eq!(
+            bridge.calls[1].1,
+            json!({ "cursor": "v1:g1:o1:l1:e1", "wait_ms": 1500 })
+        );
+    }
+
+    #[test]
+    fn test_digest_rejects_a_non_string_window() {
+        let mut bridge = MockBridge::new(vec![]);
+        let err = call_tool(&mut bridge, "serial_digest", &json!({ "window": 30 })).unwrap_err();
+        assert!(err.contains("'window' must be a string"), "{err}");
+    }
+
+    #[test]
+    fn test_digest_reports_a_bridge_reply_without_text() {
+        // 沈黙して空文字を返すより、はっきり失敗させる
+        let mut bridge = MockBridge::new(vec![Ok(json!({ "data": {} }))]);
+        let err = call_tool(&mut bridge, "serial_digest", &json!({})).unwrap_err();
+        assert!(err.contains("no text"), "{err}");
+    }
+
+    /// 実ソケット + 実索引スレッドを通した digest / watch の一気通し
+    ///
+    /// `IndexThread` -> `InsightIndex` -> ブリッジ `digest`/`watch` -> MCP ツールと、
+    /// 段階 2 の全レイヤを 1 本で通す。モックでは「索引スレッドが実際に
+    /// `DataStore` を読めていない」を見逃すので、ここだけは本物を使う。
+    #[test]
+    fn test_digest_and_watch_against_a_real_bridge_and_index() {
+        use crate::bridge::{BridgeCtx, BridgeServer};
+        use crate::insight::{IndexThread, InsightIndex};
+        use crate::serial::data_store::DataStore;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let store = Arc::new(DataStore::new().expect("DataStore::new"));
+        let handle = Arc::new(Mutex::new(Some(store.clone())));
+        let index = Arc::new(InsightIndex::new());
+        let mut indexer = IndexThread::start(handle.clone(), index.clone());
+
+        let ctx = Arc::new(BridgeCtx::new(
+            handle,
+            Arc::new(Mutex::new(None)),
+            None,
+            Arc::new(Mutex::new(None)),
+            index.clone(),
+            Box::new(|_| {}),
+        ));
+        let server = BridgeServer::start(0, ctx, Arc::new(AtomicUsize::new(0))).expect("start");
+        let mut client = TcpBridgeClient::new("127.0.0.1".to_string(), server.port(), None);
+
+        let mut payload = String::new();
+        for i in 0..500 {
+            payload.push_str(&format!("T: {}.5 C\n", 20 + i % 4));
+        }
+        payload.push_str("E: i2c nak addr=0x48\n");
+        store.push_test_data(payload.as_bytes());
+
+        // 索引が追いつくのを待つ（実スレッドなので即時ではない）
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while index.snapshot().lines < 501 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let digest = call_tool(&mut client, "serial_digest", &json!({})).unwrap();
+        assert!(digest.starts_with("digest gen="), "{digest}");
+        assert!(digest.contains("index=on"), "{digest}");
+        assert!(digest.contains("T: <F"), "{digest}");
+        assert!(digest.contains("i2c nak addr=<X>"), "{digest}");
+        assert!(digest.contains("coverage 100%"), "{digest}");
+        // 501 行を索引しても、返るのは予算内の要約だけ
+        assert!(digest.chars().count() <= DEFAULT_DIGEST_CHARS, "{digest}");
+        assert!(!digest.contains("base64"), "{digest}");
+
+        let cursor = digest
+            .lines()
+            .find_map(|l| l.strip_prefix("cursor "))
+            .expect("digest must hand out a cursor")
+            .to_string();
+
+        store.push_test_data(b"W: rx overflow q=64\n");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while index.snapshot().lines < 502 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let watch = call_tool(&mut client, "serial_watch", &json!({ "cursor": cursor })).unwrap();
+        assert!(watch.starts_with("watch gen="), "{watch}");
+        assert!(watch.contains("ALARM +0 err"), "{watch}");
+        assert!(watch.contains("+1 warn"), "{watch}");
+        // 500 行の既知テンプレートは増えていないので出ない
+        assert!(!watch.contains("T: <F"), "{watch}");
+        assert!(watch.contains("rx overflow"), "{watch}");
+
+        indexer.stop();
     }
 }

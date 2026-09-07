@@ -56,6 +56,9 @@ export const DEFAULT_MAX_CHARS = 4000;
 /** The floor is above ENVELOPE_RESERVE: header and footer are never dropped. */
 export const MIN_MAX_CHARS = 500;
 export const MAX_MAX_CHARS = 200000;
+/** Default budgets for the index-backed tools (the bridge owns the real defaults). */
+export const DEFAULT_DIGEST_CHARS = 1800;
+export const DEFAULT_WATCH_CHARS = 1200;
 
 const MAX_RX_BUFFER = 8 * 1024 * 1024;
 
@@ -851,6 +854,26 @@ function handler(fn) {
   };
 }
 
+/**
+ * Call an index-backed bridge method and hand back its already-budgeted text.
+ *
+ * Adds nothing and removes nothing: if the bridge did not send text, say so
+ * rather than returning an empty answer that reads like "nothing happened".
+ */
+export async function insightText(client, method, args) {
+  const params = {};
+  for (const key of ['window', 'cursor']) {
+    if (args?.[key] !== undefined && args[key] !== null) params[key] = args[key];
+  }
+  for (const key of ['top', 'samples', 'buckets', 'max_chars', 'wait_ms']) {
+    if (args?.[key] !== undefined && args[key] !== null) params[key] = args[key];
+  }
+  const res = await client.request(method, params);
+  const text = res?.text;
+  if (typeof text !== 'string') throw new Error('bridge returned no text');
+  return text;
+}
+
 export function createServer(client) {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -858,7 +881,7 @@ export function createServer(client) {
       instructions: [
         'Debug a serial device through the running SerialMonitorEssential GUI app.',
         'The app owns the COM port; these tools read and write the same session the human sees.',
-        'Typical flow: serial_status -> serial_send -> serial_wait_for -> serial_read_tail.',
+        'Typical flow: serial_digest to see what is going on, serial_watch (+ its cursor) to follow it, serial_send + serial_wait_for to interact.',
       ].join(' '),
     }
   );
@@ -900,6 +923,96 @@ export function createServer(client) {
       if (!ports.length) return 'No serial ports found.';
       return `${ports.length} port(s):\n${ports.map((p) => `- ${p}`).join('\n')}`;
     })
+  );
+
+  // The index-backed tools. This adapter is deliberately a thin renderer: the
+  // bridge's insight::render is the ONE place that applies the character budget
+  // and words the report (docs/26 §2.3), so both adapters cannot drift apart.
+  server.registerTool(
+    'serial_digest',
+    {
+      title: 'Summarise the capture',
+      description:
+        "Understand a capture in ONE call at fixed cost: line templates with counts, alarm totals, rare and brand-new lines, plus a cursor for serial_watch. Reads the app's index, not the bulk data, so 4 KB and 4 GB cost the same. Prefer it over serial_read_tail to find out what is going on. Counts are exact unless the reply says otherwise, and every extreme carries a byte offset for serial_read_range.",
+      inputSchema: {
+        window: z
+          .string()
+          .optional()
+          .describe(
+            '"all" (default), a duration like "30s"/"5m", or "off:FROM..TO". A duration needs timestamps; without them the call fails rather than guessing.'
+          ),
+        top: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('Frequent templates to list (default 8). Rare and new ones come first regardless.'),
+        samples: z
+          .number()
+          .int()
+          .min(0)
+          .max(8)
+          .optional()
+          .describe('How many recent raw lines to quote (default 3).'),
+        buckets: z
+          .number()
+          .int()
+          .min(0)
+          .max(24)
+          .optional()
+          .describe('Split the window into N buckets, reporting lines/err/warn each (default 0 = none).'),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(
+            `Character cap (default ${DEFAULT_DIGEST_CHARS}). Alarms are never dropped to fit; samples are.`
+          ),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    handler(async (args) => insightText(client, 'digest', args))
+  );
+
+  server.registerTool(
+    'serial_watch',
+    {
+      title: 'Follow what changed',
+      description:
+        'Report only what changed since a cursor: new templates, per-template increases, and the alarm delta. Reply size does not depend on how much arrived, so following a 12 Mbps device costs the same as an idle one. Call it once without a cursor (or use serial_digest) to get one, then pass it back. A cursor from a cleared or reopened capture is not an error; the reply says so.',
+      inputSchema: {
+        cursor: z
+          .string()
+          .optional()
+          .describe('Cursor from a previous reply. Omit on the first call to get one.'),
+        wait_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(3000)
+          .optional()
+          .describe('Wait server-side this long for new data before answering (default 0).'),
+        top: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('Changed templates to list (default 8).'),
+        max_chars: z
+          .number()
+          .int()
+          .min(MIN_MAX_CHARS)
+          .max(MAX_MAX_CHARS)
+          .optional()
+          .describe(`Character cap (default ${DEFAULT_WATCH_CHARS}).`),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    handler(async (args) => insightText(client, 'watch', args))
   );
 
   server.registerTool(
