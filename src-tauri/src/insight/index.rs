@@ -37,6 +37,16 @@ pub const MAX_PARTIAL_LINE: usize = 64 * 1024;
 pub const RECENT_LINES: usize = 8;
 /// SAMPLE 1 行の最大文字数
 pub const RECENT_LINE_CHARS: usize = 200;
+/// 「行指向ではなさそう」と言い始める制御バイトの割合
+///
+/// 制御バイト = タブ / CR / LF / 表示可能 ASCII / 0x80 以上 のいずれでもないもの。
+/// 0x80 以上を可とするのは、CJK ログをバイナリと誤認しないため（誤検知の方が
+/// 害が大きい）。一様乱数のバイナリはこの定義で約 11% になるので、5% は
+/// 「テキストではまず起きないが、バイナリなら確実に超える」線。
+pub const BINARY_HINT_RATIO: f64 = 0.05;
+/// この量を取り込むまでは判定しない（数バイトで断定しない）
+pub const BINARY_HINT_MIN_BYTES: u64 = 256;
+
 /// テンプレートごとに覚えておく直近の出現オフセット数
 ///
 /// 生の行そのものは持たない（256 テンプレート分の本文はメモリを食う）。
@@ -121,6 +131,8 @@ pub struct Snapshot {
     pub gaps: u32,
     pub evicted_templates: u64,
     pub evicted_lines: u64,
+    /// 制御バイト数（行指向かどうかの判断材料）
+    pub control_bytes: u64,
     /// 件数の降順
     pub templates: Vec<TemplateStat>,
     pub first_ingest_ms: u64,
@@ -141,6 +153,22 @@ impl Snapshot {
             return 100;
         }
         (self.bytes_ingested.saturating_mul(100) / span).min(100)
+    }
+
+    /// 取り込んだバイトのうち制御バイトの割合
+    pub fn control_ratio(&self) -> f64 {
+        if self.bytes_ingested == 0 {
+            return 0.0;
+        }
+        self.control_bytes as f64 / self.bytes_ingested as f64
+    }
+
+    /// テンプレート化した結果を信じてよさそうか
+    ///
+    /// false のときテンプレートや行数は**意味を持たない**。黙ってそれらしい
+    /// 数字を並べると、バイナリのストリームに対して自信満々に嘘をつくことになる。
+    pub fn looks_line_oriented(&self) -> bool {
+        self.bytes_ingested < BINARY_HINT_MIN_BYTES || self.control_ratio() < BINARY_HINT_RATIO
     }
 
     /// 索引がストアからどれだけ遅れているか
@@ -176,6 +204,7 @@ struct Inner {
     lines: u64,
     err: u64,
     warn: u64,
+    control_bytes: u64,
     partial: Vec<u8>,
     severity_carry: Vec<u8>,
     templates: HashMap<String, u32>,
@@ -284,6 +313,14 @@ impl InsightIndex {
         inner.bytes_ingested += data.len() as u64;
         inner.indexed_up_to += data.len() as u64;
         inner.store_total = inner.store_total.max(inner.indexed_up_to);
+
+        // --- 行指向かどうかの材料。重大度と同じ 1 パスで数えられる安さ ---
+        inner.control_bytes += data
+            .iter()
+            .filter(|&&b| {
+                !(b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7e).contains(&b) || b >= 0x80)
+            })
+            .count() as u64;
 
         // --- 重大度: テンプレート表と独立に全バイトを走査する ---
         let carry = std::mem::take(&mut inner.severity_carry);
@@ -458,6 +495,7 @@ impl InsightIndex {
             gaps: inner.gaps,
             evicted_templates: inner.evicted_templates,
             evicted_lines: inner.evicted_lines,
+            control_bytes: inner.control_bytes,
             templates,
             first_ingest_ms: inner.first_ingest_ms,
             last_ingest_ms: inner.last_ingest_ms,
@@ -766,5 +804,58 @@ mod tests {
         let snap = index.snapshot();
         assert_eq!(snap.lag_bytes(), 10_000 - 5);
         assert!(!snap.is_exact());
+    }
+
+    #[test]
+    fn test_binary_stream_is_flagged_rather_than_summarised_as_lines() {
+        let index = InsightIndex::new();
+        // 0x00..0x1f を含む一様なバイト列 = 行指向ではない
+        let blob: Vec<u8> = (0..2048u32).map(|i| (i % 256) as u8).collect();
+        index.ingest(0, &blob, 1000);
+        let snap = index.snapshot();
+        assert!(snap.control_ratio() > BINARY_HINT_RATIO);
+        assert!(
+            !snap.looks_line_oriented(),
+            "control ratio {} must not read as line oriented",
+            snap.control_ratio()
+        );
+    }
+
+    #[test]
+    fn test_cjk_log_is_not_mistaken_for_binary() {
+        let index = InsightIndex::new();
+        let mut at = 0;
+        for i in 0..40 {
+            at = feed(&index, &format!("温度センサ {i}: 23.4 度\n"), at, 1000);
+        }
+        let _ = at;
+        let snap = index.snapshot();
+        assert_eq!(snap.control_bytes, 0);
+        assert!(snap.looks_line_oriented());
+    }
+
+    #[test]
+    fn test_a_stray_nul_per_line_is_reported_rather_than_ignored() {
+        let index = InsightIndex::new();
+        let mut line = b"T: 23.4 C".to_vec();
+        line.push(0x00);
+        line.push(b'\n');
+        let mut at = 0;
+        for _ in 0..40 {
+            index.ingest(at, &line, 1000);
+            at += line.len() as u64;
+        }
+        let snap = index.snapshot();
+        // 11 バイト中 1 バイト = 9% だが、閾値 5% を超えるので警告は出る。
+        // 「疑わしいときは黙らない」側に倒す
+        assert!(snap.control_ratio() > BINARY_HINT_RATIO);
+    }
+
+    #[test]
+    fn test_short_captures_are_not_judged_at_all() {
+        let index = InsightIndex::new();
+        index.ingest(0, &[0u8; 8], 1000);
+        // 8 バイトでバイナリと断定しない
+        assert!(index.snapshot().looks_line_oriented());
     }
 }

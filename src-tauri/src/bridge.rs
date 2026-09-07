@@ -768,6 +768,16 @@ fn index_health_lines(snap: &crate::insight::index::Snapshot) -> Vec<String> {
     if !snap.running {
         notes.push("not running (turn on AI Bridge to index)".to_string());
     }
+    if !snap.looks_line_oriented() {
+        // テンプレートと行数はこの場合まったく意味を持たない。数字だけ並べると
+        // バイナリのストリームに対して自信満々に嘘をつくことになる
+        notes.push(format!(
+            "stream does not look line oriented ({:.1}% control bytes): the line counts and \
+             templates below are NOT meaningful. Use serial_find on byte patterns and \
+             serial_read_range(format=\"hex\") instead",
+            snap.control_ratio() * 100.0
+        ));
+    }
     if snap.lag_bytes() > 0 {
         notes.push(format!(
             "{} behind the capture",
@@ -1151,6 +1161,8 @@ fn method_digest(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         "evicted_templates": snap.evicted_templates,
         "evicted_lines": snap.evicted_lines,
         "template_count": entries.len(),
+        "line_oriented": snap.looks_line_oriented(),
+        "control_pct": snap.control_ratio() * 100.0,
     });
     Ok(insight_envelope(
         rendered,
@@ -3736,5 +3748,26 @@ mod tests {
             error_of(call(&ctx, "send", json!({ "text": "AT" }))),
             "port not open"
         );
+    }
+
+    #[test]
+    fn test_digest_says_when_the_stream_is_not_line_oriented() {
+        let (ctx, _) = test_ctx(Some(store_with(b"")), None);
+        let blob: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
+        ctx.index.ingest(0, &blob, 1000);
+        let result = result_of(call(&ctx, "digest", json!({})));
+        let text = text_of(&result);
+        // 黙って「N 行」と言わない。固定枠（INDEX）なので予算に押し出されもしない
+        assert!(text.contains("does not look line oriented"), "{text}");
+        assert!(text.contains("NOT meaningful"), "{text}");
+        assert_eq!(result["meta"]["line_oriented"], json!(false));
+
+        // 通常のテキストでは出さない（誤検知でノイズを増やさない）
+        let (text_ctx, _) = test_ctx(Some(store_with(b"")), None);
+        text_ctx
+            .index
+            .ingest(0, "温度: 23.4 度\n".repeat(60).as_bytes(), 1000);
+        let plain = text_of(&result_of(call(&text_ctx, "digest", json!({}))));
+        assert!(!plain.contains("does not look line oriented"), "{plain}");
     }
 }

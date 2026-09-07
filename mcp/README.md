@@ -114,6 +114,9 @@ Notes:
   Turning the bridge on does not index what arrived before it: the reply states the coverage,
   and any lag or unreadable region is reported rather than hidden. A count of zero always
   comes with the coverage that produced it.
+- If more than 5% of the indexed bytes are control bytes, the reply says the stream does
+  not look line oriented and that the line counts and templates are not meaningful
+  (bytes >= 0x80 count as printable, so CJK logs are not mistaken for binary).
 - The template table is bounded. When it overflows, the template not seen for the longest time
   is dropped and the reply says how many templates and lines were evicted, so the top-N and
   the total never quietly disagree.

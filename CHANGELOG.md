@@ -46,6 +46,9 @@ First release of the Tauri/Rust rewrite (succeeding the earlier C# version).
   byte offset from just before the write, so a reply that lands immediately
   cannot be missed. The old client-side polling could only scan ~131 KB/s and
   lost replies above roughly 1 Mbps (docs/26 stage 4, resolves DEBT-8).
+- AI integration: when the captured stream does not look line oriented, `serial_digest`
+  says so instead of presenting line counts and templates that mean nothing
+  (docs/26 stage 5, partial).
 - AI integration: `serial_sample` quotes real received lines, capped and with
   consecutive duplicates folded into `[xN]` (exact counts), each carrying the
   offset it starts at; lines cut off by the read window are dropped rather than
