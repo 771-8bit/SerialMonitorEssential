@@ -157,34 +157,42 @@ switch ($Action) {
     if ($State -and ("" + $tp.Current.ToggleState) -ne $State) { throw "toggle did not reach $State" }
   }
   "select-combo" {
-    # In window $WindowTitle, find combobox whose current value matches $Path
-    # (regex) and select the dropdown item whose name matches $Name (regex)
+    # In window $WindowTitle, find a combobox whose current value matches $Path
+    # (regex) and select the dropdown item whose name matches $Name (regex).
+    # Several combos can share a value (Parity and Flow Control are both "None"),
+    # so try each candidate in order and use the first one that offers $Name.
     $win = Find-Window $WindowTitle
     $cond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::ComboBox)
-    $combo = $null
+    $candidates = @()
     foreach ($c in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
       try { $v = $c.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { $v = "" }
-      if ($v -match $Path) { $combo = $c; break }
+      if ($v -match $Path) { $candidates += $c }
     }
-    if ($null -eq $combo) { throw "Combo with value matching '$Path' not found" }
+    if ($candidates.Count -eq 0) { throw "Combo with value matching '$Path' not found" }
     Activate-Window $win
-    $exp = $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
     $liCond = New-Object System.Windows.Automation.PropertyCondition($auto::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
-    $target = $null
-    for ($attempt = 0; $attempt -lt 4 -and $null -eq $target; $attempt++) {
-      $exp.Expand(); Start-Sleep -Milliseconds (600 + 400 * $attempt)
-      # Search the combo's own subtree first, then the whole desktop
-      $items = $combo.FindAll([System.Windows.Automation.TreeScope]::Descendants, $liCond)
-      if ($items.Count -eq 0) {
-        $items = $auto::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $liCond)
+    foreach ($combo in $candidates) {
+      $exp = $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+      $target = $null
+      for ($attempt = 0; $attempt -lt 4 -and $null -eq $target; $attempt++) {
+        $exp.Expand(); Start-Sleep -Milliseconds (600 + 400 * $attempt)
+        # Search the combo's own subtree only when there are several candidates:
+        # the desktop-wide fallback would find another combo's open list.
+        $items = $combo.FindAll([System.Windows.Automation.TreeScope]::Descendants, $liCond)
+        if ($items.Count -eq 0 -and $candidates.Count -eq 1) {
+          $items = $auto::RootElement.FindAll([System.Windows.Automation.TreeScope]::Descendants, $liCond)
+        }
+        foreach ($it in $items) { if ($it.Current.Name -match $Name) { $target = $it } }
+        if ($items.Count -gt 0 -and $null -eq $target) { break }  # list is open but lacks $Name
       }
-      foreach ($it in $items) { if ($it.Current.Name -match $Name) { $target = $it } }
+      if ($null -eq $target) { try { $exp.Collapse() } catch {}; continue }
+      $target.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+      Start-Sleep -Milliseconds 300
+      try { $exp.Collapse() } catch {}
+      Write-Host ("COMBO now: " + $combo.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value)
+      exit 0
     }
-    if ($null -eq $target) { try { $exp.Collapse() } catch {}; throw "Item '$Name' not found" }
-    $target.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-    Start-Sleep -Milliseconds 300
-    try { $exp.Collapse() } catch {}
-    Write-Host ("COMBO now: " + $combo.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value)
+    throw "Item '$Name' not found in any combo with value matching '$Path'"
   }
   "click-text" {
     # Physically click the center of the first element whose name matches $Name.

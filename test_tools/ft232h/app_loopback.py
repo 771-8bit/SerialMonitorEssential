@@ -136,7 +136,16 @@ def main() -> int:
         if time.perf_counter() >= deadline:
             break
         t = time.perf_counter()
-        res = ctl.call("send", {"base64": base64.b64encode(chunk).decode()})
+        try:
+            res = ctl.call("send", {"base64": base64.b64encode(chunk).decode()})
+        except RuntimeError as e:
+            # 送信エラー（例: フロー制御下の書き込みタイムアウト）。一部は線に出ている可能性が
+            # あり以降の比較は無意味なので、ここで打ち切って報告する。
+            stop_mon.set()
+            print(f"send #{sends + 1} failed after {(time.perf_counter() - t) * 1000:.0f} ms "
+                  f"({sent:,} B sent OK before it): {e}")
+            print("RESULT: FAIL (send error)")
+            return 1
         max_send_ms = max(max_send_ms, (time.perf_counter() - t) * 1000)
         if res["bytes_written"] != len(chunk):
             print(f"FAIL: short write {res['bytes_written']}/{len(chunk)}")
