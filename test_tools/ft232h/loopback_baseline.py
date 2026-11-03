@@ -13,6 +13,8 @@ FT232H 自己ループバック（D0=TX -> D1=RX をジャンパ）のトラン�
     python loopback_baseline.py --port COM5 --rtscts         # D2(RTS)-D3(CTS) も結んだ場合
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import sys

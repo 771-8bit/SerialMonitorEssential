@@ -22,6 +22,8 @@
     python app_loopback.py --port COM5 --baud 12000000 --seconds 60 --send-size 4096
 """
 
+from __future__ import annotations
+
 import argparse
 import base64
 import hashlib

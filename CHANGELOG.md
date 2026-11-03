@@ -9,6 +9,27 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+### Fixed
+
+- Sending no longer stops reception. Previously a send held the port lock for the
+  whole write, so data arriving meanwhile overflowed the driver buffer: on a real
+  12 Mbaud UART (FT232H) a 16 KiB send lost 60 % of the incoming data, and with
+  RTS/CTS flow control the app could deadlock itself until the write timed out.
+  The receive worker now owns the port and interleaves 1 ms write slices with reads
+  (ADR-14). Verified: 12 Mbaud, RTS/CTS, AI Bridge on, 64 KiB sends for 60 s —
+  65 MB with zero loss.
+- A send now fails only if no byte is accepted for 3 s (it reports how many bytes
+  went out), instead of after a fixed time budget that hardware flow control could
+  exceed.
+- Clearing the capture no longer aborts a send in progress.
+
+### Changed
+
+- Sending from the GUI no longer blocks the window while the bytes go out.
+- AI Bridge `send`: `offset_before` is now the position when the app started writing
+  (data that arrived while the send was queued is no longer scanned as the reply),
+  and `status.connected` turns false as soon as the device disconnects.
+
 ## [0.1.0] - Unreleased (first Tauri/Rust release)
 
 First release of the Tauri/Rust rewrite (succeeding the earlier C# version).

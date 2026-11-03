@@ -32,8 +32,12 @@ python .\loopback_baseline.py --port COM5 --baud 12000000 --seconds 60 --rtscts 
 ## Caveats
 
 - In the app test the sender is the app itself, so it is not a pure "external device"
-  reception test. It does exercise the real full-duplex path, which turned out to matter
-  (DEBT-10: a send holds the port mutex and stalls reception).
+  reception test. It does exercise the real full-duplex path, which turned out to matter:
+  it found DEBT-10 (a send stalled reception; fixed by ADR-14 on 2026-11-04). The SYS-NF-101
+  acceptance run is `.\run_app_loopback.ps1 -FlowControl Hardware -SendSize 65536 -Seconds 60`.
+- `-LogPath <file>` captures the app's log. Every 5 s the worker prints
+  `max_ms(read_busy, tx, other)`: the longest time reception was blocked by each part of
+  the loop. Use it to tell an app stall from a transport loss.
 - Without flow control, even the pyserial baseline loses data at ≥ 6 Mbaud over 60 s
   (2–3 KB bursts when the host stops polling for a few ms). A failing app run is only
   attributable to the app when its loss clearly exceeds the baseline.

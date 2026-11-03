@@ -78,7 +78,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::serial::data_store::DataStore;
-use crate::serial::port::SerialPort;
+use crate::serial::tx::OpenPort;
 
 /// 既定の待ち受けポート
 pub const DEFAULT_BRIDGE_PORT: u16 = 57320;
@@ -109,7 +109,7 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// 現在の DataStore への共有ハンドル（ポート再オープン / Clear で内側が差し替わる）
 pub type SharedDataStore = Arc<Mutex<Option<Arc<DataStore>>>>;
 /// 現在の SerialPort への共有ハンドル
-pub type SharedSerialPort = Arc<Mutex<Option<Arc<Mutex<SerialPort>>>>>;
+pub type SharedSerialPort = Arc<Mutex<Option<Arc<OpenPort>>>>;
 
 /// GUI へ流す活動イベント（Tauri から切り離すためのコールバック）
 pub type EmitFn = Box<dyn Fn(BridgeActivityEvent) + Send + Sync>;
@@ -179,12 +179,8 @@ impl BridgeCtx {
         self.data_store.lock().ok().and_then(|guard| guard.clone())
     }
 
-    /// 現在の SerialPort を解決する
-    ///
-    /// 注: これを `None` に置き換えるミューテーションは単体テストでは等価
-    /// （テストは実ポートを保持できず `send` は常に "port not open" になる）。
-    /// 実ポート経路は E2E（COM15/COM16, docs/24 §6.5）でのみ検証できる。
-    fn port_handle(&self) -> Option<Arc<Mutex<SerialPort>>> {
+    /// 現在のポートを解決する（ロックはここで手放す。送信の完了待ちの間は握らない）
+    fn port_handle(&self) -> Option<Arc<OpenPort>> {
         self.port.lock().ok().and_then(|guard| guard.clone())
     }
 
@@ -468,7 +464,7 @@ fn method_help() -> Value {
             "status": { "params": {}, "result": { "connected": "bool", "port_name": "string|null", "total_bytes": "u64", "app_version": "string", "protocol": "u32" } },
             "read_range": { "params": { "offset": "u64", "length": "u32 (clamped to 1 MiB and to available bytes)" }, "result": { "base64": "string", "offset": "u64", "length_read": "u32" } },
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
-            "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize", "offset_before": "u64 (stream offset just before the write; pass it to wait_for as 'from' to catch a reply that lands immediately)" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI" },
+            "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize", "offset_before": "u64 (stream offset when the app started writing; pass it to wait_for as 'from' to catch a reply that lands immediately)" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI. Reception keeps running while it writes. With hardware flow control the peer may throttle, so a large send can take long; it fails only if no byte is accepted for 3 s (the error says how many bytes went out). Do not resend on your own timeout: the bytes may already be on the wire." },
             "find": { "params": { "pattern": "string (Rust regex, multi-line; no lookaround)", "from": "u64 (optional, default 0)", "to": "u64 (optional, default end of stream)", "max_hits": format!("usize (optional, default {FIND_DEFAULT_HITS}, max {FIND_MAX_HITS})") }, "result": { "matches": "u64", "exact": "bool (false when the scan was cut short or skipped unreadable bytes; then 'matches' is a LOWER BOUND)", "complete": "bool", "hits": [{ "offset": "u64", "len": "usize", "excerpt": "string (the matching line)", "excerpt_truncated": "bool" }], "first": "u64|null", "last": "u64|null", "range_start": "u64", "range_end": "u64", "bytes_scanned": "u64", "gap_bytes": "u64", "elapsed_ms": "u64" }, "note": format!("Scans the capture server-side and returns counts plus a few offsets, never the bulk data. Gives up after {FIND_DEADLINE_MS}ms with complete=false rather than timing out.") },
             "digest": { "params": { "window": "string (optional: \"all\" (default), a duration like \"30s\"/\"5m\", or \"off:FROM..TO\")", "template": "string|u32 (optional: when given, returns the detail of that one template instead of the overview)", "top": "usize (optional)", "samples": "usize (optional)", "buckets": "usize (optional, 0 = none)", "max_chars": "usize (optional)" }, "result": { "text": "rendered summary (already inside the character budget)", "data": "structured equivalent", "meta": { "gen": "u64", "exact": "bool", "coverage_pct": "u64", "index_lag_bytes": "u64" }, "budget": { "max_chars": "usize", "used_chars": "usize", "truncated": "bool", "next": "string" } }, "note": "Summarises the capture from the index; never reads the bulk data. Cost does not grow with the arrival rate." },
             "watch": { "params": { "cursor": "string (optional, from a previous digest/watch)", "wait_ms": format!("u64 (optional, server-side long poll, max {WATCH_MAX_WAIT_MS})"), "top": "usize (optional)", "max_chars": "usize (optional)" }, "result": "same envelope as 'digest', reporting only what changed since the cursor", "note": "A stale-generation cursor is not an error: the reply says the generation changed and where it restarted." },
@@ -495,10 +491,8 @@ fn method_help() -> Value {
 
 fn method_status(ctx: &BridgeCtx) -> Value {
     let (connected, port_name) = match ctx.port_handle() {
-        Some(port) => {
-            let name = port.lock().ok().map(|p| p.name().to_string());
-            (true, name)
-        }
+        // 切断（致命エラー）後はハンドルが残っていても connected=false（DEBT-1 の形を再発させない）
+        Some(port) => (port.is_connected(), Some(port.name().to_string())),
         None => (false, None),
     };
     let total_bytes = ctx.store().map(|s| s.total_bytes()).unwrap_or(0);
@@ -1907,17 +1901,18 @@ fn method_send(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         .port_handle()
         .ok_or_else(|| "port not open".to_string())?;
 
-    // 送信の**直前**の位置。ここから前方走査すれば、返信が最初のポーリングより
-    // 前に着弾しても取りこぼさない（docs/26 §5.1 の競合を構造的に消す）
-    let offset_before = ctx.store().map(|s| s.total_bytes()).unwrap_or(0);
-
-    let written = {
-        let mut guard = port.lock().map_err(|_| "port lock poisoned".to_string())?;
-        guard.write(&payload)?
-    };
+    // 受信ワーカーへキューで渡し、完了を待つ（ADR-14）。書き込みは読みと交互に
+    // 1 スライスずつ行われるので、大きな送信でも受信は止まらない。
+    // offset_before はワーカーが要求を取り出した時点の公開済み位置: ここから前方走査
+    // すれば、返信が最初のポーリングより前に着弾しても取りこぼさず（docs/26 §5.1）、
+    // キュー待ちの間に届いたデータを返信と取り違えることもない
+    let preview = preview_of(&payload);
+    let receipt = port.send(payload)?;
+    let written = receipt.bytes_written;
+    let offset_before = receipt.offset_before;
 
     // GUI 可視化要件: 人間が AI の送信内容を見られるようにする
-    ctx.record_send(written, preview_of(&payload));
+    ctx.record_send(written, preview);
 
     Ok(json!({ "bytes_written": written, "offset_before": offset_before }))
 }
@@ -3740,8 +3735,48 @@ mod tests {
         );
     }
 
+    /// 送信の成功経路: 受信ワーカー役のスレッドが偽ポートで要求を処理し、
+    /// bytes_written / offset_before（取り出し時の公開済み位置）/ 活動ログが揃う。
+    /// 切断後は status が connected=false になる（ADR-14 で単体検証が可能になった経路）
     #[test]
-    fn test_send_reports_the_offset_just_before_the_write() {
+    fn test_send_through_the_port_worker_reports_receipt_and_activity() {
+        use crate::serial::tx::fake::{FakePort, WriteMode};
+        use crate::serial::tx::OpenPort;
+
+        let fake = FakePort::new(115_200, WriteMode::Accept);
+        let port = Arc::new(OpenPort::new("COM99", Box::new(fake.clone())));
+        let mut parked = port.take_io().unwrap();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..200 {
+                parked.engine.step(parked.io.as_mut(), &parked.rx, 42);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let (ctx, emitted) = test_ctx(Some(store_with(b"1234")), None);
+        *ctx.port.lock().unwrap() = Some(port.clone());
+        let result = result_of(call(
+            &ctx,
+            "send",
+            json!({ "text": "AT", "line_ending": "crlf" }),
+        ));
+        assert_eq!(result["bytes_written"], json!(4));
+        assert_eq!(result["offset_before"], json!(42));
+        assert_eq!(fake.written(), b"AT\r\n");
+        assert_eq!(ctx.activity.lock().unwrap().clone().unwrap().bytes, 4);
+        assert_eq!(emitted.lock().unwrap().len(), 1);
+
+        let status = result_of(call(&ctx, "status", json!({})));
+        assert_eq!(status["connected"], json!(true));
+        assert_eq!(status["port_name"], json!("COM99"));
+        port.mark_disconnected();
+        let status = result_of(call(&ctx, "status", json!({})));
+        assert_eq!(status["connected"], json!(false));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_send_without_port_does_not_touch_the_store() {
         // ポートが無いので送信自体は失敗するが、no-port でも壊れないことを固定する
         let (ctx, _) = test_ctx(Some(store_with(b"1234")), None);
         assert_eq!(

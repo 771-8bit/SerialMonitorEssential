@@ -13,7 +13,7 @@ use log::{debug, error, info, warn};
 
 use super::chunk::Chunk;
 use super::logger_thread::{self, PageMetadata};
-use super::port::SerialPort;
+use super::tx::OpenPort;
 use super::ui_notifier;
 use super::worker_thread;
 
@@ -36,6 +36,13 @@ pub struct ByteTimestamp {
 #[derive(Clone, serde::Serialize)]
 pub struct LogErrorPayload {
     pub message: String,
+}
+
+/// `serial-status` イベントのペイロード（受信ワーカーが切断を検知したとき）
+#[derive(Clone, serde::Serialize)]
+struct SerialStatusPayload {
+    connected: bool,
+    error: Option<String>,
 }
 
 /// DataStore: データ管理の中核
@@ -107,31 +114,45 @@ impl DataStore {
     /// データ受信を開始
     ///
     /// # Arguments
-    /// * `port` - SerialPortのArc<Mutex>
+    /// * `port` - 開いているポート。I/O は受信ワーカーへ移り、停止時に戻る（ADR-14）。
+    ///   既に別のワーカーが使っている、または切断で I/O が破棄済みなら `Err`
     /// * `app_handle` - UIイベント送信用のTauri AppHandle
     /// * `self_arc` - UI Notifier用のDataStore Arc参照
     pub fn start_reception(
         &self,
-        port: Arc<Mutex<SerialPort>>,
+        port: Arc<OpenPort>,
         app_handle: AppHandle,
         self_arc: Arc<Self>,
     ) -> Result<(), String> {
         info!("[DataStore] Starting reception");
-        // 既に動作中の場合は停止
+        // 既に動作中の場合は停止（そのワーカーが I/O を port へ返す）
         self.stop_reception();
+
+        let parked = port.take_io().ok_or_else(|| "port not open".to_string())?;
 
         // 停止フラグをリセット
         self.stop_flag.store(false, Ordering::Relaxed);
 
         // Worker Thread起動
         debug!("[DataStore] Spawning Worker Thread");
+        let status_handle = app_handle.clone();
         let worker_handle = worker_thread::spawn_worker_thread(
             port,
+            parked,
             self.free_pool.clone(),
             self.finished_list.clone(),
             self.line_index.clone(), // Phase 2: pass line_index for pre-indexing
             self.stop_flag.clone(),
-            app_handle.clone(),
+            Box::new(move |error: String| {
+                use tauri::Emitter;
+                let payload = SerialStatusPayload {
+                    connected: false,
+                    error: Some(error),
+                };
+                if let Err(e) = status_handle.emit("serial-status", payload) {
+                    error!("[DataStore] Failed to emit serial-status event: {}", e);
+                }
+            }),
         );
 
         // Logger Thread起動

@@ -2,6 +2,7 @@ mod chunk;
 pub mod data_store;
 mod logger_thread;
 pub mod port;
+pub mod tx;
 mod ui_notifier;
 mod worker_thread;
 
@@ -20,10 +21,13 @@ use tauri::{AppHandle, State};
 ///
 /// `port` も同じ理由で外側を `Arc` にしてある。AI ブリッジ（`bridge.rs`）の
 /// サーバスレッドはコマンドのスコープより長生きするので Tauri の `State` を
-/// 保持できず、ハンドルの複製が必要になる。既存の `state.port.lock()` は
-/// `Deref` でそのまま動く。
+/// 保持できず、ハンドルの複製が必要になる。
+///
+/// 内側は `OpenPort`（ADR-14）: ポートの I/O は受信ワーカーだけが行い、送信・DTR・RTS は
+/// キュー経由で渡す。外側のロックは**ハンドルの解決にだけ**使い、送信の完了待ちの間は
+/// 握らない（握ると close_port / clear_data が長い送信の後ろで止まる）。
 pub struct SerialState {
-    pub port: Arc<Mutex<Option<Arc<Mutex<port::SerialPort>>>>>,
+    pub port: Arc<Mutex<Option<Arc<tx::OpenPort>>>>,
     pub data_store: Arc<Mutex<Option<Arc<DataStore>>>>,
 }
 
@@ -58,9 +62,9 @@ pub fn open_port(
         existing_store.stop_reception();
     }
     if let Some(existing) = port_guard.take() {
-        if let Ok(mut p) = existing.lock() {
-            p.close();
-        }
+        // ワーカーは停止済みで I/O は退避されている。ここで OS ハンドルを閉じる
+        // （送信中の呼び出し側が Arc を握っていても、ハンドルはここで確実に解放される）
+        existing.close();
     }
 
     // Parse the device path out of the friendly name
@@ -70,7 +74,7 @@ pub fn open_port(
     // If the open fails (port busy, device absent, bad config), the previous
     // capture stays intact and browsable/exportable.
     let port = port::SerialPort::new(port_path, config)?;
-    let port_arc = Arc::new(Mutex::new(port));
+    let port_arc = Arc::new(tx::OpenPort::new(port_path, Box::new(port)));
     *port_guard = Some(port_arc.clone());
 
     // Now it is safe to drop the old DataStore (deletes its temp files)
@@ -101,48 +105,46 @@ pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
 
     // Then close port
     if let Some(port) = port_guard.take() {
-        if let Ok(mut p) = port.lock() {
-            p.close();
-        }
+        port.close();
     }
 
     Ok(())
 }
 
-#[tauri::command]
-pub fn write_data(state: State<'_, SerialState>, data: Vec<u8>) -> Result<usize, String> {
-    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+/// 現在のポートを解決する（外側のロックはここで手放す）
+fn current_port(state: &SerialState) -> Result<Arc<tx::OpenPort>, String> {
+    state
+        .port
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "Port not open".to_string())
+}
 
-    if let Some(port) = port_guard.as_ref() {
-        if let Ok(mut p) = port.lock() {
-            return p.write(&data);
-        }
-    }
-    Err("Port not open".to_string())
+/// 送信。線上の時間（115200 bps で 16 KiB なら約 1.4 秒）だけ完了を待つので、
+/// async コマンドにしてメインスレッドを塞がない（INV-11 と同じ理由）。
+#[tauri::command]
+pub async fn write_data(state: State<'_, SerialState>, data: Vec<u8>) -> Result<usize, String> {
+    let port = current_port(&state)?;
+    tauri::async_runtime::spawn_blocking(move || port.send(data).map(|r| r.bytes_written))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn write_dtr(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
-    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
-
-    if let Some(port) = port_guard.as_ref() {
-        if let Ok(mut p) = port.lock() {
-            return p.write_dtr(level).map_err(|e| e.to_string());
-        }
-    }
-    Err("Port not open".to_string())
+pub async fn write_dtr(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
+    let port = current_port(&state)?;
+    tauri::async_runtime::spawn_blocking(move || port.set_dtr(level))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn write_rts(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
-    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
-
-    if let Some(port) = port_guard.as_ref() {
-        if let Ok(mut p) = port.lock() {
-            return p.write_rts(level).map_err(|e| e.to_string());
-        }
-    }
-    Err("Port not open".to_string())
+pub async fn write_rts(state: State<'_, SerialState>, level: bool) -> Result<(), String> {
+    let port = current_port(&state)?;
+    tauri::async_runtime::spawn_blocking(move || port.set_rts(level))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -521,8 +523,9 @@ pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), S
         old_store.stop_reception();
     }
 
-    // If port is open, restart DataStore
-    if let Some(port_arc) = port_guard.as_ref() {
+    // If port is open, restart DataStore. 切断で I/O が破棄済み（Disconnected）の
+    // ポートでは受信を再開できないので、閉じている場合と同じ扱いにする。
+    if let Some(port_arc) = port_guard.as_ref().filter(|p| p.is_parked()) {
         log::info!("[clear_data] Creating new DataStore");
         let new_store = Arc::new(DataStore::new()?);
         // Reuse the existing port

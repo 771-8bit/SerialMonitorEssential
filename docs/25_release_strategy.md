@@ -105,7 +105,7 @@ SYS-NF の性能系を測定して合格していること。com0com のみで�
 
 | 要求 | 受入基準 | 測定手段 |
 |------|----------|----------|
-| SYS-NF-101 | 12 Mbps 60 秒で欠落 0 | `test_tools/serial_test.py` + `verify_received_data.py` |
+| SYS-NF-101 | 12 Mbps（= 12 Mbaud）60 秒で欠落 0（RTS/CTS 条件） | `test_tools/ft232h/run_app_loopback.ps1 -FlowControl Hardware -Seconds 60`（FT232H、D0–D1 / D2–D3 ジャンパ）。**2026-11-04 合格**（docs/24 §6.5 T2-5c） |
 | SYS-NF-102 | 受信中も UI が固まらない（操作が返る） | 手動操作 + スクリーンショット |
 | SYS-NF-103 | フロントのメモリ増加 0 MB/s | `test_tools/monitor_memory.py` + `analyze_memory.py` |
 | SYS-NF-104 | バックエンドのメモリが定常 | 同上 |

@@ -23,7 +23,9 @@ param(
   [int]$SendSize = 4096,
   # "Hardware" には D2(RTS)-D3(CTS) のジャンパが必要
   [ValidateSet("None", "Hardware")]
-  [string]$FlowControl = "None"
+  [string]$FlowControl = "None",
+  # アプリの stderr（env_logger。5 秒ごとの [Worker] Status に受信停止の最大時間が出る）
+  [string]$LogPath = ""
 )
 
 # ネイティブコマンド（子 powershell）の stderr を PS 5.1 は ErrorRecord 化し、"Stop" だと
@@ -52,7 +54,11 @@ if (-not $Exe) {
 }
 if (-not $Exe -or -not (Test-Path $Exe)) { Fail "app binary not found" }
 
-$app = Start-Process -FilePath $Exe -PassThru
+if ($LogPath) {
+  $app = Start-Process -FilePath $Exe -PassThru -RedirectStandardError $LogPath -RedirectStandardOutput "$LogPath.out"
+} else {
+  $app = Start-Process -FilePath $Exe -PassThru
+}
 function Stop-App {
   powershell -File $ui -Action close-window -WindowTitle "Serial Monitor Essential" 2>$null | Out-Null
   Start-Sleep -Seconds 2

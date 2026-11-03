@@ -4,6 +4,8 @@ use serialport::{DataBits, FlowControl, Parity, SerialPort as SerialPortTrait, S
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use super::tx::{LineTiming, PortIo};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialConfig {
     pub baud_rate: u32,
@@ -19,11 +21,9 @@ pub struct SerialConfig {
 pub struct SerialPort {
     inner: Box<dyn SerialPortTrait>,
     port_name: String,
+    /// open 時に一度だけ求める（Windows の `baud_rate()` は毎回 `GetCommState`）
+    timing: LineTiming,
 }
-
-// serialport's Box<dyn SerialPort> is Send
-unsafe impl Send for SerialPort {}
-unsafe impl Sync for SerialPort {}
 
 impl SerialPort {
     /// Create a new SerialPort with the specified port name and configuration
@@ -70,7 +70,9 @@ impl SerialPort {
             .parity(parity)
             .stop_bits(stop_bits)
             .flow_control(flow_control)
-            .timeout(Duration::from_millis(10)) // 10ms timeout for reading
+            // 待機中の read タイムアウト。送信の取り上げ遅延の上限になる（ADR-14）。
+            // 送信中は TxEngine が要求の残り期限へ広げ、終わると戻す。
+            .timeout(super::tx::IDLE_READ_TIMEOUT)
             .open()
             .map_err(|e| format!("Failed to open port {}: {:?}", port_name, e))?;
 
@@ -94,17 +96,18 @@ impl SerialPort {
             port.baud_rate()
         );
 
+        // 1 文字のビット数 = start 1 + data + parity + stop（スライス長と OS タイムアウトの計算に使う）
+        let bits_per_char = 1
+            + config.data_bits as u32
+            + u32::from(config.parity != "None")
+            + config.stop_bits as u32;
+        let baud = port.baud_rate().unwrap_or(config.baud_rate);
+
         Ok(Self {
             inner: port,
             port_name: port_name.to_string(),
+            timing: LineTiming::new(baud, bits_per_char),
         })
-    }
-
-    /// Device path this port was opened with (e.g. "COM7", "/dev/ttyUSB0")
-    ///
-    /// Used by the AI bridge `status` method to report which port the app holds.
-    pub fn name(&self) -> &str {
-        &self.port_name
     }
 
     /// Read data from the serial port
@@ -138,45 +141,6 @@ impl SerialPort {
         }
     }
 
-    /// Write data to the serial port
-    ///
-    /// Writes ALL bytes (a bare `write` may write only part of the buffer,
-    /// silently truncating the sent data). Returns the number of bytes written.
-    pub fn write(&mut self, data: &[u8]) -> Result<usize, String> {
-        debug!(
-            "[SerialPort::write] {} - Writing {} bytes",
-            self.port_name,
-            data.len()
-        );
-
-        // The port timeout is shared between reads and writes (on Windows it is
-        // applied to the write path too). The 10ms read-oriented timeout set at
-        // open time is far too short for a large payload at a low baud rate:
-        // `write_all` would hit TimedOut mid-transfer and report a spurious
-        // error even though part of the data already went out. Widen the
-        // timeout to a payload-aware estimate (~10 bits per byte on the wire,
-        // plus slack) for the duration of this write, then restore it so reads
-        // stay responsive.
-        let baud = self.inner.baud_rate().unwrap_or(9600).max(1200) as u64;
-        let est_ms = (data.len() as u64 * 10 * 1000) / baud + 250;
-
-        let old_timeout = self.inner.timeout();
-        let _ = self.inner.set_timeout(Duration::from_millis(est_ms));
-        let result = self.inner.write_all(data);
-        // Always restore, including on the error path.
-        let _ = self.inner.set_timeout(old_timeout);
-
-        result
-            .map(|_| data.len())
-            .map_err(|e| format!("Failed to write to port: {:?}", e))
-    }
-
-    /// Close the serial port (no-op, handled by Drop)
-    pub fn close(&mut self) {
-        info!("[SerialPort::close] {} - Closing port", self.port_name);
-        // serialport handles closing via Drop automatically
-    }
-
     /// Set DTR line state
     pub fn write_dtr(&mut self, level: bool) -> Result<(), String> {
         self.inner
@@ -189,5 +153,43 @@ impl SerialPort {
         self.inner
             .write_request_to_send(level)
             .map_err(|e| format!("Failed to set RTS: {:?}", e))
+    }
+}
+
+/// 受信ワーカー（`tx::TxEngine`）から使うポート操作。I/O はワーカーだけが行う（ADR-14）。
+impl PortIo for SerialPort {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
+        SerialPort::read(self, buf)
+    }
+
+    fn write_some(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // 1 回の write のみ（write_all はしない）。Windows はスライスの OS タイムアウトで
+        // 書けた分だけを Ok(n < len)（0 も可）で返す。続きは TxEngine が受信判定を挟んで再開し、
+        // 失敗にするのは進捗が STALL_TIMEOUT 止まったときだけ。
+        self.inner.write(data)
+    }
+
+    fn bytes_to_read(&mut self) -> Result<u32, String> {
+        self.inner
+            .bytes_to_read()
+            .map_err(|e| format!("Failed to query input queue: {:?}", e))
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) -> Result<(), String> {
+        self.inner
+            .set_timeout(timeout)
+            .map_err(|e| format!("Failed to set timeout: {:?}", e))
+    }
+
+    fn timing(&self) -> LineTiming {
+        self.timing
+    }
+
+    fn write_dtr(&mut self, level: bool) -> Result<(), String> {
+        SerialPort::write_dtr(self, level)
+    }
+
+    fn write_rts(&mut self, level: bool) -> Result<(), String> {
+        SerialPort::write_rts(self, level)
     }
 }
