@@ -254,7 +254,7 @@
 
 | SYS-NF | 要求要約 | 実装要素 | 検証 |
 |--------|----------|----------|------|
-| SYS-NF-101 | 12 Mbps 60 秒で欠落 0 | 受信パス全体 | `E2E` + `test_tools/verify_received_data.py` / `test_tools/serial_test.py` |
+| SYS-NF-101 | 12 Mbps 60 秒で欠落 0 | 受信パス全体 | `E2E` + `test_tools/verify_received_data.py` / `test_tools/serial_test.py` / **FT232H 実 UART: `test_tools/ft232h/`（2026-11-03 T2-5b: 送信併用時に欠落 = DEBT-10、フロー制御なしではトランスポート自体も欠落。受入は未達）** |
 | SYS-NF-102 | 受信中も UI が固まらない | 3 スレッド分離 + バックエンド駆動ページング | `E2E`（[07 7-8 中間確認](07_plotter_spec.md#7-8-パフォーマンスチューニング)） |
 | SYS-NF-103 | フロント メモリ 0 MB/s | `PlotterChartPayload`（ADR-08） | `E2E` + `test_tools/monitor_memory.py` / `test_tools/analyze_memory.py`（実測: 修正前 +13.6 MB/s → 修正後 定常） |
 | SYS-NF-104 | バックエンド メモリ定常 | `Arc<Chunk>` 解放、集約レベルアップ | `E2E`（約 40 MB）／ **GAP-26**（自動計測なし） |

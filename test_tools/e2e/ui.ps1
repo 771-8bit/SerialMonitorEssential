@@ -2,7 +2,9 @@ param(
   [Parameter(Mandatory=$true)][string]$Action,
   [string]$Name,
   [string]$WindowTitle = "Serial Monitor Essential",
-  [string]$Path
+  [string]$Path,
+  # toggle 用: "On" / "Off" を渡すと、既にその状態なら何もしない（設定は永続化されるため）
+  [string]$State = ""
 )
 
 Add-Type -AssemblyName UIAutomationClient
@@ -145,8 +147,14 @@ switch ($Action) {
     }
     if ($null -eq $target) { throw "Checkbox '$Name' not found" }
     $tp = $target.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+    if ($State -and ("" + $tp.Current.ToggleState) -eq $State) {
+      Write-Host ("ALREADY: " + $target.Current.Name + " = " + $State)
+      exit 0
+    }
     $tp.Toggle()
+    Start-Sleep -Milliseconds 300
     Write-Host ("TOGGLED: " + $target.Current.Name + " -> " + $tp.Current.ToggleState)
+    if ($State -and ("" + $tp.Current.ToggleState) -ne $State) { throw "toggle did not reach $State" }
   }
   "select-combo" {
     # In window $WindowTitle, find combobox whose current value matches $Path
@@ -179,12 +187,15 @@ switch ($Action) {
     Write-Host ("COMBO now: " + $combo.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value)
   }
   "click-text" {
-    # Physically click the center of the first element whose name matches $Name
+    # Physically click the center of the first element whose name matches $Name.
+    # Optional -Path restricts the control type (e.g. "ListItem") when the same
+    # name appears on several elements (the baud trigger text vs. its list item).
     $win = Find-Window $WindowTitle
     Activate-Window $win
     $all = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
     $target = $null
     foreach ($e in $all) {
+      if ($Path -and $e.Current.ControlType.ProgrammaticName -ne "ControlType.$Path") { continue }
       if ($e.Current.Name -match $Name) { $target = $e; break }
     }
     if ($null -eq $target) { throw "Element matching '$Name' not found" }
