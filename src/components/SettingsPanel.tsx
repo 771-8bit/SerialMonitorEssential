@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import './SettingsPanel.css';
@@ -58,7 +58,8 @@ interface SettingsPanelProps {
   ports: string[];
   selectedPort: string;
   onPortChange: (port: string) => void;
-  onRefreshPorts: () => void;
+  /** Re-enumerate the ports; resolves once the new list is in state */
+  onRefreshPorts: () => void | Promise<void>;
   config: SerialConfig;
   onConfigChange: (config: SerialConfig) => void;
   isConnected: boolean;
@@ -171,6 +172,54 @@ export default function SettingsPanel({
     };
   }, []);
 
+  // --- Port list freshness (issue #5) ------------------------------------------------
+  // The list is polled every 2 s, but a native <select> popup shows the options it
+  // had at the moment it opened, so a device plugged in just before the click was
+  // missing. Where the WebView supports showPicker() (Chromium/WebView2), the click
+  // re-enumerates first and then opens the popup with the current list. Elsewhere
+  // the popup opens as usual and the refresh still updates the list.
+  const portSelectRef = useRef<HTMLSelectElement>(null);
+  const openingRef = useRef(false);
+
+  const refreshThenOpen = async () => {
+    const el = portSelectRef.current;
+    if (!el || openingRef.current) return;
+    openingRef.current = true;
+    try {
+      await onRefreshPorts();
+      // Let React commit the new <option>s before the popup reads them
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      el.focus();
+      el.showPicker();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      openingRef.current = false;
+    }
+  };
+
+  const canShowPicker = () =>
+    typeof HTMLSelectElement !== 'undefined' &&
+    typeof HTMLSelectElement.prototype.showPicker === 'function';
+
+  const handlePortMouseDown = (e: React.MouseEvent<HTMLSelectElement>) => {
+    if (e.button !== 0) return;
+    if (canShowPicker()) {
+      e.preventDefault(); // open it ourselves, after the refresh
+      void refreshThenOpen();
+    } else {
+      void onRefreshPorts();
+    }
+  };
+
+  const handlePortKeyDown = (e: React.KeyboardEvent<HTMLSelectElement>) => {
+    const opens = e.key === 'F4' || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'));
+    if (opens && canShowPicker()) {
+      e.preventDefault();
+      void refreshThenOpen();
+    }
+  };
+
   const handleChange = <K extends keyof SerialConfig>(key: K, value: SerialConfig[K]) => {
     onConfigChange({ ...config, [key]: value });
   };
@@ -189,11 +238,14 @@ export default function SettingsPanel({
       <div className="panel-header">Settings</div>
       <div className="settings-row">
         <select
+          ref={portSelectRef}
           value={selectedPort}
           onChange={(e) => onPortChange(e.target.value)}
-          onClick={onRefreshPorts}
+          onMouseDown={handlePortMouseDown}
+          onKeyDown={handlePortKeyDown}
           disabled={isConnected}
           className="port-select"
+          aria-label="Port"
         >
           {/* The device being waited for has left the list; keep it selectable so the
               dropdown keeps showing what the app is waiting for */}
