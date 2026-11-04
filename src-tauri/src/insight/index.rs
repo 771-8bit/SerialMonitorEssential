@@ -289,6 +289,14 @@ impl InsightIndex {
         inner.severity_carry.clear();
     }
 
+    /// 受信セグメントの開始（自動再接続の再開位置など）。直前の途中の行は
+    /// 次のセグメントの先頭とつながっていないので捨てる（docs/27 PF-2）
+    pub fn note_segment_start(&self) {
+        let mut inner = self.lock();
+        inner.partial.clear();
+        inner.severity_carry.clear();
+    }
+
     /// 取り込み。`offset` は `data` の先頭のストリーム絶対オフセット
     pub fn ingest(&self, offset: u64, data: &[u8], now_ms: u64) {
         if data.is_empty() {
@@ -735,6 +743,19 @@ mod tests {
         // 行数の総和は追い出し分を足せば合う（黙って消さない）
         let shown: u64 = snap.templates.iter().map(|t| t.count).sum();
         assert_eq!(shown + snap.evicted_lines, snap.lines);
+    }
+
+    /// A resume boundary cuts the partial line: "abc" before an unplug and
+    /// "def" after the reconnect are not one line "abcdef" (docs/27 PF-2)
+    #[test]
+    fn test_segment_start_drops_the_partial_line() {
+        let index = InsightIndex::new();
+        index.ingest(0, b"abc", 1000);
+        index.note_segment_start();
+        index.ingest(3, b"def\n", 2000);
+        let snap = index.snapshot();
+        assert_eq!(snap.lines, 1);
+        assert!(snap.templates.iter().all(|t| !t.template.contains("abc")));
     }
 
     #[test]

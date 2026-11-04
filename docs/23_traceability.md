@@ -210,6 +210,7 @@
 | SYS-F-710 | バッチ内タイムスタンプ分散 (INV-9) | `plotter/thread.rs::run`（`prev = max(candidate, last_batch_ts)`） | `UT`: `test_batch_timestamps_are_spread` |
 | SYS-F-711 | 改行なしバッファの 64 KB 上限 | `plotter/parser.rs` | `INSP` / **GAP-24** |
 | SYS-F-712 | state_data はメモリ 10,000 件、超過分はディスクへ | `plotter/aggregator.rs`（`MAX_STATE_CHANGES`、`process_state_value` の書き出し、`filter_state_data` の読み戻し）、`plotter/spill.rs`（`append_states` / `read_states`） | `UT`: `test_state_changes_beyond_memory_cap_come_back_from_spill`, `test_state_segments_round_trip` |
+| SYS-F-713 | 受信の開始・再開位置の最初の行はデータにしない | `serial/data_store.rs`（`segment_starts`、`start_reception` で登録）、`plotter/parser.rs::begin_untrusted_segment`、`plotter/thread.rs`（区切りで分けてパース、読み飛ばし後も同様）、`insight/index.rs::note_segment_start` / `insight/thread.rs` | `UT`: `test_segment_start_*`（パーサ 7 件、insight 1 件）, `test_cut_first_line_of_a_new_store_is_dropped`, `test_cut_lines_around_a_resume_boundary_are_dropped`, `test_resume_boundary_inside_one_read` |
 
 ### 2.8 データ管理 (SYS-F-8xx)
 

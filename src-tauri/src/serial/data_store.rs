@@ -55,6 +55,10 @@ pub struct DataStore {
     archived_index: Arc<RwLock<Vec<PageMetadata>>>,
     timestamp_index: Arc<RwLock<Vec<ByteTimestamp>>>,
     line_index: Arc<RwLock<Vec<u64>>>, // 各行の開始オフセット（改行検出時に記録）
+    /// 受信を開始・再開したオフセット（接続時の 0、自動再接続の再開位置）。
+    /// そこから始まるバイトは行の途中かもしれない（docs/27 PF-2）。プロッタ等の
+    /// 行パーサは、ここを「信用できない行頭」として扱う
+    segment_starts: RwLock<Vec<u64>>,
     temp_dir: PathBuf,
 
     // スレッド管理
@@ -103,6 +107,7 @@ impl DataStore {
             archived_index: Arc::new(RwLock::new(Vec::new())),
             timestamp_index: Arc::new(RwLock::new(Vec::new())),
             line_index: Arc::new(RwLock::new(vec![0])), // 最初の行はオフセット0から始まる
+            segment_starts: RwLock::new(Vec::new()),
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
@@ -130,6 +135,13 @@ impl DataStore {
         // 新しいストアなら 0。自動再接続で同じストアに受信を再開するときは、
         // 前回までの続きのオフセットから追記する（停止後に数えるので最終チャンクも含む）
         let start_offset = self.total_bytes();
+        // ワーカーの起動より前に登録するので、読み手がこの位置のバイトを見る時には
+        // 必ず境界が分かっている
+        if let Ok(mut starts) = self.segment_starts.write() {
+            if starts.last().is_none_or(|&last| last < start_offset) || starts.is_empty() {
+                starts.push(start_offset);
+            }
+        }
 
         let parked = port.take_io().ok_or_else(|| "port not open".to_string())?;
 
@@ -383,6 +395,28 @@ impl DataStore {
     #[cfg(test)]
     pub fn push_test_data(&self, data: &[u8]) {
         self.push_test_data_at(self.total_bytes(), data);
+    }
+
+    /// 受信セグメントの開始オフセットのうち `[from, to)` に入るもの（昇順）
+    pub fn segment_starts_in(&self, from: u64, to: u64) -> Vec<u64> {
+        self.segment_starts
+            .read()
+            .map(|starts| {
+                starts
+                    .iter()
+                    .copied()
+                    .filter(|&s| s >= from && s < to)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// テスト用: 受信の開始・再開位置を登録する（`start_reception` の代わり）
+    #[cfg(test)]
+    pub fn push_segment_start(&self, offset: u64) {
+        if let Ok(mut starts) = self.segment_starts.write() {
+            starts.push(offset);
+        }
     }
 
     /// テスト用: 任意のグローバルオフセットにチャンクを直接置く
@@ -700,6 +734,7 @@ mod tests {
             archived_index: Arc::new(RwLock::new(Vec::new())),
             timestamp_index: Arc::new(RwLock::new(Vec::new())),
             line_index: Arc::new(RwLock::new(vec![0])),
+            segment_starts: RwLock::new(Vec::new()),
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),

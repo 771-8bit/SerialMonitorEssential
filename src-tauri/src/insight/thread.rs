@@ -108,7 +108,21 @@ fn run(store_handle: SharedDataStore, index: Arc<InsightIndex>, stop_flag: Arc<A
         match store.get_data(next_offset, want) {
             Ok(data) if !data.is_empty() => {
                 read_failures = 0;
-                index.ingest(next_offset, &data, now_ms());
+                // 受信セグメントの境界（自動再接続の再開位置）で途中の行を切る
+                let now = now_ms();
+                let end = next_offset + data.len() as u64;
+                let mut pos = 0usize;
+                for start in store.segment_starts_in(next_offset, end) {
+                    let cut = (start - next_offset) as usize;
+                    if cut > pos {
+                        index.ingest(next_offset + pos as u64, &data[pos..cut], now);
+                    }
+                    index.note_segment_start();
+                    pos = cut;
+                }
+                if pos < data.len() {
+                    index.ingest(next_offset + pos as u64, &data[pos..], now);
+                }
                 next_offset += data.len() as u64;
                 // まだ残っていれば間を空けずに続ける（追随を優先）
                 continue;

@@ -41,6 +41,10 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Fixed
 
+- Plotter: connecting to a device that is already streaming no longer creates a phantom channel
+  from the cut first line (e.g. a state channel named `cos` with the value `accel:0.049`). The same
+  applies where reception resumes after an automatic reconnect.
+
 - Plotter: the right edge of the LIVE window crept ahead of real time (about 3 s after 3 minutes),
   so after roughly 10 minutes a 10 s window showed no data at all.
 

@@ -48,6 +48,10 @@ pub struct PlotterParser {
     discard_until_newline: bool,
     /// Timestamp of the last parsed line (used to detect device-reset gaps)
     last_line_ts: u64,
+    /// The next line may have started before the bytes we have (we joined the
+    /// stream mid-line: a connect or a resumed reception). It is used only to
+    /// pick up a CSV header and never becomes a data point (docs/27 PF-2).
+    untrusted_first_line: bool,
 }
 
 impl Default for PlotterParser {
@@ -65,7 +69,21 @@ impl PlotterParser {
             line_buffer: Vec::new(),
             discard_until_newline: false,
             last_line_ts: 0,
+            untrusted_first_line: false,
         }
+    }
+
+    /// The following bytes start a new receive segment whose first line may be
+    /// cut (connecting to a device that is already streaming, or reception
+    /// resumed after an automatic reconnect). Drop any partial line carried
+    /// over from before, and treat the next line as untrusted: it can still be
+    /// adopted as a CSV header, but it never produces a data point. A cut data
+    /// line like "39.05,cos:" joined to the next line would otherwise create a
+    /// phantom channel that stays for the whole session.
+    pub fn begin_untrusted_segment(&mut self) {
+        self.line_buffer.clear();
+        self.discard_until_newline = false;
+        self.untrusted_first_line = true;
     }
 
     /// Reset parser state (for new session)
@@ -76,6 +94,7 @@ impl PlotterParser {
         self.line_buffer.clear();
         self.discard_until_newline = false;
         self.last_line_ts = 0;
+        self.untrusted_first_line = false;
     }
 
     /// Parse incoming bytes into data points
@@ -115,7 +134,16 @@ impl PlotterParser {
         while i < buf_len {
             let b = self.line_buffer[i];
             if b == b'\r' || b == b'\n' {
-                if i > line_start {
+                if self.untrusted_first_line {
+                    // The first line of a segment: header detection only.
+                    // Released at the first line ending, even an empty line.
+                    if i > line_start {
+                        let line =
+                            String::from_utf8_lossy(&self.line_buffer[line_start..i]).into_owned();
+                        self.adopt_header_only(&line);
+                    }
+                    self.untrusted_first_line = false;
+                } else if i > line_start {
                     // Convert only the complete line to text (lossy for non-UTF8)
                     let line =
                         String::from_utf8_lossy(&self.line_buffer[line_start..i]).into_owned();
@@ -152,9 +180,30 @@ impl PlotterParser {
             // The rest of this oversized line is still coming: discard it too,
             // otherwise its tail would be parsed as a fresh (bogus) line.
             self.discard_until_newline = true;
+            // That oversized line was the untrusted one; the next is trusted
+            self.untrusted_first_line = false;
         }
 
         results
+    }
+
+    /// Adopt `line` as the CSV header if it is one; otherwise ignore it with no
+    /// side effects (an untrusted, possibly cut line must not count as data)
+    fn adopt_header_only(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() || self.header_detected || self.saw_numeric_data {
+            return;
+        }
+        let separator = self.detect_separator(line);
+        let parts: Vec<&str> = if separator == ' ' {
+            line.split_whitespace().collect()
+        } else {
+            line.split(separator).map(|s| s.trim()).collect()
+        };
+        if self.is_header_line(&parts) {
+            self.labels = parts.iter().map(|s| s.to_string()).collect();
+            self.header_detected = true;
+        }
     }
 
     /// Parse a single line into a data point
@@ -1251,5 +1300,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- untrusted segment starts (docs/27 PF-2) ----
+
+    fn names(points: &[ParsedDataPoint]) -> Vec<String> {
+        let mut all: Vec<String> = points
+            .iter()
+            .flat_map(|p| p.channels.keys().cloned())
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
+    /// The observed case: a cut line left in the buffer joins the first line
+    /// after the boundary. It must neither create a phantom channel nor turn
+    /// `cos` into a state channel
+    #[test]
+    fn test_segment_start_drops_cut_line_reproduction() {
+        let mut parser = PlotterParser::new();
+        assert!(parser.parse(b"sin:39.05,cos:", 0).is_empty());
+        parser.begin_untrusted_segment();
+        let points = parser.parse(
+            b"accel:0.049,temp:24,state:IDLE\r\nsin:1,cos:2,accel:3,temp:4,state:IDLE\r\n",
+            10,
+        );
+        assert_eq!(points.len(), 1);
+        assert_eq!(names(&points), vec!["accel", "cos", "sin", "state", "temp"]);
+        assert_eq!(
+            points[0].channels.get("cos"),
+            Some(&ChannelValue::Numeric(2.0))
+        );
+    }
+
+    /// Connecting mid-line to a CSV stream: the cut first line is dropped
+    #[test]
+    fn test_segment_start_drops_cut_csv_line() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        let points = parser.parse(b"39.05,cos:0.5\n1,2\n", 0);
+        assert_eq!(points.len(), 1);
+        assert_eq!(names(&points), vec!["ch0", "ch1"]);
+    }
+
+    /// CR-only line endings release the segment start too (a parser that only
+    /// looked for LF would drop everything forever)
+    #[test]
+    fn test_segment_start_with_cr_only_endings() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        assert_eq!(parser.parse(b"cut\r1\r2\r", 0).len(), 2);
+    }
+
+    /// A CRLF split across reads does not leave an empty phantom line
+    #[test]
+    fn test_segment_start_crlf_split_across_reads() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        assert!(parser.parse(b"cut\r", 0).is_empty());
+        let points = parser.parse(b"\n5\n", 10);
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].channels.get("ch0"),
+            Some(&ChannelValue::Numeric(5.0))
+        );
+    }
+
+    /// An empty first line releases it: the next line is data
+    #[test]
+    fn test_segment_start_released_by_empty_line() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        assert_eq!(parser.parse(b"\n7\n", 0).len(), 1);
+    }
+
+    /// A clean CSV header at the segment start is still adopted (a board reset
+    /// by DTR prints its header first), and a boot banner does not block it
+    #[test]
+    fn test_segment_start_keeps_a_csv_header() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        let points = parser.parse(b"a,b\n1,2\n", 0);
+        assert_eq!(names(&points), vec!["a", "b"]);
+
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        // (a two-word banner such as "Boot OK" is adopted as a header even on a
+        // clean start - an existing quirk, unchanged here)
+        let points = parser.parse(b"READY\na,b\n1,2\n", 0);
+        assert_eq!(names(&points), vec!["a", "b"]);
+    }
+
+    /// A cut labelled line is never mistaken for a header
+    #[test]
+    fn test_segment_start_cut_labelled_line_is_not_a_header() {
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        let points = parser.parse(b"cos:accel:0.049,temp:24\n1,2\n", 0);
+        assert_eq!(names(&points), vec!["ch0", "ch1"]);
     }
 }

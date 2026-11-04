@@ -180,9 +180,21 @@ impl PlotterThread {
                             // Calculate timestamp (ms since start)
                             let timestamp_ms = start_time.elapsed().as_millis() as u64;
 
-                            // Parse all the data at once
-                            let mut data_points: Vec<ParsedDataPoint> =
-                                parser.parse(&data, timestamp_ms);
+                            // Parse the data, telling the parser where a new
+                            // receive segment starts (connect / auto-reconnect):
+                            // the line there may be cut (docs/27 PF-2)
+                            let mut data_points: Vec<ParsedDataPoint> = Vec::new();
+                            let mut pos = 0usize;
+                            let end = last_processed_offset + data.len() as u64;
+                            for start in data_store.segment_starts_in(last_processed_offset, end) {
+                                let cut = (start - last_processed_offset) as usize;
+                                if cut > pos {
+                                    data_points.extend(parser.parse(&data[pos..cut], timestamp_ms));
+                                }
+                                parser.begin_untrusted_segment();
+                                pos = cut;
+                            }
+                            data_points.extend(parser.parse(&data[pos..], timestamp_ms));
 
                             // Spread timestamps across (prev, timestamp_ms] so
                             // multiple lines from one read keep distinct,
@@ -223,6 +235,8 @@ impl PlotterThread {
                             );
                             last_processed_offset = total_bytes;
                             read_failures = 0;
+                            // We jumped into the middle of the stream
+                            parser.begin_untrusted_segment();
                         }
                     }
                 }
@@ -699,6 +713,72 @@ mod tests {
             "4 points from first store",
         );
 
+        thread.stop();
+    }
+
+    /// Connecting mid-line: the cut first line of a new store creates no
+    /// phantom channel (docs/27 PF-2)
+    #[test]
+    fn test_cut_first_line_of_a_new_store_is_dropped() {
+        let handle: SharedDataStore = Arc::new(Mutex::new(None));
+        let aggregator = PlotterAggregator::new();
+        aggregator.set_enabled(true);
+        let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
+
+        let store = Arc::new(DataStore::new().expect("create store"));
+        store.push_segment_start(0);
+        store.push_test_data(b"05,cos:\naccel:1,temp:2\naccel:3,temp:4\n");
+        *handle.lock().unwrap() = Some(store.clone());
+
+        wait_for(|| aggregator.total_points() >= 4, "4 samples");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(aggregator.get_channels(), vec!["accel", "temp"]);
+        assert_eq!(aggregator.total_points(), 4);
+        thread.stop();
+    }
+
+    /// Auto-reconnect resumes on the same store: the line cut by the unplug and
+    /// the cut first line after the resume are both dropped, and the data from
+    /// before the unplug stays (SYS-F-807)
+    #[test]
+    fn test_cut_lines_around_a_resume_boundary_are_dropped() {
+        let handle: SharedDataStore = Arc::new(Mutex::new(None));
+        let aggregator = PlotterAggregator::new();
+        aggregator.set_enabled(true);
+        let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
+
+        let store = Arc::new(DataStore::new().expect("create store"));
+        store.push_test_data(b"sin:1,cos:2\nsin:3,cos:");
+        *handle.lock().unwrap() = Some(store.clone());
+        wait_for(|| aggregator.total_points() >= 2, "first line");
+
+        store.push_segment_start(store.total_bytes());
+        store.push_test_data(b"accel:9\nsin:5,cos:6\n");
+        wait_for(|| aggregator.total_points() >= 4, "line after the resume");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(aggregator.get_channels(), vec!["sin", "cos"]);
+        assert_eq!(aggregator.total_points(), 4);
+        thread.stop();
+    }
+
+    /// The boundary may sit in the middle of one read (the thread was behind)
+    #[test]
+    fn test_resume_boundary_inside_one_read() {
+        let handle: SharedDataStore = Arc::new(Mutex::new(None));
+        let aggregator = PlotterAggregator::new();
+        aggregator.set_enabled(true);
+
+        let store = Arc::new(DataStore::new().expect("create store"));
+        store.push_test_data(b"sin:1,cos:2\nsin:3,cos:");
+        store.push_segment_start(store.total_bytes());
+        store.push_test_data(b"accel:9\nsin:5,cos:6\n");
+        *handle.lock().unwrap() = Some(store.clone());
+
+        let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
+        wait_for(|| aggregator.total_points() >= 4, "both lines");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(aggregator.get_channels(), vec!["sin", "cos"]);
+        assert_eq!(aggregator.total_points(), 4);
         thread.stop();
     }
 
