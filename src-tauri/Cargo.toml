@@ -1,6 +1,6 @@
 [package]
 name = "serial-monitor-essential"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 description = "Fast serial monitor and plotter for embedded development"
 authors = ["771-8bit"]
 edition = "2021"

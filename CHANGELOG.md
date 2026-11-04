@@ -9,6 +9,48 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-11-04 (pre-release)
+
+Fixes for the first beta reports (issues #3 to #7) and a few problems found while fixing them.
+Windows build: NSIS installer only, as for beta.1.
+
+### Added
+
+- **Theme** setting (Dark / Light / System) in the Settings panel; all windows follow it. Before,
+  the app was dark-only while native widgets followed the OS theme ([#6]).
+- Save and Copy include the timestamps when Timestamp is ON in the ASCII view: every line starts
+  with its time (`HH:MM:SS.d`, the same as on screen) and the chosen separator. With Timestamp
+  OFF, Save writes the received bytes unchanged as before ([#4]).
+- Plotter: names and values joined by `=`, `:` or a space are recognized, separated by commas,
+  tabs or spaces (`V=30.58 I=0.82`, `temp = 25, hum = 60`, `temp 25.5 hum 60`). A number followed
+  by a short unit (`11ms`, `3.3V`) is read as the number. Values that are neither a number nor a
+  word (`0.825/0.797`) and empty values (`key=`) no longer create channels.
+
+### Changed
+
+- Settings are remembered across restarts: serial settings, the last chosen port, Send and Receive
+  options, the plotter's window width and downsampling mode, and the theme. The send history and
+  the window size/position are not stored ([#7]).
+- Opening the port dropdown re-enumerates the ports first, so a device plugged in a moment ago
+  is listed ([#5]).
+- The window title bar follows the chosen theme.
+
+### Fixed
+
+- Auto Scroll stopped short of the newest line when Line Wrap made lines span several rows, and
+  for very large captures ([#3]).
+- Reopening the plotter window could show "Peak" while the backend still used "Average".
+- The Hex view could not scroll to the newest rows of very large captures (more than about 8 MB).
+- A plotter line with `name=value` pairs was taken as the CSV header when it came first.
+- Opening the plotter after data had arrived drew all of that data as a single point at time 0;
+  it is now drawn at the times it was received.
+
+[#3]: https://github.com/771-8bit/SerialMonitorEssential/issues/3
+[#4]: https://github.com/771-8bit/SerialMonitorEssential/issues/4
+[#5]: https://github.com/771-8bit/SerialMonitorEssential/issues/5
+[#6]: https://github.com/771-8bit/SerialMonitorEssential/issues/6
+[#7]: https://github.com/771-8bit/SerialMonitorEssential/issues/7
+
 ## [0.1.0-beta.1] - 2026-11-04 (pre-release)
 
 First beta of the Tauri/Rust version, released to validate it in real use. It contains
