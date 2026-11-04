@@ -188,15 +188,45 @@ tests run in CI, plus a smoke test under WSL2. Wayland and HiDPI have not been t
 
 ## Building from source
 
-Prerequisites: Node.js 20+, stable Rust, and the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+### 1. Prerequisites
+
+- [Node.js](https://nodejs.org/) 20 or later
+- Stable Rust via [rustup](https://rustup.rs/) (`rustup update stable` if you already have it)
+- The [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS:
+  - **Windows:** Microsoft C++ Build Tools with the "Desktop development with C++" workload.
+    WebView2 is already part of Windows 10 (recent updates) and 11.
+  - **Ubuntu 22.04+:**
+
+    ```sh
+    sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+      librsvg2-dev libxdo-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libudev-dev \
+      build-essential pkg-config libssl-dev
+    sudo usermod -aG dialout $USER   # serial port access; log in again afterwards
+    ```
+
+### 2. Run from source
 
 ```sh
+git clone https://github.com/771-8bit/SerialMonitorEssential.git
+cd SerialMonitorEssential
 npm install
-npm run tauri dev       # run in development mode (set RUST_LOG=debug for verbose logs)
-npm run tauri build     # build installers into src-tauri/target/release/bundle
+npm run tauri dev
+```
 
-# the same checks CI runs
+`npm run tauri dev` starts the frontend dev server and builds and launches the app. The first run
+compiles all Rust dependencies and takes a few minutes; later runs are incremental. Changes to the
+frontend (`src/`) reload in place, changes to the backend (`src-tauri/`) rebuild and restart the app
+(add `-- --no-watch` to turn that off). Set `RUST_LOG=debug` for verbose backend logs.
+
+### 3. Build an installer
+
+```sh
+npm run tauri build     # installers in src-tauri/target/release/bundle (nsis/, msi/, deb/, appimage/)
+```
+
+### 4. Checks (the same as CI)
+
+```sh
 npm run type-check && npm run lint && npm run format:check && npm test
 cd src-tauri && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
