@@ -567,6 +567,10 @@ export default function PlotterWindow() {
               <li>
                 <strong>Labeled values:</strong> <code>temp:25.5,humidity:60,state:RUNNING</code>
               </li>
+              <li>
+                <strong>Name=value pairs:</strong> <code>V=30.58 I=0.82 age=11ms</code> or{' '}
+                <code>temp 25.5 hum 60</code>
+              </li>
             </ul>
           </div>
         )}

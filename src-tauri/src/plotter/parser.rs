@@ -4,7 +4,8 @@
 // - Single values: `123.45\r\n`
 // - CSV format: `10,20,30\r\n`
 // - Tab/space separated: `10\t20\t30\r\n`
-// - Labeled values: `temp:25.5,humidity:60\r\n`
+// - Labeled values: `temp:25.5,humidity:60\r\n`, `V=30.58 I=0.8\r\n`,
+//   `temp = 25 hum: 60\r\n`, `temp 25.5 hum 60\r\n` (see `parse_line`)
 // - Header detection: first line with all non-numeric values
 // - State values: `state:RUNNING\r\n`
 
@@ -218,11 +219,16 @@ impl PlotterParser {
         // banner like "Boot OK") from permanently locking in the wrong
         // separator for all subsequent data.
         let separator = self.detect_separator(line);
+        let whitespace_mode = separator == ' ';
 
         // For space separation, collapse runs of spaces (printf-style aligned
         // output) instead of producing empty parts that shift column indices.
-        let parts: Vec<&str> = if separator == ' ' {
-            line.split_whitespace().collect()
+        // A joiner with spaces around it ("temp = 25", "temp: 25") is closed up
+        // first so the pair stays one token.
+        let closed_up;
+        let parts: Vec<&str> = if whitespace_mode {
+            closed_up = close_up_joiners(line);
+            closed_up.split_whitespace().collect()
         } else {
             line.split(separator).map(|s| s.trim()).collect()
         };
@@ -246,27 +252,60 @@ impl PlotterParser {
             return None; // Don't return data point for header
         }
 
-        // Parse values
+        // Classify every field: a named pair ("name=value" / "name:value") or a
+        // bare token. A pair whose value is empty or unusable ("key=",
+        // "I=0.825/0.797") is dropped outright: it must not fall back to a
+        // positional State channel such as "ch3 = key=".
+        let mut fields: Vec<Field> = parts
+            .iter()
+            .map(|part| match split_pair(part) {
+                Some((name, value)) => match classify_value(value) {
+                    Some(v) => Field::Pair(name.to_string(), v),
+                    None => Field::Dropped,
+                },
+                None => Field::Bare(part),
+            })
+            .collect();
+
+        // Space as the joiner ("temp 25.5 hum 60"): only in whitespace mode,
+        // only without an adopted header (its labels name the columns), and only
+        // when EVERY bare number directly follows a bare word - otherwise the line
+        // is positional as before ("RUNNING 25.5 60", "25.5 60 RUNNING").
+        if whitespace_mode && !self.header_detected {
+            pair_words_with_numbers(&mut fields);
+        }
+
+        // In a whitespace line with named pairs, leftover bare words are prose or
+        // decoration ("[Mon", "occurred"), not a column of states.
+        let has_pairs = fields.iter().any(|f| matches!(f, Field::Pair(..)));
+        let drop_bare_words = whitespace_mode && has_pairs;
+
         let mut channels = HashMap::new();
         let mut channel_order = Vec::new();
 
-        for (i, part) in parts.iter().enumerate() {
-            // Check for labeled value (label:value format)
-            if let Some((label, value)) = self.parse_labeled_value(part) {
-                channels.insert(label.clone(), value);
-                channel_order.push(label);
-            } else {
-                // Auto-generate label
-                let label = if i < self.labels.len() {
-                    self.labels[i].clone()
-                } else {
-                    format!("ch{}", i)
-                };
-
-                if let Some(value) = self.parse_value(part) {
+        for (i, field) in fields.into_iter().enumerate() {
+            match field {
+                Field::Pair(label, value) => {
                     channels.insert(label.clone(), value);
                     channel_order.push(label);
                 }
+                Field::Bare(part) => {
+                    let Some(value) = classify_value(part) else {
+                        continue;
+                    };
+                    if drop_bare_words && !matches!(value, ChannelValue::Numeric(_)) {
+                        continue;
+                    }
+                    // Auto-generate label
+                    let label = if i < self.labels.len() {
+                        self.labels[i].clone()
+                    } else {
+                        format!("ch{}", i)
+                    };
+                    channels.insert(label.clone(), value);
+                    channel_order.push(label);
+                }
+                Field::Dropped => {}
             }
         }
 
@@ -308,8 +347,8 @@ impl PlotterParser {
             return false;
         }
 
-        // If any part contains ':', it's a labeled value line, not a header
-        if parts.iter().any(|part| part.contains(':')) {
+        // If any part contains ':' or '=', it's a labeled value line, not a header
+        if parts.iter().any(|part| part.contains([':', '='])) {
             return false;
         }
 
@@ -319,44 +358,130 @@ impl PlotterParser {
             !trimmed.is_empty() && trimmed.parse::<f64>().is_err()
         })
     }
+}
 
-    /// Parse a labeled value (label:value format)
-    fn parse_labeled_value(&self, s: &str) -> Option<(String, ChannelValue)> {
-        let parts: Vec<&str> = s.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return None;
+/// One field of a line, before labels are assigned
+enum Field<'a> {
+    /// "name=value" / "name:value" (or a word followed by a number)
+    Pair(String, ChannelValue),
+    /// A token without a joiner (labelled by its column)
+    Bare(&'a str),
+    /// A pair whose value is empty or unusable
+    Dropped,
+}
+
+/// Whether `s` can be a channel name: it starts with a letter (any script, so
+/// "温度" works) or '_'. This keeps a time of day ("12:34:56") or "3:5" from
+/// being read as name and value.
+fn is_name(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+}
+
+/// Split "name=value" / "name:value" at the first '=' or ':'. None when there is
+/// no joiner or the part before it is not a name.
+fn split_pair(field: &str) -> Option<(&str, &str)> {
+    let at = field.find(['=', ':'])?;
+    let name = field[..at].trim();
+    is_name(name).then(|| (name, field[at + 1..].trim()))
+}
+
+/// Remove the whitespace around '=' and ':' so "temp = 25" and "temp: 25"
+/// survive the whitespace split as one token.
+fn close_up_joiners(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut after_joiner = false;
+    for c in line.chars() {
+        if c == '=' || c == ':' {
+            let kept = out.trim_end().len();
+            out.truncate(kept);
+            out.push(c);
+            after_joiner = true;
+        } else if after_joiner && c.is_whitespace() {
+            // skip
+        } else {
+            out.push(c);
+            after_joiner = false;
         }
-
-        let label = parts[0].trim().to_string();
-        let value_str = parts[1].trim();
-
-        if label.is_empty() {
-            return None;
-        }
-
-        let value = self.parse_value(value_str)?;
-        Some((label, value))
     }
+    out
+}
 
-    /// Parse a value as numeric or state
-    fn parse_value(&self, s: &str) -> Option<ChannelValue> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return None;
+/// Pair "word number" in place when every bare number in the line directly
+/// follows a bare word (see `parse_line`). Leaves the fields unchanged otherwise.
+fn pair_words_with_numbers(fields: &mut Vec<Field>) {
+    let is_number = |f: &Field| matches!(f, Field::Bare(t) if matches!(classify_value(t), Some(ChannelValue::Numeric(_))));
+    let is_word = |f: &Field| matches!(f, Field::Bare(t) if is_name(t));
+
+    let numbers: Vec<usize> = (0..fields.len())
+        .filter(|&i| is_number(&fields[i]))
+        .collect();
+    if numbers.is_empty() || numbers.iter().any(|&i| i == 0 || !is_word(&fields[i - 1])) {
+        return;
+    }
+    for &i in numbers.iter().rev() {
+        let (Field::Bare(word), Field::Bare(num)) = (&fields[i - 1], &fields[i]) else {
+            continue;
+        };
+        let Some(value) = classify_value(num) else {
+            continue;
+        };
+        fields[i - 1] = Field::Pair(word.to_string(), value);
+        fields.remove(i);
+    }
+}
+
+/// Longest unit suffix accepted after a number ("ms", "V", "%", "dB", "]")
+const MAX_UNIT_CHARS: usize = 4;
+
+/// Interpret a value:
+/// - a finite number → Numeric
+/// - starting with a letter ("RUN", "MODE2", "NaN") → State
+/// - a number followed by a short unit without digits ("11ms", "3.3V", "100%",
+///   "2916094]") → Numeric, unit dropped
+/// - anything else that is neither ("0.825/0.797", "1/1", "12:34:56", "-inf")
+///   → None: as a State it would be a new value on every line, filling the
+///   state timeline with noise
+fn classify_value(s: &str) -> Option<ChannelValue> {
+    let s = s.trim();
+    let first = s.chars().next()?;
+    if let Ok(num) = s.parse::<f64>() {
+        if num.is_finite() {
+            return Some(ChannelValue::Numeric(num));
         }
-
-        // Try parsing as number
-        if let Ok(num) = trimmed.parse::<f64>() {
-            // Only accept finite numbers as Numeric
-            if num.is_finite() {
-                return Some(ChannelValue::Numeric(num));
+    }
+    // A joiner left inside a value ("accel:0.049", "a=b") means the field
+    // was not one name/value pair: neither a state nor a number
+    if s.contains(['=', ':']) {
+        return None;
+    }
+    if first.is_alphabetic() || first == '_' {
+        return Some(ChannelValue::State(s.to_string()));
+    }
+    // Number + unit: try the split points from the longest number down
+    let unit_ok = |u: &str| {
+        u.chars().count() <= MAX_UNIT_CHARS
+            && !u
+                .chars()
+                .any(|c| c.is_ascii_digit() || c == '=' || c == ':')
+    };
+    for (at, _) in s.char_indices().rev().filter(|&(i, _)| i > 0) {
+        let (num, unit) = s.split_at(at);
+        if !unit_ok(unit) {
+            // A longer unit only gets longer: no shorter number can work
+            if unit.chars().count() > MAX_UNIT_CHARS {
+                break;
             }
-            // Non-finite (NaN, Infinity) fall through to State
+            continue;
         }
-
-        // Treat as state value
-        Some(ChannelValue::State(trimmed.to_string()))
+        if let Ok(v) = num.parse::<f64>() {
+            if v.is_finite() {
+                return Some(ChannelValue::Numeric(v));
+            }
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -1070,6 +1195,10 @@ mod tests {
     /// (Japanese) names so that chunk boundaries can land mid-character.
     const LABEL_POOL: &[&str] = &["temp", "humidity", "rpm", "温度", "湿度", "モータ"];
 
+    /// Name/value joiners and pair separators the parser accepts
+    const JOINERS: &[&str] = &[":", "=", " = ", ": ", " :"];
+    const SEPARATORS: &[&str] = &[",", " ", "\t", ", ", "  "];
+
     /// State words emitted as bare lines or as labeled values (ASCII + Japanese).
     const STATE_POOL: &[&str] = &["RUNNING", "STOPPED", "OK", "ERROR", "運転中", "停止"];
 
@@ -1103,6 +1232,19 @@ mod tests {
                     .map(|(l, v)| format!("{}:{}", l, v))
                     .collect::<Vec<_>>()
                     .join(",")),
+            // Labeled row with any joiner and separator (`V=30.58 I=0.8`, `a = 1\tb: 2`)
+            3 => (
+                prop::collection::vec(
+                    (prop::sample::select(LABEL_POOL), prop::sample::select(JOINERS), value_token()),
+                    1..=4,
+                ),
+                prop::sample::select(SEPARATORS),
+            )
+                .prop_map(|(pairs, sep)| pairs
+                    .into_iter()
+                    .map(|(l, j, v)| format!("{}{}{}", l, j, v))
+                    .collect::<Vec<_>>()
+                    .join(sep)),
             // Bare state word (banner / status line)
             2 => prop::sample::select(STATE_POOL).prop_map(|s| s.to_string()),
             // Junk text: any short valid-UTF-8 run with no line endings
@@ -1181,6 +1323,46 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        /// P4 - named pairs in any joiner/separator style come back exactly:
+        /// every pair becomes its name (in order) with its value, numbers with a
+        /// unit suffix keep their number, and no other channel appears.
+        #[test]
+        fn prop_named_pairs_roundtrip(
+            pairs in prop::collection::vec(
+                (
+                    prop::sample::select(LABEL_POOL),
+                    prop::sample::select(JOINERS),
+                    -1.0e6f64..1.0e6f64,
+                    0usize..=3,
+                    prop::sample::select(&["", "ms", "V", "%", "dB", "]"][..]),
+                ),
+                1..=5,
+            ),
+            sep in prop::sample::select(SEPARATORS),
+        ) {
+            let fields: Vec<String> = pairs
+                .iter()
+                .map(|(l, j, v, p, unit)| format!("{}{}{:.*}{}", l, j, p, v, unit))
+                .collect();
+            let line = format!("{}\n", fields.join(sep));
+
+            let mut parser = PlotterParser::new();
+            let points = parser.parse(line.as_bytes(), PROP_TS);
+
+            prop_assert_eq!(points.len(), 1, "line {:?}", line);
+            let want_names: Vec<String> = pairs.iter().map(|(l, ..)| l.to_string()).collect();
+            prop_assert_eq!(&points[0].channel_order, &want_names, "line {:?}", line);
+            // With duplicate names the last value wins (HashMap insert)
+            if let Some((l, _, v, p, _)) = pairs.last() {
+                let want = format!("{:.*}", p, v).parse::<f64>().unwrap();
+                if let Some(ChannelValue::Numeric(got)) = points[0].channels.get(*l) {
+                    prop_assert_eq!(*got, want, "{} in {:?}", l, line);
+                } else {
+                    prop_assert!(false, "{} not numeric in {:?}", l, line);
+                }
+            }
+        }
 
         /// P1 - THE key property: chunking invariance.
         ///
@@ -1399,5 +1581,187 @@ mod tests {
         parser.begin_untrusted_segment();
         let points = parser.parse(b"cos:accel:0.049,temp:24\n1,2\n", 0);
         assert_eq!(names(&points), vec!["ch0", "ch1"]);
+    }
+
+    // ---- Flexible name/value recognition (owner request after issue #3's data) ----
+
+    fn parse_one(line: &str) -> Option<ParsedDataPoint> {
+        let mut parser = PlotterParser::new();
+        let mut points = parser.parse(format!("{}\n", line).as_bytes(), 0);
+        assert!(points.len() <= 1);
+        points.pop()
+    }
+
+    fn num(p: &ParsedDataPoint, name: &str) -> Option<f64> {
+        match p.channels.get(name) {
+            Some(ChannelValue::Numeric(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// The tester's firmware line: `name=value` pairs separated by spaces
+    #[test]
+    fn test_equals_pairs_from_real_firmware() {
+        let line = "[Mon t=2916094] V=30.58 Vdc=12.37 I=0.825/0.797 ph=49.5/1 M=0.86996 \
+                    phi=-1.35 pll=49.9996 pe=-3.2 r=1/1 age=11ms rdy=1 cap=4084 md=687 sd=23";
+        let p = parse_one(line).unwrap();
+        assert_eq!(
+            p.channel_order,
+            vec!["t", "V", "Vdc", "M", "phi", "pll", "pe", "age", "rdy", "cap", "md", "sd"]
+        );
+        assert_eq!(num(&p, "t"), Some(2916094.0));
+        assert_eq!(num(&p, "V"), Some(30.58));
+        assert_eq!(num(&p, "phi"), Some(-1.35));
+        assert_eq!(num(&p, "age"), Some(11.0));
+        // "0.825/0.797" etc. are neither numbers nor states; "[Mon" is decoration
+        for gone in ["I", "ph", "r", "ch0", "[Mon"] {
+            assert!(!p.channels.contains_key(gone), "{gone}");
+        }
+    }
+
+    /// ...and as the first line it is data, not a header (also when untrusted)
+    #[test]
+    fn test_equals_line_is_never_a_header() {
+        let mut parser = PlotterParser::new();
+        let points = parser.parse(b"a=x b=y\n", 0);
+        assert_eq!(names(&points), vec!["a", "b"]);
+
+        let mut parser = PlotterParser::new();
+        parser.begin_untrusted_segment();
+        let points = parser.parse(b"V=1 I=2\n1,2\n", 0);
+        assert_eq!(names(&points), vec!["ch0", "ch1"]);
+    }
+
+    #[test]
+    fn test_joiners_with_spaces() {
+        for line in [
+            "temp = 25 hum = 60",
+            "temp: 25 hum: 60",
+            "temp =25 hum= 60",
+            "temp = 25, hum = 60",
+            "temp=25\thum:60",
+            "temp 25 hum 60",
+        ] {
+            let p = parse_one(line).unwrap();
+            assert_eq!(p.channel_order, vec!["temp", "hum"], "{line}");
+            assert_eq!(num(&p, "temp"), Some(25.0), "{line}");
+            assert_eq!(num(&p, "hum"), Some(60.0), "{line}");
+        }
+    }
+
+    #[test]
+    fn test_units_after_pairs_are_dropped() {
+        let p = parse_one("Temp: 25.3 C Hum: 60 %").unwrap();
+        assert_eq!(p.channel_order, vec!["Temp", "Hum"]);
+        assert_eq!(num(&p, "Temp"), Some(25.3));
+    }
+
+    #[test]
+    fn test_time_of_day_is_not_a_pair() {
+        for line in ["12:34:56 temp=25", "[12:34:56] temp=25"] {
+            let p = parse_one(line).unwrap();
+            assert_eq!(p.channel_order, vec!["temp"], "{line}");
+        }
+        assert!(parse_one("t=12:34:56").is_none());
+    }
+
+    #[test]
+    fn test_value_classification() {
+        let n = |s: &str| classify_value(s);
+        for (s, v) in [
+            ("11ms", 11.0),
+            ("3.3V", 3.3),
+            ("100%", 100.0),
+            ("-3.2dB", -3.2),
+            ("2916094]", 2916094.0),
+            ("1e3", 1000.0),
+        ] {
+            assert_eq!(n(s), Some(ChannelValue::Numeric(v)), "{s}");
+        }
+        for s in ["RUN", "MODE2", "E01", "NaN", "運転中"] {
+            assert_eq!(n(s), Some(ChannelValue::State(s.to_string())), "{s}");
+        }
+        for s in [
+            "0.825/0.797",
+            "1/1",
+            "0x1F",
+            "-inf",
+            "12:34:56",
+            "",
+            "[Mon",
+            "accel:0.049",
+        ] {
+            assert_eq!(n(s), None, "{s}");
+        }
+    }
+
+    /// `key=` with no value disappears; it does not become a positional State
+    #[test]
+    fn test_empty_values_are_dropped() {
+        // (a value-less "k=" directly before another pair is closed up into it:
+        // "k= x=1" reads as k = "x=1", which is dropped as well)
+        for line in ["x=1 k=", "x=1 k:", "k=,x=1"] {
+            let p = parse_one(line).unwrap();
+            assert_eq!(p.channel_order, vec!["x"], "{line}");
+        }
+        assert!(parse_one("k=").is_none());
+    }
+
+    /// Space joiner only when every bare number follows a word
+    #[test]
+    fn test_space_joiner_guards() {
+        let p = parse_one("25.5 60 RUNNING").unwrap();
+        assert_eq!(p.channel_order, vec!["ch0", "ch1", "ch2"]);
+        assert_eq!(
+            p.channels.get("ch2"),
+            Some(&ChannelValue::State("RUNNING".into()))
+        );
+
+        let p = parse_one("RUNNING 25.5 60").unwrap();
+        assert_eq!(p.channel_order, vec!["ch0", "ch1", "ch2"]);
+
+        // With a header the columns are named by it
+        let mut parser = PlotterParser::new();
+        let points = parser.parse(b"state temp hum\nON 25.5 60\n", 0);
+        assert_eq!(points[0].channel_order, vec!["state", "temp", "hum"]);
+        assert_eq!(
+            points[0].channels.get("state"),
+            Some(&ChannelValue::State("ON".into()))
+        );
+
+        // Prose: the number is named by the word before it, the rest is dropped
+        let p = parse_one("Error 5 occurred").unwrap();
+        assert_eq!(p.channel_order, vec!["Error"]);
+        assert_eq!(num(&p, "Error"), Some(5.0));
+    }
+
+    /// In comma/tab lines a bare word stays a positional state column
+    #[test]
+    fn test_bare_state_column_kept_in_csv() {
+        let p = parse_one("temp:25.5,RUNNING").unwrap();
+        assert_eq!(p.channel_order, vec!["temp", "ch1"]);
+        assert_eq!(
+            p.channels.get("ch1"),
+            Some(&ChannelValue::State("RUNNING".into()))
+        );
+    }
+
+    #[test]
+    fn test_header_rules() {
+        let mut parser = PlotterParser::new();
+        assert!(parser.parse(b"a,b,c\n", 0).is_empty()); // header
+        let mut parser = PlotterParser::new();
+        assert!(parser.parse(b"temp hum\n", 0).is_empty()); // header
+        let mut parser = PlotterParser::new();
+        assert_eq!(names(&parser.parse(b"a=1,b=2\n", 0)), vec!["a", "b"]);
+    }
+
+    /// Names start with a letter (any script) or '_'
+    #[test]
+    fn test_name_rule() {
+        assert_eq!(parse_one("温度=25").unwrap().channel_order, vec!["温度"]);
+        assert_eq!(parse_one("_x=1").unwrap().channel_order, vec!["_x"]);
+        // A digit-first label is not a name: the field is not a pair
+        assert!(parse_one("3V3=3.3").is_none());
     }
 }
