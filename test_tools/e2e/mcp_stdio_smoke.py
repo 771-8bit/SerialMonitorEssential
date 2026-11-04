@@ -9,7 +9,7 @@
   未知メソッド(-32601) / stdin EOF でのクリーン終了
 
 「ブリッジ未起動」を決定的にするため、子プロセスには未使用ポートを
-SME_BRIDGE_PORT で渡す（開発機でアプリが AI Bridge を ON にしていても
+SME_BRIDGE_PORT で渡す（開発機でアプリが MCP Server を ON にしていても
 結果が変わらない）。
 
 使い方:
@@ -112,14 +112,14 @@ def main() -> int:
         check("tools/list", names == expected and shapes_ok,
               f"tools={len(tools)} names={names}")
 
-        # 4. ブリッジ未起動 -> isError の友好的メッセージ（日英併記）
+        # 4. ブリッジ未起動 -> isError の友好的メッセージ（英語）
         send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
               "params": {"name": "serial_status", "arguments": {}}})
         res = recv()
         r = res.get("result", {})
         text = r.get("content", [{}])[0].get("text", "")
         check("bridge-off-friendly-error",
-              r.get("isError") is True and "AI Bridge" in text and "Cannot reach" in text,
+              r.get("isError") is True and "MCP Server" in text and "Cannot reach" in text,
               f"len={len(text)}")
 
         # 5. 未知ツール -> プロトコルエラー -32602

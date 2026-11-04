@@ -3,7 +3,7 @@
 Real-UART tests using a single FT232H breakout (FTDI `VID_0403 PID_6014`, max 12 Mbaud)
 with **D0 (TX) jumpered to D1 (RX)**. Unlike com0com and USB-CDC (Pico), the baud rate
 is real here, so this jig is used to measure line-rate reception (SYS-NF-101) and the
-AI Bridge index under load (DEBT-9).
+bridge index (MCP Server on) under load (DEBT-9).
 
 Results and interpretation: [docs/24 §6.5](../../docs/24_vv_plan.md) "T2-5b" (Japanese).
 
@@ -19,14 +19,16 @@ Results and interpretation: [docs/24 §6.5](../../docs/24_vv_plan.md) "T2-5b" (J
 | File | What it measures | App needed |
 |---|---|---|
 | `loopback_baseline.py` | Transport oracle: pyserial writes and reads the same port; SHA-256 of TX vs RX and throughput vs. the 8N1 theoretical rate. `--sweep` checks that the baud setting actually takes effect | No (the port must be free) |
-| `app_loopback.py` | App path: streams deterministic text lines through the AI Bridge `send`, reads the capture back with `read_range`, compares SHA-256, and samples `digest.meta.index_lag_bytes` every second | Yes (connected, AI Bridge ON) |
-| `run_app_loopback.ps1` | Runs the above end to end (launch → UIA: AI Bridge ON, port, baud, Connect → test → close) | Auto-launched |
+| `app_loopback.py` | App path: streams deterministic text lines through the bridge `send`, reads the capture back with `read_range`, compares SHA-256, and samples `digest.meta.index_lag_bytes` every second | Yes (connected, MCP Server ON) |
+| `run_app_loopback.ps1` | Runs the above end to end (launch → UIA: MCP Server ON, port, baud, Connect → test → close) | Auto-launched |
+| `reconnect_check.py` | Auto Reconnect (SYS-F-807): sends a numbered line every 200 ms while **you unplug and replug the cable**, then checks that the app reconnected, reported `status.reconnecting`, never rewound `total_bytes`, and kept the lines from before the unplug | Yes (connected, MCP Server and Auto Reconnect ON) |
 
 ```powershell
 python .\loopback_baseline.py --port COM5 --sweep
 python .\loopback_baseline.py --port COM5 --baud 12000000 --seconds 60
 python .\loopback_baseline.py --port COM5 --baud 12000000 --seconds 60 --rtscts   # needs D2-D3
 .\run_app_loopback.ps1 -Port COM5 -Baud 12000000 -Seconds 60 -SendSize 4096
+python .\reconnect_check.py --seconds 300   # unplug and replug the cable while it runs
 ```
 
 ## Caveats

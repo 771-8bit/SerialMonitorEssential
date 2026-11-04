@@ -17,6 +17,7 @@ import {
   LINE_ENDINGS,
   MIN_MAX_CHARS,
   collapseRepeatedLines,
+  connectedLabel,
   decodeBase64,
   headBytesWithinCharBudget,
   hexDump,
@@ -556,9 +557,9 @@ async function testBridgeAbsent() {
     error !== null &&
       error.name === 'BridgeError' &&
       elapsed < 2000 &&
-      error.message.includes('AI Bridge') &&
+      error.message.includes('MCP Server') &&
       error.message.includes('SerialMonitorEssential') &&
-      /接続できません/.test(error.message),
+      /Cannot reach/.test(error.message),
     `elapsed_ms=${elapsed} first_line=${error ? error.message.split('\n')[0] : 'no error'}`
   );
 }
@@ -568,6 +569,16 @@ async function testBridgeAbsent() {
  * The Rust adapter is the shipped implementation and carries the full test set;
  * these keep the reference implementation honest about the same contract.
  */
+function testConnectedLabel() {
+  check(
+    'status shows a pending reconnect so the agent knows to wait',
+    connectedLabel({ connected: true }) === 'yes' &&
+      connectedLabel({ connected: false }) === 'no' &&
+      connectedLabel({ connected: false, reconnecting: true }).startsWith('no (device went away;'),
+    connectedLabel({ connected: false, reconnecting: true })
+  );
+}
+
 function testRenderBudget() {
   const ascii = Buffer.alloc(40000, 0x41);
   const binary = Buffer.from(Array.from({ length: 40000 }, (_, i) => i % 251));
@@ -677,6 +688,7 @@ async function run() {
   await testAuth();
   await testBridgeAbsent();
   testRenderBudget();
+  testConnectedLabel();
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) FAILED`);

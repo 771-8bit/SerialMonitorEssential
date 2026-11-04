@@ -1,4 +1,4 @@
-//! AI Bridge - ローカル専用 NDJSON TCP サーバ (protocol v1)
+//! ブリッジ（設定画面の表示名は「MCP Server」）- ローカル専用 NDJSON TCP サーバ (protocol v1)
 //!
 //! OS のシリアルポートは排他オープンなので、アプリが動いている間は外部ツール
 //! （AI エージェント等）が同じ COM ポートを開けない。本モジュールはアプリ自身を
@@ -31,7 +31,7 @@
 //! |--------|--------|--------|
 //! | `help` | - | プロトコル仕様（機械可読・認証不要） |
 //! | `auth` | `{token}` | `{authenticated: true}` |
-//! | `status` | - | `{connected, port_name, total_bytes, app_version, protocol}` |
+//! | `status` | - | `{connected, reconnecting, port_name, total_bytes, app_version, protocol}` |
 //! | `read_range` | `{offset: u64, length: u32}` | `{base64, offset, length_read}` |
 //! | `tail` | `{bytes: u32}` | `{base64, offset, total_bytes}` |
 //! | `subscribe` | `{from_offset: u64?}` | `{subscribed: true, from_offset}` |
@@ -152,6 +152,8 @@ pub struct BridgeCtx {
     /// 導出情報の索引。**ブリッジの所有物**であり、GUI の窓の開閉に依存しない
     /// （docs/26 §2.2）
     pub index: Arc<crate::insight::InsightIndex>,
+    /// 自動再接続の待機中か（`SerialState::reconnecting` と共有）
+    pub reconnecting: Arc<AtomicBool>,
     emit: EmitFn,
 }
 
@@ -170,8 +172,15 @@ impl BridgeCtx {
             token,
             activity,
             index,
+            reconnecting: Arc::new(AtomicBool::new(false)),
             emit,
         }
+    }
+
+    /// 自動再接続の待機フラグを GUI の状態と共有する
+    pub fn with_reconnecting(mut self, reconnecting: Arc<AtomicBool>) -> Self {
+        self.reconnecting = reconnecting;
+        self
     }
 
     /// 現在の DataStore を解決する（毎回解決: 世代が差し替わるため）
@@ -453,7 +462,7 @@ pub fn handle_request(req: &Request, ctx: &BridgeCtx, session: &mut Session) -> 
 /// 使い方を自己取得できるようにする（認証不要・データ非含有）。
 fn method_help() -> Value {
     json!({
-        "name": "serial-monitor-essential AI Bridge",
+        "name": "serial-monitor-essential bridge",
         "protocol": PROTOCOL_VERSION,
         "app_version": env!("CARGO_PKG_VERSION"),
         "transport": "NDJSON over TCP (127.0.0.1 only). One JSON object per line. Request: {\"id\":n,\"method\":\"...\",\"params\":{...}}. Response: {\"id\":n,\"ok\":true,\"result\":{...}} or {\"id\":n,\"ok\":false,\"error\":\"...\"}.",
@@ -461,7 +470,7 @@ fn method_help() -> Value {
         "methods": {
             "help": { "params": {}, "result": "this document" },
             "auth": { "params": { "token": "string" }, "result": { "authenticated": true } },
-            "status": { "params": {}, "result": { "connected": "bool", "port_name": "string|null", "total_bytes": "u64", "app_version": "string", "protocol": "u32" } },
+            "status": { "params": {}, "result": { "connected": "bool", "reconnecting": "bool (the device went away and the app reopens it when it returns; the capture continues at the same offsets, no reset)", "port_name": "string|null", "total_bytes": "u64", "app_version": "string", "protocol": "u32" } },
             "read_range": { "params": { "offset": "u64", "length": "u32 (clamped to 1 MiB and to available bytes)" }, "result": { "base64": "string", "offset": "u64", "length_read": "u32" } },
             "tail": { "params": { "bytes": "u32 (default 4096, max 1 MiB)" }, "result": { "base64": "string", "offset": "u64 (stream offset of the returned data)", "total_bytes": "u64" } },
             "send": { "params": "either {text, line_ending: none|cr|lf|crlf} or {base64}", "result": { "bytes_written": "usize", "offset_before": "u64 (stream offset when the app started writing; pass it to wait_for as 'from' to catch a reply that lands immediately)" }, "note": "writes to the port the app has open; every send is shown to the human in the GUI. Reception keeps running while it writes. With hardware flow control the peer may throttle, so a large send can take long; it fails only if no byte is accepted for 3 s (the error says how many bytes went out). Do not resend on your own timeout: the bytes may already be on the wire." },
@@ -500,6 +509,8 @@ fn method_status(ctx: &BridgeCtx) -> Value {
 
     json!({
         "connected": connected,
+        // デバイスが消え、戻ったら同じキャプチャに続けて受信する待機中
+        "reconnecting": !connected && ctx.reconnecting.load(Ordering::Relaxed),
         "port_name": port_name,
         "total_bytes": total_bytes,
         "app_version": env!("CARGO_PKG_VERSION"),
@@ -760,7 +771,7 @@ fn index_health_lines(snap: &crate::insight::index::Snapshot) -> Vec<String> {
     use crate::insight::render::{commas, human_bytes};
     let mut notes = Vec::new();
     if !snap.running {
-        notes.push("not running (turn on AI Bridge to index)".to_string());
+        notes.push("not running (turn on MCP Server to index)".to_string());
     }
     if !snap.looks_line_oriented() {
         // テンプレートと行数はこの場合まったく意味を持たない。数字だけ並べると
@@ -2414,18 +2425,21 @@ pub fn bridge_set(
     }
 
     let app_handle = app.clone();
-    let ctx = Arc::new(BridgeCtx::new(
-        serial.data_store.clone(),
-        serial.port.clone(),
-        config.token.clone(),
-        state.activity.clone(),
-        state.index.clone(),
-        Box::new(move |event: BridgeActivityEvent| {
-            if let Err(e) = app_handle.emit("bridge-activity", event) {
-                log::warn!("[bridge] Failed to emit bridge-activity: {}", e);
-            }
-        }),
-    ));
+    let ctx = Arc::new(
+        BridgeCtx::new(
+            serial.data_store.clone(),
+            serial.port.clone(),
+            config.token.clone(),
+            state.activity.clone(),
+            state.index.clone(),
+            Box::new(move |event: BridgeActivityEvent| {
+                if let Err(e) = app_handle.emit("bridge-activity", event) {
+                    log::warn!("[bridge] Failed to emit bridge-activity: {}", e);
+                }
+            }),
+        )
+        .with_reconnecting(serial.reconnecting.clone()),
+    );
 
     // 待ち受けが立ってから索引を起動する。listener の bind に失敗したときに
     // 索引だけが動き続けると、ブリッジ OFF なのに CPU とメモリを払うことになる
@@ -2593,6 +2607,22 @@ mod tests {
         assert_eq!(result["total_bytes"], json!(0));
         assert_eq!(result["protocol"], json!(PROTOCOL_VERSION));
         assert_eq!(result["app_version"], json!(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// 自動再接続の待機中は `reconnecting: true`（GUI と同じフラグを見る）。
+    /// 待機していなければ false
+    #[test]
+    fn test_status_reports_reconnecting() {
+        let (ctx, _) = test_ctx(Some(store_with(b"boot")), None);
+        assert_eq!(
+            result_of(call(&ctx, "status", json!({})))["reconnecting"],
+            json!(false)
+        );
+        ctx.reconnecting.store(true, Ordering::Relaxed);
+        let result = result_of(call(&ctx, "status", json!({})));
+        assert_eq!(result["reconnecting"], json!(true));
+        assert_eq!(result["connected"], json!(false));
+        assert_eq!(result["total_bytes"], json!(4));
     }
 
     #[test]

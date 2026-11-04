@@ -71,7 +71,7 @@ cargo build --release   # release is recommended for E2E (no DEV debug overlay)
 | `pairwise_run.ps1` / `pairwise_run2.ps1` | Apply each row of the covering array via UIA and check a health oracle (process alive, no panics in the log, window state) | Required | Required | No |
 | `mcp_stdio_smoke.py` | **Smoke test for the built-in MCP adapter (`--mcp`)**. JSON-RPC over a real pipe (initialize / ping / tools / error cases / clean shutdown). Uses an isolated port to make the bridge-not-running case deterministic | Not needed | Not needed | **Wired in** |
 | `pong_bot.py` | Responder bot on COM15 that replies `PONG 42` to `PING` | Not needed | Required | No |
-| `mcp_bridge_live.py` | **Live round-trip verification of the AI Bridge** (status / send→wait_for / read_tail / prompt ping response while blocked / cancelled interruption) | Required (started separately) | Required | No |
+| `mcp_bridge_live.py` | **Live round-trip verification of the bridge (MCP Server)** (status / send→wait_for / read_tail / prompt ping response while blocked / cancelled interruption) | Required (started separately) | Required | No |
 | `run_bridge_e2e.ps1` | **Runs the three above in one command** (launch → UIA setup → round-trip verification → cleanup) | Auto-launched | Required | No |
 
 ## Usage
@@ -80,7 +80,7 @@ cargo build --release   # release is recommended for E2E (no DEV debug overlay)
 # --- Same smoke test as CI (no GUI needed) ---
 python .\mcp_stdio_smoke.py
 
-# --- Full AI Bridge E2E (scripted version of GAP-31) ---
+# --- Full MCP Server E2E (scripted version of GAP-31) ---
 .\run_bridge_e2e.ps1                 # auto-detects the release binary, COM15/COM16
 
 # --- Individual UIA actions ---

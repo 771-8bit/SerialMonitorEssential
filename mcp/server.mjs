@@ -73,10 +73,8 @@ export class BridgeError extends Error {
 
 function unreachableMessage(host, port, detail) {
   const lines = [
-    `シリアルブリッジに接続できません (${host}:${port})。`,
-    'SerialMonitorEssential を起動し、設定画面で「AI Bridge」を ON にしてください。',
     `Cannot reach the SerialMonitorEssential bridge at ${host}:${port}.`,
-    'Start the app and turn on "AI Bridge" in its settings.',
+    'Start the app and turn on "MCP Server" in its settings.',
   ];
   if (detail) lines.push(`(${detail})`);
   return lines.join('\n');
@@ -84,27 +82,31 @@ function unreachableMessage(host, port, detail) {
 
 function connectionLostMessage(host, port, detail) {
   const lines = [
-    `シリアルブリッジとの接続が切れました (${host}:${port})。`,
-    'アプリが終了したか、設定の「AI Bridge」が OFF になった可能性があります。',
     `Lost the connection to the SerialMonitorEssential bridge at ${host}:${port}.`,
-    'The app may have quit, or "AI Bridge" may have been turned off.',
+    'The app may have quit, or "MCP Server" may have been turned off.',
   ];
   if (detail) lines.push(`(${detail})`);
   return lines.join('\n');
 }
 
 function timeoutMessage(method, ms) {
-  return [
-    `ブリッジへの要求がタイムアウトしました (method=${method}, ${ms}ms)。`,
-    `The bridge did not answer in time (method=${method}, ${ms}ms).`,
-  ].join('\n');
+  return `The bridge did not answer in time (method=${method}, ${ms}ms).`;
+}
+
+/**
+ * Connection state for serial_status. While waiting for an automatic reconnect, say that
+ * the capture will continue, so the agent knows to wait (same wording as the Rust adapter).
+ */
+export function connectedLabel(res) {
+  if (res.connected === true) return 'yes';
+  if (res.reconnecting === true) {
+    return 'no (device went away; the app reconnects when it returns and the capture continues at the same offsets)';
+  }
+  return 'no';
 }
 
 function bridgeReturnedError(method, error) {
-  return [
-    `ブリッジがエラーを返しました (method=${method}): ${error}`,
-    `The bridge returned an error (method=${method}): ${error}`,
-  ].join('\n');
+  return `The bridge returned an error (method=${method}): ${error}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -122,7 +124,7 @@ export function optionsFromEnv(env = process.env) {
 }
 
 /**
- * One lazy TCP connection to the app's AI Bridge.
+ * One lazy TCP connection to the app's bridge (the "MCP Server" setting).
  * Sequential NDJSON request/response, per-request id, per-request timeout,
  * automatic reconnect after a transport level failure.
  */
@@ -680,16 +682,16 @@ export function parseHex(input) {
     .replace(/0x/gi, '')
     .replace(/[\s,:;_-]/g, '');
   if (cleaned.length === 0) {
-    throw new Error('hex が空です / hex string is empty');
+    throw new Error('hex string is empty');
   }
   if (!/^[0-9a-fA-F]+$/.test(cleaned)) {
     throw new Error(
-      '16進数として不正な文字が含まれています / hex string contains non-hex characters'
+      'hex string contains non-hex characters'
     );
   }
   if (cleaned.length % 2 !== 0) {
     throw new Error(
-      '16進数は2桁ずつ (バイト単位) で指定してください / hex string must have an even number of digits'
+      'hex string must have an even number of digits'
     );
   }
   return Buffer.from(cleaned, 'hex');
@@ -816,7 +818,7 @@ function textResult(text) {
 
 function errorResult(err) {
   const text =
-    err instanceof BridgeError ? err.message : `エラー / Error: ${err?.message ?? String(err)}`;
+    err instanceof BridgeError ? err.message : `Error: ${err?.message ?? String(err)}`;
   return { content: [{ type: 'text', text }], isError: true };
 }
 
@@ -928,7 +930,7 @@ export function createServer(client) {
     handler(async () => {
       const res = await client.request('status', {});
       const summary = [
-        `connected: ${res.connected === true ? 'yes' : 'no'}`,
+        `connected: ${connectedLabel(res)}`,
         `port: ${res.port_name ?? '(none)'}`,
         `total_bytes: ${res.total_bytes ?? 0}`,
         `app_version: ${res.app_version ?? 'unknown'} (protocol ${res.protocol ?? '?'})`,

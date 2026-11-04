@@ -2,7 +2,7 @@
 """
 アプリ経由の FT232H 自己ループバック試験（SYS-NF-101 / DEBT-9）。
 
-前提: アプリが --port を --baud で開いており、AI Bridge が ON（127.0.0.1:57320）。
+前提: アプリが --port を --baud で開いており、MCP Server が ON（127.0.0.1:57320）。
       FT232H の D0(TX) と D1(RX) をジャンパで結んでいる。
       （run_app_loopback.ps1 が起動・UIA 設定・後片付けまで一括で行う）
 

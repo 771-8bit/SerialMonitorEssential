@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Bridge E2E 用の応答ボット: "PING" 行に "PONG 42" を返す。
+"""MCP Server（ブリッジ）E2E 用の応答ボット: "PING" 行に "PONG 42" を返す。
 
 com0com ペアの片側（既定 COM15）で待ち、アプリ（もう片側 COM16 を開く）
 経由で AI が送った PING に応答する。Ctrl+C で終了。

@@ -1,8 +1,8 @@
-# AI Bridge E2E の一括実行（docs/23 GAP-31 のスクリプト化）
+# MCP Server（ブリッジ）E2E の一括実行（docs/23 GAP-31 のスクリプト化）
 #
 # やること:
 #   1. com0com ペア（$PortBot ⇔ $PortApp）の存在確認
-#   2. アプリ起動 → UIA で AI Bridge ON・$PortApp へ接続
+#   2. アプリ起動 → UIA で MCP Server ON・$PortApp へ接続
 #   3. $PortBot に pong_bot.py を配置
 #   4. mcp_bridge_live.py（内蔵 MCP アダプタ経由の実往復 + ping/cancel 検証）
 #   5. 後片付け（ボット停止・アプリ終了）
@@ -75,7 +75,7 @@ function Invoke-Ui([string[]]$UiArgs, [string]$What) {
   Fail "could not $What"
 }
 
-Invoke-Ui @("-Action", "toggle", "-Name", "AI Bridge") "toggle AI Bridge"
+Invoke-Ui @("-Action", "toggle", "-Name", "MCP Server") "toggle MCP Server"
 Invoke-Ui @("-Action", "select-port", "-Name", $PortApp) "select $PortApp"
 Invoke-Ui @("-Action", "click", "-Name", "Connect") "click Connect"
 

@@ -215,10 +215,11 @@
 |-----|----------|----------|------|
 | SYS-F-801 | Clear はストア差し替え | `serial/mod.rs::clear_data` | `E2E`（Clear 後にプロットがリセットされ継続更新）／ **GAP-14** |
 | SYS-F-802 | Clear でプロッタも同期リセット (INV-2) | `plotter/thread.rs::run`（世代変化検知で `aggregator.clear()`） | `UT`: **`test_thread_survives_store_swap`** / `E2E` |
-| SYS-F-803 | 再接続も同じ意味論 | `serial/mod.rs::open_port` | `E2E`（切断→再接続でリセットして継続）／ **GAP-14** |
+| SYS-F-803 | 手動の接続は新セッション | `serial/mod.rs::open_port`（`open_port_impl(keep_store=false)`）、`src/App.tsx::handleToggleConnection`（`setTotalBytes(0)` は手動のみ） | `E2E`（切断→再接続でリセットして継続）／ **GAP-14** |
 | SYS-F-804 | 10 ms 以内の世代追従 (INV-1) | `plotter/thread.rs::run`（`Arc::ptr_eq` による識別、10 ms ポーリング） | `UT`: `test_thread_survives_store_swap`, `test_thread_sleeps_between_polls`, `test_thread_reads_data_from_store` |
 | SYS-F-805 | ストア不在でも動作継続 | `plotter/thread.rs::run`（`None` 分岐で 50 ms 待機） | `UT`: `test_aggregator_enabled_empty_data_store`, `test_parser_is_new_each_thread` / `E2E`（プロッタを先に開いてから接続） |
 | SYS-F-806 | ポート閉状態の Clear | `serial/mod.rs::clear_data`（`None` にする分岐） | `INSP` / **GAP-14** |
+| SYS-F-807 | 自動再接続（同じストアに継続） | `serial/mod.rs::reopen_port` / `set_reconnecting`（`open_port_impl(keep_store=true)`）、`serial/data_store.rs::start_reception`（`total_bytes()` から再開）、`serial/worker_thread.rs`（`start_offset`、`ResumeBoundary`、致命経路の行索引）、`bridge.rs::method_status`（`reconnecting`）、`mcp_stdio.rs` / `mcp/server.mjs`（`connected_label`）、`src/App.tsx`（待機の状態・500 ms の照合・選択の保持）、`src/components/SettingsPanel.tsx`（Auto Reconnect・Cancel・状態表示）、`src/utils/portUtils.ts` | `UT`: `test_resumed_worker_continues_offsets_and_splits_cut_line`, `test_fatal_read_error_indexes_the_last_chunk`, `test_resume_boundary_*`（3 件）, `test_status_reports_reconnecting`, `test_tools_call_status_reports_reconnecting` / `FE`: `src/test/App.test.tsx`（`auto reconnect` の 6 件）/ Node smoke `status shows a pending reconnect` / `D`: 実機の抜き差し |
 
 ### 2.9 ウィンドウ・ライフサイクル (SYS-F-9xx)
 
@@ -234,7 +235,7 @@
 
 | SYS | 要求要約 | 実装要素 | 検証 |
 |-----|----------|----------|------|
-| SYS-F-1101 | 既定 OFF・`127.0.0.1` 限定・トークン任意 | `src-tauri/src/bridge.rs`（`BridgeServer`、`Ipv4Addr::LOCALHOST` バインド、`DEFAULT_BRIDGE_PORT = 57320`、`MAX_CONNECTIONS = 4`）、`bridge_set` / `bridge_status` コマンド、`src/components/SettingsPanel.tsx`（AI Bridge トグル） | `UT`: `test_server_binds_loopback_only`, `test_integration_connection_limit`, `test_auth_required_when_token_configured`, `test_auth_is_noop_without_token` / `FE`: `src/test/SettingsPanel.test.tsx`（`renders the bridge toggle off by default and hides the endpoint`, `has the localhost-only tooltip`, `calls bridge_set and shows the endpoint when enabled`, `calls bridge_set with enabled=false when toggled back off`, `reverts the toggle when the backend rejects the start`, `shows the port reported by the backend, not the hardcoded default`）/ `E2E`（2026-09-03） |
+| SYS-F-1101 | 既定 OFF・`127.0.0.1` 限定・トークン任意 | `src-tauri/src/bridge.rs`（`BridgeServer`、`Ipv4Addr::LOCALHOST` バインド、`DEFAULT_BRIDGE_PORT = 57320`、`MAX_CONNECTIONS = 4`）、`bridge_set` / `bridge_status` コマンド、`src/components/SettingsPanel.tsx`（MCP Server トグル） | `UT`: `test_server_binds_loopback_only`, `test_integration_connection_limit`, `test_auth_required_when_token_configured`, `test_auth_is_noop_without_token` / `FE`: `src/test/SettingsPanel.test.tsx`（`renders the bridge toggle off by default and hides the endpoint`, `has the localhost-only tooltip`, `calls bridge_set and shows the endpoint when enabled`, `calls bridge_set with enabled=false when toggled back off`, `reverts the toggle when the backend rejects the start`, `shows the port reported by the backend, not the hardcoded default`）/ `E2E`（2026-09-03） |
 | SYS-F-1102 | 読み出し API（status / tail / read_range / subscribe） | `bridge.rs`（メソッドディスパッチ、`clamp_read_length`、`MAX_READ_LENGTH = 1 MiB`、push ループ 50 ms / 1 フレーム 256 KiB） | `UT`: `test_status_without_store`, `test_status_reports_total_bytes`, `test_read_range_basic_and_clamping`, `test_read_range_bad_params_and_no_store`, `test_tail_default_and_window`, `test_tail_bad_params`, `test_clamp_read_length_caps_at_1mib`, `test_subscribe_params`, `test_integration_status_read_range_tail`, `test_integration_subscribe_pushes_new_data` / `E2E`（TCP 経由で status/tail/read_range と subscribe push を確認、2026-09-03） |
 | SYS-F-1103 | 送信 + GUI 可視化（`bridge-activity`） | `bridge.rs`（`send` メソッド、`build_send_payload`、`preview_of`、`record_send` → `bridge-activity` emit）、`SerialState.port` の `Arc` 化、`src/components/SettingsPanel.tsx`（活動表示行） | `UT`: `test_build_send_payload_line_endings`, `test_build_send_payload_base64_and_errors`, `test_preview_of_truncates_to_64_chars`, `test_record_send_updates_activity_and_emits`, `test_send_without_port_is_error`, `test_send_bad_params_before_port_check`, `test_integration_send_without_port` / `FE`: `SettingsPanel.test.tsx`（`renders connection count, last send activity, and the content preview` — 送信内容プレビューの表示と制御文字の可視化）/ `E2E`（COM16→COM15 へ `PING`、GUI に「送信 5 bytes HH:MM:SS」、2026-09-03。スクリーンショット取得済） |
 | SYS-F-1104 | `ports`（GUI と同一列挙） | `bridge.rs`（`ports` メソッド → `serial::list_ports`） | `UT`: `test_ports_returns_list` / `E2E`（2026-09-03） |
@@ -254,7 +255,7 @@
 
 | SYS-NF | 要求要約 | 実装要素 | 検証 |
 |--------|----------|----------|------|
-| SYS-NF-101 | 12 Mbps（= 12 Mbaud）60 秒で欠落 0 | 受信パス全体 + `serial/tx.rs`（ADR-14: 送信が受信を止めない） | `E2E`（実 UART: `test_tools/ft232h/run_app_loopback.ps1`、RTS/CTS・AI Bridge ON。**2026-11-04 受入: 64 KiB 送信・60 秒・65 MB 欠落 0**、docs/24 §6.5 T2-5c）/ `UT`: `tx::tests`・`worker_thread::loop_tests`（INV-14〜17）/ 旧来の `verify_received_data.py`（Pico・~2 Mbps） |
+| SYS-NF-101 | 12 Mbps（= 12 Mbaud）60 秒で欠落 0 | 受信パス全体 + `serial/tx.rs`（ADR-14: 送信が受信を止めない） | `E2E`（実 UART: `test_tools/ft232h/run_app_loopback.ps1`、RTS/CTS・MCP Server ON。**2026-11-04 受入: 64 KiB 送信・60 秒・65 MB 欠落 0**、docs/24 §6.5 T2-5c）/ `UT`: `tx::tests`・`worker_thread::loop_tests`（INV-14〜17）/ 旧来の `verify_received_data.py`（Pico・~2 Mbps） |
 | SYS-NF-102 | 受信中も UI が固まらない | 3 スレッド分離 + バックエンド駆動ページング | `E2E`（[07 7-8 中間確認](07_plotter_spec.md#7-8-パフォーマンスチューニング)） |
 | SYS-NF-103 | フロント メモリ 0 MB/s | `PlotterChartPayload`（ADR-08） | `E2E` + `test_tools/monitor_memory.py` / `test_tools/analyze_memory.py`（実測: 修正前 +13.6 MB/s → 修正後 定常） |
 | SYS-NF-104 | バックエンド メモリ定常 | `Arc<Chunk>` 解放、集約レベルアップ | `E2E`（約 40 MB）／ **GAP-26**（自動計測なし） |
@@ -364,7 +365,7 @@
 | **GAP-25** | ウィンドウライフサイクル（単一インスタンス、X 閉じ、メイン閉での全終了）に自動テストがない | SYS-F-901〜903, INV-5/6 | 中 |
 | **GAP-26** | メモリ定常性（バックエンド、チャンク上限）の自動計測がない。手動の `monitor_memory.py` のみ | SYS-NF-104, 108 | 中 |
 | **GAP-27** | Clear に確認ダイアログがない（不可逆な操作） | SYS-NF-302 | 低 |
-| **GAP-31** | **ほぼ解消（2026-09-03）**: ~~AI Bridge の E2E がハーネスに入っておらず手動実施の記録のみ~~ → (a) 実往復 E2E をスクリプト化し `test_tools/e2e/` に収載（`run_bridge_e2e.ps1` = 起動→UIA 設定→`pong_bot.py`→`mcp_bridge_live.py` の一括実行。status/send→wait_for/read_tail/ブロック中 ping 即応答/cancelled 中断を検証）、(b) GUI 不要の `mcp_stdio_smoke.py` を **CI（Tier 1、両 OS）に組み込み**（実バイナリ `--mcp` を実パイプで検証）、(c) 実 `BridgeServer` への自動統合テスト（`test_tcp_client_against_real_bridge` 等 3 件）。**残**: Node 版 `mcp/smoke.mjs` は偽ブリッジに対する結合のまま（開発用リファレンスとして許容、CI には組み込み済み）。トークン設定 UI 未提供は TBD-R7 として別管理 | SYS-F-1101〜1107 | 低 |
+| **GAP-31** | **ほぼ解消（2026-09-03）**: ~~ブリッジの E2E がハーネスに入っておらず手動実施の記録のみ~~ → (a) 実往復 E2E をスクリプト化し `test_tools/e2e/` に収載（`run_bridge_e2e.ps1` = 起動→UIA 設定→`pong_bot.py`→`mcp_bridge_live.py` の一括実行。status/send→wait_for/read_tail/ブロック中 ping 即応答/cancelled 中断を検証）、(b) GUI 不要の `mcp_stdio_smoke.py` を **CI（Tier 1、両 OS）に組み込み**（実バイナリ `--mcp` を実パイプで検証）、(c) 実 `BridgeServer` への自動統合テスト（`test_tcp_client_against_real_bridge` 等 3 件）。**残**: Node 版 `mcp/smoke.mjs` は偽ブリッジに対する結合のまま（開発用リファレンスとして許容、CI には組み込み済み）。トークン設定 UI 未提供は TBD-R7 として別管理 | SYS-F-1101〜1107 | 低 |
 
 ### 4.3 テスト技法としての不足
 

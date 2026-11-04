@@ -29,7 +29,7 @@ interface BridgeActivityEvent {
 
 const BRIDGE_DEFAULT_PORT = 57320;
 const BRIDGE_POLL_MS = 2000;
-const BRIDGE_TOOLTIP = 'ローカルのAIエージェント用ブリッジ（127.0.0.1のみ・既定OFF）';
+const BRIDGE_TOOLTIP = 'Local access for MCP clients and scripts (127.0.0.1 only, off by default)';
 
 /** 活動時刻の表示（時刻のみ） */
 function formatBridgeTime(atMs: number): string {
@@ -64,7 +64,18 @@ interface SettingsPanelProps {
   isConnected: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  /** Reopen the port when the lost device comes back (SYS-F-807) */
+  autoReconnect: boolean;
+  onAutoReconnectChange: (enabled: boolean) => void;
+  /** Device path being waited for, or null when not waiting */
+  reconnectWaitingFor: string | null;
+  /** Time (ms) of the last automatic reconnect, shown until the next manual action */
+  reconnectedAt: number | null;
 }
+
+const AUTO_RECONNECT_TOOLTIP =
+  'When the device goes away (unplugged or reset) and comes back, reopen it automatically. ' +
+  'The capture continues; nothing is cleared.';
 
 export default function SettingsPanel({
   ports,
@@ -76,6 +87,10 @@ export default function SettingsPanel({
   isConnected,
   onConnect,
   onDisconnect,
+  autoReconnect,
+  onAutoReconnectChange,
+  reconnectWaitingFor,
+  reconnectedAt,
 }: SettingsPanelProps) {
   const [baudRateEditing, setBaudRateEditing] = useState(false);
   const [baudDropdownOpen, setBaudDropdownOpen] = useState(false);
@@ -84,7 +99,7 @@ export default function SettingsPanel({
   // the config / backend.
   const [baudDraft, setBaudDraft] = useState('');
 
-  // --- AI Bridge -----------------------------------------------------------
+  // --- MCP Server (bridge) -----------------------------------------------------------
   // 状態は SettingsPanel 内で完結させる（App.tsx には触れない）。
   const [bridgeEnabled, setBridgeEnabled] = useState(false);
   const [bridgePort, setBridgePort] = useState(BRIDGE_DEFAULT_PORT);
@@ -180,12 +195,19 @@ export default function SettingsPanel({
           disabled={isConnected}
           className="port-select"
         >
+          {/* The device being waited for has left the list; keep it selectable so the
+              dropdown keeps showing what the app is waiting for */}
+          {reconnectWaitingFor !== null && selectedPort && !ports.includes(selectedPort) && (
+            <option value={selectedPort}>{selectedPort} (not present)</option>
+          )}
           {ports.map((port) => (
             <option key={port} value={port}>
               {port}
             </option>
           ))}
-          {ports.length === 0 && <option value="">No ports found</option>}
+          {ports.length === 0 && reconnectWaitingFor === null && (
+            <option value="">No ports found</option>
+          )}
         </select>
 
         <div className="baud-custom-container">
@@ -254,13 +276,28 @@ export default function SettingsPanel({
           onClick={isConnected ? onDisconnect : onConnect}
           className={`connect-button ${isConnected ? 'connected' : ''}`}
         >
-          {isConnected ? 'Disconnect' : 'Connect'}
+          {reconnectWaitingFor !== null ? 'Cancel' : isConnected ? 'Disconnect' : 'Connect'}
         </button>
 
-        <label className="checkbox-label">
-          <input type="checkbox" disabled />
-          Auto Connect
+        <label className="checkbox-label" title={AUTO_RECONNECT_TOOLTIP}>
+          <input
+            type="checkbox"
+            checked={autoReconnect}
+            onChange={(e) => onAutoReconnectChange(e.target.checked)}
+          />
+          Auto Reconnect
         </label>
+        {reconnectWaitingFor !== null ? (
+          <span className="reconnect-status waiting" role="status">
+            Waiting for {reconnectWaitingFor}…
+          </span>
+        ) : (
+          reconnectedAt !== null && (
+            <span className="reconnect-status" role="status">
+              Reconnected {new Date(reconnectedAt).toLocaleTimeString()}
+            </span>
+          )
+        )}
       </div>
 
       <div className="settings-advanced">
@@ -352,7 +389,7 @@ export default function SettingsPanel({
               void handleBridgeToggle(e.target.checked);
             }}
           />
-          AI Bridge
+          MCP Server
         </label>
 
         <button
@@ -371,11 +408,11 @@ export default function SettingsPanel({
             <span className="bridge-endpoint">127.0.0.1:{bridgePort}</span>
             <span
               className="bridge-hint"
-              title={bridgeActivity?.preview ? `送信内容: ${bridgeActivity.preview}` : undefined}
+              title={bridgeActivity?.preview ? `Sent: ${bridgeActivity.preview}` : undefined}
             >
-              {bridgeConnections > 0 ? `接続 ${bridgeConnections}` : '待機中'}
+              {bridgeConnections > 0 ? `Clients: ${bridgeConnections}` : 'Waiting'}
               {bridgeActivity &&
-                ` / 送信 ${bridgeActivity.bytes} bytes ${formatBridgeTime(bridgeActivity.at_ms)}`}
+                ` / Sent ${bridgeActivity.bytes} bytes ${formatBridgeTime(bridgeActivity.at_ms)}`}
               {bridgeActivity?.preview && (
                 <span className="bridge-preview">
                   {' '}

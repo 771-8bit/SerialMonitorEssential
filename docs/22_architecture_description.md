@@ -77,7 +77,7 @@ flowchart TB
 | OS 一時ディレクトリ | 双方向 | `%TEMP%/SerialMonitorEssential/<PID>/<instance>/data.bin` |
 | ファイルシステム | 出力 | エクスポートされたバイナリログ |
 | クリップボード | 出力 | Hex 文字列 / ASCII 文字列 |
-| AI エージェント（別プロセス） | 双方向 | AI Bridge プロトコル v1（NDJSON / TCP、`127.0.0.1` 限定・既定 OFF）。仕様の正は `src-tauri/src/bridge.rs` のモジュールヘッダ（SYS-F-1101〜1106 / ADR-12） |
+| AI エージェント（別プロセス） | 双方向 | ブリッジプロトコル v1（NDJSON / TCP、`127.0.0.1` 限定・既定 OFF）。仕様の正は `src-tauri/src/bridge.rs` のモジュールヘッダ（SYS-F-1101〜1106 / ADR-12） |
 
 ---
 
@@ -117,7 +117,7 @@ flowchart TB
             PRS["PlotterParser"]
             AGG["PlotterAggregator"]
         end
-        BRG["AI Bridge<br/>bridge.rs<br/>127.0.0.1:57320 / NDJSON<br/>既定 OFF"]
+        BRG["Bridge（設定: MCP Server）<br/>bridge.rs<br/>127.0.0.1:57320 / NDJSON<br/>既定 OFF"]
     end
 
     subgraph extproc["プロセス外（同一 PC）"]
@@ -177,7 +177,7 @@ flowchart TB
 | **C-PLOTW** | プロッタウィンドウ | `src/components/plotter/PlotterWindow.tsx` | 表示状態（LIVE/Inspect/Paused）の管理、更新ループ、凡例 | データの解釈・間引き（ADR-08） |
 | **C-CHART** | LineChart / uPlot | `src/components/plotter/LineChart.tsx` | 座標変換と描画、ズーム/パンの入力処理、Y レンジ計算 | データ取得 |
 | **C-STL** | State Timeline プラグイン | `src/components/plotter/stateTimelinePlugin.ts` | 状態バーの Canvas 矩形描画、DPI スケーリング | 時間軸の管理（uPlot に委ねる） |
-| **C-BRIDGE** | AI Bridge | `src-tauri/src/bridge.rs` | `127.0.0.1` 限定の NDJSON/TCP 待ち受け（既定 OFF）、プロトコル v2 の解釈、キャプチャのオフセット読み出しと push 配信、アプリ経由の送信と `bridge-activity` の emit、接続数制限（4）とトークン検証 | シリアルデータの意味解釈、MCP プロトコル、ポートの所有（`Arc` ハンドル経由で借りるだけ） |
+| **C-BRIDGE** | ブリッジ（設定画面の表示名は MCP Server） | `src-tauri/src/bridge.rs` | `127.0.0.1` 限定の NDJSON/TCP 待ち受け（既定 OFF）、プロトコル v2 の解釈、キャプチャのオフセット読み出しと push 配信、アプリ経由の送信と `bridge-activity` の emit、接続数制限（4）とトークン検証 | シリアルデータの意味解釈、MCP プロトコル、ポートの所有（`Arc` ハンドル経由で借りるだけ） |
 | **C-MCP** | MCP アダプタ（**別プロセス・アプリ内蔵**） | `src-tauri/src/mcp_stdio.rs`（`--mcp` で同一 exe が MCP stdio サーバとして起動。**配布用の正**、ADR-13） | ブリッジ protocol v2 を MCP の 11 ツール（`serial_status` / `serial_ports` / `serial_digest` / `serial_watch` / `serial_sample` / `serial_read_tail` / `serial_read_range` / `serial_find` / `serial_send` / `serial_send_hex` / `serial_wait_for`）へ変換、AI 向けの整形（テキスト/hex 判定、待ち受けポーリング）、未起動時の対処メッセージ | 状態の保持、ポートのオープン、ファイル I/O |
 | **C-INSIGHT** | Insight レイヤ（AI 向け導出情報） | `src-tauri/src/insight/`（`mask` / `window` / `render` / `sample` / `find` は純粋関数、`index` は共有状態、`thread` は IO） | 行 -> テンプレート化、重大度の全バイト走査、テンプレート表（有界・追い出しは報告）、チェックポイントによる差分、ウィンドウ解決とカーソル、文字数予算とセクション優先順位、生行の抜き取りと重複畳み込み | 生データの配送、GUI 表示、プロッタの解釈規則（**意図的に流用しない**。docs/26 §1） |
 | **C-ITHREAD** | IndexThread | `insight/thread.rs` | 現行 DataStore の毎ポーリング解決、`Arc::ptr_eq` による差し替え検知と世代更新、1 MiB 単位の読み出し、読めない領域のスキップと `gap` 記録 | テンプレート化の規則、予算 |
@@ -190,7 +190,7 @@ flowchart TB
 | Worker | DataStore の受信期間 | ポーリング（データなし時 1 ms sleep） | `DataStore::start_reception` |
 | Logger | 同上 | 50 ms、または閾値（1 MB / 100 チャンク）到達時 | 同上 |
 | UiNotifier | 同上 | 16 ms | 同上 |
-| IndexThread | AI Bridge が ON の間 | 10 ms（未処理が残る限り連続読み） | `bridge_set(enabled=true)` |
+| IndexThread | ブリッジ（MCP Server）が ON の間 | 10 ms（未処理が残る限り連続読み） | `bridge_set(enabled=true)` |
 | PlotterThread | プロッタウィンドウの生存期間 | 10 ms（ストア不在時 50 ms） | `start_plotter_thread` |
 | Bridge listener | ブリッジ有効化 (`bridge_set(true)`) から無効化 / アプリ終了まで | `accept` を 100 ms タイムアウトで回し、停止フラグを確認 | `bridge_set` |
 | Bridge connection | 1 接続の生存期間（最大 4 本同時） | 要求駆動。`subscribe` 後は 50 ms 間隔で `total_bytes` を監視して push（1 フレーム最大 256 KiB） | Bridge listener（接続ごとに 1 本） |
@@ -377,7 +377,7 @@ stateDiagram-v2
 
 | 状態 | 意味 |
 |------|------|
-| `Stopped` | AI Bridge が OFF。索引スレッドは存在せず、CPU もメモリも払わない |
+| `Stopped` | ブリッジ（MCP Server）が OFF。索引スレッドは存在せず、CPU もメモリも払わない |
 | `Detached` | スレッドは動いているが、共有スロットにストアが無い（ポート未オープン） |
 | `Attached(gen k)` | 世代 k のストアを読み進めている |
 
@@ -448,7 +448,7 @@ SM-2 との対応は SM-3（PlotterThread）と同じ形だが、**集約器と�
 | **DEBT-7** | AI ブリッジ 2 層（`bridge.rs` / `mcp_stdio.rs`）の IO 層・コマンド配線にミューテーション生存が集中する（2026-09-04 完走測定。初回 57 missed のうち純ロジックの穴はテスト追加で縮小したが、残りは IO 系）。bridge.rs: `run_subscription`/`handle_connection`/`BridgeServer`(accept・Drop・`is_timeout`)、`bridge_set`/`bridge_guide_info`。mcp_stdio.rs: `TcpBridgeClient::exchange`/`request`(再試行・トランスポート分類)、`run_stdio`/`write_response`/`attach_parent_console`(stdio 主ループ)、`wait_for_pattern` の窓算術の一部。実ソケット結合（`test_integration_*`/`test_tcp_client_*`）と E2E（`run_bridge_e2e.ps1`）で機能は担保するが、offset 演算・タイムアウト分類・境界比較（`>`/`>=`）等の細粒度は未アサート。Tauri コマンドは `AppHandle`/`current_exe`、stdio 主ループは実 stdin/stdout を要し単体駆動不可 | IO ループから純関数を抽出（フレーム境界・offset 前進・トランスポート分類など）して細粒度に単体検証。コマンド／主ループは薄い委譲に留めロジックを純関数側へ寄せる。当面は実ソケット結合 + E2E で担保 |
 | ~~**DEBT-8**~~ | ~~`serial_wait_for` の待機がクライアント側ポーリングである~~ **解消済（2026-09-07）**: 走査をブリッジへ移した（`bridge::method_wait_for`）。ストアを `from` から末尾まで前方走査するので、窓・蓄積・base64 往復が無くなり、(1) 64 KiB を超える単一マッチの取り逃がし、(2) 高レートでの読み負け、(3) base64 往復のコスト がまとめて消えた。加えて `send` が書き込み直前の `total_bytes` を返すようになり、`serial_send(expect=)` は**位置**で走査を始めるので「返信が最初のポーリングより早いと観測できない」競合も構造的に消えた（[26 §7.5](26_ai_api_design.md)） | 残る限界: 再開の重なり `insight::find::SCAN_OVERLAP`(4 KiB) を超える単一マッチは境界で取り逃がし得る。またサーバ側の 1 回の待機を 1000ms で切るため、キャンセル検知の遅延は最大 1000ms （旧 500ms）になった |
 | ~~**DEBT-10**~~ | ~~送信が受信を止める（`Arc<Mutex<SerialPort>>` を送信と受信で共有し、送信がロックを保持したまま `write_all` する）~~ **解消済（2026-11-04）: ADR-14**。受信ワーカーがポートを単独所有し、送信は 1 ms 分ずつ読みと交互に書く。FT232H 12 Mbaud で 16 KiB 送信時の欠落 60% → RTS/CTS 下で 64 KiB 送信・60 秒・欠落 0（docs/24 §6.5 T2-5c） | — |
-| **DEBT-9** | Insight 索引（docs/26 段階 2）の受け入れ済み制約: (1) テンプレート表は 256 件で有界。溢れると**最後に見た位置が最も古いもの**を追い出す（最も稀なものを追い出すと「稀少イベントの床」と矛盾するため）。追い出しは `evicted` として必ず報告するが、古くて稀なテンプレートは digest から消える。(2) 索引は AI Bridge が ON の間だけ動くので、ON にする前に届いたデータは索引されない（`coverage_pct` で明示）。(3) チェックポイント環は 96 個・1 秒間隔なので、`watch` の基準点は約 60〜90 秒より古いカーソルでは近似になる（`exact_baseline=false` として報告）。~~(4) 12 Mbps での索引の追随性能は未実測~~ **実測済（2026-11-04）**: 12 Mbaud・線速度の 9 割の取り込み中も `index_lag_bytes` は定常で 0 に戻る（docs/24 §6.5 T2-5c） | (1)(3) は環と表を大きくすれば緩むが、定数メモリの上限とのトレードオフ。(4) は FT232H 級の治具が入手でき次第、docs/24 §6.5 の T2-5 に「AI Bridge ON のままキャプチャ欠落ゼロ + 索引が追随」を追加して測る |
+| **DEBT-9** | Insight 索引（docs/26 段階 2）の受け入れ済み制約: (1) テンプレート表は 256 件で有界。溢れると**最後に見た位置が最も古いもの**を追い出す（最も稀なものを追い出すと「稀少イベントの床」と矛盾するため）。追い出しは `evicted` として必ず報告するが、古くて稀なテンプレートは digest から消える。(2) 索引はブリッジ（MCP Server）が ON の間だけ動くので、ON にする前に届いたデータは索引されない（`coverage_pct` で明示）。(3) チェックポイント環は 96 個・1 秒間隔なので、`watch` の基準点は約 60〜90 秒より古いカーソルでは近似になる（`exact_baseline=false` として報告）。~~(4) 12 Mbps での索引の追随性能は未実測~~ **実測済（2026-11-04）**: 12 Mbaud・線速度の 9 割の取り込み中も `index_lag_bytes` は定常で 0 に戻る（docs/24 §6.5 T2-5c） | (1)(3) は環と表を大きくすれば緩むが、定数メモリの上限とのトレードオフ。(4) は FT232H 級の治具が入手でき次第、docs/24 §6.5 の T2-5 に「MCP Server ON のままキャプチャ欠落ゼロ + 索引が追随」を追加して測る |
 
 ---
 
@@ -751,6 +751,8 @@ sequenceDiagram
 | **採用理由** | (a)(b) は「追加ランタイム無し」という UN-25 の核心を満たさない。本アダプタが使う MCP の表面積は `initialize` / `tools/list` / `tools/call` / `ping` の 4 メソッドだけで、行区切り JSON-RPC 2.0 として素直に書ける。(c) は tokio ベースの SDK 依存を増やす割に、この表面積では得るものが少ない。(d) なら追加依存は `regex`（`serial_wait_for` 用）のみで、ブリッジ同様に IO から独立したテストが書ける（モックブリッジ + 実ソケット統合の 23 テスト）。ADR-12 が懸念した「MCP 仕様への追従負担」は、使う表面積を最小に固定することで抑える |
 | **帰結** | **同一ツール群の実装が 2 つになる**（Rust 内蔵 = 配布用の正、Node = 開発用リファレンス）。ツールの追加・変更は両方を同時に更新する必要がある（**DEBT-6**）。`--mcp` モードでは stdout が JSON-RPC 専用になるため、ログは stderr に限定（SYS-F-1107）。登録コマンドはユーザーごとの exe パスを要するため、GUI に実パス入りの手順を表示するガイドウィンドウを追加（SYS-F-1108）。`serial_wait_for` の正規表現は JS（Node 版）と Rust で方言差がある（Rust は lookaround 非対応）— ツール説明文に明記して吸収する |
 
+> **名称（2026-11-04）**: 設定画面のトグルの表示名を「AI Bridge」から **「MCP Server」** に変えた。利用者が触る機能は MCP 連携であり、Layer 1 は AI 専用でもない（試験ツールは生 TCP で直接使う）ため。構造（2 層）は変えない。文書内では Layer 1 を「ブリッジ」と呼ぶ。互換のため識別子（`bridge_set` / `bridge_status` / `bridge-activity` / `SME_BRIDGE_*` 環境変数 / protocol v1 のメソッド名）は据え置く。あわせて外部へ露出する文字列を英語のみにした（SYS-NF-305。MCP エラーの日英併記を廃止）。
+
 ### ADR-14: ポートの I/O を受信ワーカーが単独所有し、送信はキュー経由で渡す（DEBT-10 の解消）
 
 | 項目 | 内容 |
@@ -789,7 +791,7 @@ sequenceDiagram
 | RISK-1 | ディスク書き込み速度が受信速度を下回ると `free_pool` が枯渇し、チャンクの新規確保が続いてメモリが増える | 高速受信 + 低速ディスクで破綻 | 初期プールで数十 ms 分を吸収。長期的には受信速度の監視と警告 |
 | RISK-2 | LIVE と Inspect で間引きアルゴリズムが異なるため、状態遷移の前後で見た目が変わる | 利用者の混乱 | 遷移時に「同じデータの別表現」であることが分かる程度に留める。TBD-R2 |
 | RISK-3 | ADR-07 の時間基準（TBD-R3）が未解決のまま実装が進むと、LIVE ウィンドウが「今」を正しく表現できない | SYS-F-502/503 が満たせない | Inspect 実装前に時間基準を確定する |
-| RISK-4 | AI Bridge が有効な間、同一 PC 上の任意のプロセスがループバックに接続してキャプチャを読み、デバイスへ送信できる（トークン未設定時） | ローカルの悪意あるプロセスによる意図しない送信 | 既定 OFF・`127.0.0.1` 限定・送信の GUI 可視化で被害面と気づきやすさを抑える（ADR-12）。トークンの検証は実装済みだが**設定 UI が無い**（TBD-R7）。多ユーザー環境や信頼できないプロセスが同居する PC では有効化しない、を運用上の前提とする |
+| RISK-4 | ブリッジ（MCP Server）が有効な間、同一 PC 上の任意のプロセスがループバックに接続してキャプチャを読み、デバイスへ送信できる（トークン未設定時） | ローカルの悪意あるプロセスによる意図しない送信 | 既定 OFF・`127.0.0.1` 限定・送信の GUI 可視化で被害面と気づきやすさを抑える（ADR-12）。トークンの検証は実装済みだが**設定 UI が無い**（TBD-R7）。多ユーザー環境や信頼できないプロセスが同居する PC では有効化しない、を運用上の前提とする |
 | DEBT-1〜3 | §5.9 参照 | | |
 
 ---

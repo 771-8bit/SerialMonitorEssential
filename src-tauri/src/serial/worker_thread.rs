@@ -78,16 +78,56 @@ fn record_line_offsets(line_index: &RwLock<Vec<u64>>, data: &[u8], global_offset
     }
 }
 
+/// 再接続で同じストアに追記を再開したとき、切断で途切れた行と再開後の最初の行が
+/// 1 行に繋がって見えないよう、再開位置を行頭として 1 度だけ記録する。
+/// 受信バイトそのものは変えない（line_index は表示用の索引）。
+struct ResumeBoundary(Option<u64>);
+
+impl ResumeBoundary {
+    fn new(line_index: &RwLock<Vec<u64>>, start_offset: u64) -> Self {
+        // 直前のバイトが LF なら start_offset は既に行頭として記録されている
+        let already_line_start = line_index
+            .read()
+            .map(|index| index.last().is_some_and(|&last| last >= start_offset))
+            .unwrap_or(true);
+        if start_offset == 0 || already_line_start {
+            Self(None)
+        } else {
+            Self(Some(start_offset))
+        }
+    }
+
+    /// チャンクの行位置を記録する。再開後の最初のデータが届いた時点で境界を入れる
+    /// （再開直後に入れると、データが来るまで末尾に空行が 1 行見えてしまう）
+    fn record(&mut self, line_index: &RwLock<Vec<u64>>, chunk: &Chunk) {
+        if !chunk.has_data() {
+            return;
+        }
+        if let Some(boundary) = self.0.take() {
+            if let Ok(mut index) = line_index.write() {
+                if index.last().is_none_or(|&last| last < boundary) {
+                    index.push(boundary);
+                }
+            }
+        }
+        record_line_offsets(line_index, chunk.data(), chunk.global_offset());
+    }
+}
+
 /// 受信ワーカーを起動する。ポートの I/O（`parked.io` / `parked.rx`）は**このスレッドが
 /// 単独で所有**し、送信要求は `rx` から受けて read と交互に 1 スライスずつ書く
 /// （ADR-14 / INV-14, 16）。正常停止時は進行中の送信状態ごと `port` へ返却（park）し、
 /// 致命エラー時は破棄する。
+// 引数はすべて DataStore が持つ共有ハンドルの受け渡しで、束ねても呼び出し元が 1 か所
+// （DataStore::start_reception）なので読みやすさは上がらない
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_worker_thread(
     port: Arc<OpenPort>,
     parked: Parked,
     free_pool: Arc<crossbeam::queue::SegQueue<Chunk>>,
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     line_index: Arc<RwLock<Vec<u64>>>, // Phase 2: line_index for pre-indexing
+    start_offset: u64,
     stop_flag: Arc<AtomicBool>,
     on_disconnect: DisconnectFn,
 ) -> JoinHandle<()> {
@@ -106,7 +146,10 @@ pub fn spawn_worker_thread(
         let mut last_swap = Instant::now();
         let mut read_buffer = vec![0u8; READ_BUFFER_SIZE];
         let mut total_bytes_read = 0u64;
-        let mut global_offset = 0u64; // グローバルオフセットを追跡
+        // グローバルオフセット。新しいストアなら 0、自動再接続で同じストアに
+        // 追記を再開したときは前回までの総バイト数から続ける
+        let mut global_offset = start_offset;
+        let mut boundary = ResumeBoundary::new(&line_index, start_offset);
         let mut loop_count = 0u64;
         let mut last_status_log = Instant::now();
         // 受信が止まる時間の診断（5 秒窓の最大値）。フロー制御の無い UART では
@@ -127,7 +170,7 @@ pub fn spawn_worker_thread(
                     if chunk.has_data() {
                         chunk.set_global_offset(global_offset);
                         // Phase 2: Record line offsets before pushing
-                        record_line_offsets(&line_index, chunk.data(), chunk.global_offset());
+                        boundary.record(&line_index, &chunk);
                         debug!("[Worker] Pushing final chunk with {} bytes", chunk.len());
                         if let Ok(mut list) = finished_list.write() {
                             list.push_back(Arc::new(chunk));
@@ -189,18 +232,22 @@ pub fn spawn_worker_thread(
                         tx.abort_without_io("port disconnected");
                         fail_pending(&cmd_rx, "port disconnected");
 
-                        // フロントエンドへ通知（serial-status connected=false）
-                        on_disconnect(e.to_string());
-
-                        // Push remaining data if any
+                        // Push remaining data if any. 停止パスと同じく行位置も記録する
+                        // （自動再接続では同じストアに追記を続けるので、ここで索引しないと
+                        // 切断直前の行が再接続後の行と 1 行に潰れる）
                         if let Some(mut chunk) = current_chunk.take() {
                             if chunk.has_data() {
                                 chunk.set_global_offset(global_offset);
+                                boundary.record(&line_index, &chunk);
                                 if let Ok(mut list) = finished_list.write() {
                                     list.push_back(Arc::new(chunk));
                                 }
                             }
                         }
+
+                        // フロントエンドへ通知（serial-status connected=false）。
+                        // 最後のチャンクを公開してから通知する
+                        on_disconnect(e.to_string());
                         break;
                     }
                 }
@@ -231,11 +278,7 @@ pub fn spawn_worker_thread(
                             let mut full_chunk = current_chunk.take().unwrap();
                             full_chunk.set_global_offset(global_offset);
                             // Phase 2: Record line offsets before pushing
-                            record_line_offsets(
-                                &line_index,
-                                full_chunk.data(),
-                                full_chunk.global_offset(),
-                            );
+                            boundary.record(&line_index, &full_chunk);
                             global_offset += full_chunk.len() as u64;
                             debug!("[Worker] Chunk full, pushing to finished_list");
                             if let Ok(mut list) = finished_list.write() {
@@ -255,11 +298,7 @@ pub fn spawn_worker_thread(
                     let mut timeout_chunk = current_chunk.take().unwrap();
                     timeout_chunk.set_global_offset(global_offset);
                     // Phase 2: Record line offsets before pushing
-                    record_line_offsets(
-                        &line_index,
-                        timeout_chunk.data(),
-                        timeout_chunk.global_offset(),
-                    );
+                    boundary.record(&line_index, &timeout_chunk);
                     global_offset += timeout_chunk.len() as u64;
                     if let Ok(mut list) = finished_list.write() {
                         list.push_back(Arc::new(timeout_chunk));
@@ -313,6 +352,7 @@ mod loop_tests {
         port: Arc<OpenPort>,
         fake: FakePort,
         finished: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
+        lines: Arc<RwLock<Vec<u64>>>,
         stop: Arc<AtomicBool>,
         disconnects: Arc<Mutex<Vec<String>>>,
         handle: Option<JoinHandle<()>>,
@@ -325,6 +365,7 @@ mod loop_tests {
                 port,
                 fake,
                 finished: Arc::new(RwLock::new(VecDeque::new())),
+                lines: Arc::new(RwLock::new(vec![0])),
                 stop: Arc::new(AtomicBool::new(false)),
                 disconnects: Arc::new(Mutex::new(Vec::new())),
                 handle: None,
@@ -342,7 +383,8 @@ mod loop_tests {
                 parked,
                 Arc::new(SegQueue::new()),
                 self.finished.clone(),
-                Arc::new(RwLock::new(vec![0])),
+                self.lines.clone(),
+                0,
                 self.stop.clone(),
                 Box::new(move |e| sink.lock().unwrap().push(e)),
             ));
@@ -498,11 +540,104 @@ mod loop_tests {
         assert!(started.elapsed() < Duration::from_millis(100));
         assert!(!h.port.is_parked());
     }
+
+    /// 自動再接続: 同じストアで受信を再開したワーカーは前回の総バイト数から続け、
+    /// 途中で切れた行と再開後の最初の行を別の行として索引する（SYS-F-807）
+    #[test]
+    fn test_resumed_worker_continues_offsets_and_splits_cut_line() {
+        let fake = FakePort::new(12_000_000, WriteMode::Loopback);
+        let port = Arc::new(OpenPort::new("FAKE", Box::new(fake)));
+        let finished = Arc::new(RwLock::new(VecDeque::new()));
+        let lines = Arc::new(RwLock::new(vec![0u64, 4])); // 前回: "abc\nde"（6 バイト）で切断
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = spawn_worker_thread(
+            port.clone(),
+            port.take_io().expect("io parked"),
+            Arc::new(SegQueue::new()),
+            finished.clone(),
+            lines.clone(),
+            6,
+            stop.clone(),
+            Box::new(|_| {}),
+        );
+        port.send(b"xy\nz\n".to_vec()).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+
+        let chunks = finished.read().unwrap();
+        assert_eq!(chunks.front().unwrap().global_offset(), 6);
+        let data: Vec<u8> = chunks.iter().flat_map(|c| c.data().to_vec()).collect();
+        assert_eq!(data, b"xy\nz\n");
+        assert_eq!(*lines.read().unwrap(), vec![0, 4, 6, 9, 11]);
+    }
+
+    /// 致命エラーの経路で公開した最後のチャンクも行位置が索引されている
+    /// （自動再接続では同じストアに追記を続けるので、ここが抜けると切断直前の
+    /// 行が再接続後の行と 1 行に潰れる）。不変条件: 公開済みの LF はすべて索引済み
+    #[test]
+    fn test_fatal_read_error_indexes_the_last_chunk() {
+        for _ in 0..20 {
+            let mut h = Harness::start(FakePort::new(12_000_000, WriteMode::Loopback));
+            h.port.send(b"one\ntwo\nthr".to_vec()).unwrap();
+            h.fake.state.lock().unwrap().fatal_read = true;
+            h.handle.take().unwrap().join().unwrap();
+
+            let captured = h.captured();
+            let expected: Vec<u64> = std::iter::once(0)
+                .chain(
+                    captured
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, &b)| b == b'\n')
+                        .map(|(i, _)| i as u64 + 1),
+                )
+                .collect();
+            assert_eq!(*h.lines.read().unwrap(), expected, "captured={captured:?}");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chunk_at(offset: u64, data: &[u8]) -> Chunk {
+        let mut chunk = Chunk::new(64);
+        chunk.push_data(data);
+        chunk.set_global_offset(offset);
+        chunk
+    }
+
+    /// 途中で切れた行のあとに追記を再開すると、再開位置が行頭として 1 度だけ入る
+    #[test]
+    fn test_resume_boundary_splits_cut_line() {
+        let index = RwLock::new(vec![0, 4]); // "abc\nde" の後で切断（total 6）
+        let mut boundary = ResumeBoundary::new(&index, 6);
+        boundary.record(&index, &chunk_at(6, b"")); // 空チャンクでは入れない
+        assert_eq!(*index.read().unwrap(), vec![0, 4]);
+        boundary.record(&index, &chunk_at(6, b"xy\n"));
+        boundary.record(&index, &chunk_at(9, b"z\n"));
+        assert_eq!(*index.read().unwrap(), vec![0, 4, 6, 9, 11]);
+    }
+
+    /// 直前が LF で終わっていれば境界は要らない（重複も空行も作らない）
+    #[test]
+    fn test_resume_boundary_not_needed_after_newline() {
+        let index = RwLock::new(vec![0, 4]); // "abc\n" の後で切断（total 4）
+        let mut boundary = ResumeBoundary::new(&index, 4);
+        boundary.record(&index, &chunk_at(4, b"x\n"));
+        assert_eq!(*index.read().unwrap(), vec![0, 4, 6]);
+    }
+
+    /// 新しいストア（start_offset 0）では何もしない
+    #[test]
+    fn test_resume_boundary_noop_for_new_store() {
+        let index = RwLock::new(vec![0]);
+        let mut boundary = ResumeBoundary::new(&index, 0);
+        boundary.record(&index, &chunk_at(0, b"a\nb"));
+        assert_eq!(*index.read().unwrap(), vec![0, 2]);
+    }
 
     /// record_line_offsets should detect LF and record offset after newline
     #[test]

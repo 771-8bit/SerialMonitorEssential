@@ -85,13 +85,13 @@
 
 ---
 
-## Phase 9: AI 連携 (AI Bridge / MCP) ✓ 完了
+## Phase 9: AI 連携 (ブリッジ / MCP) ✓ 完了
 
 *   **目標:** 人間が GUI で監視したまま、AI エージェントに同じシリアルセッションを読み書きさせる。
 *   **ステータス:** **完了 (2026-09-03)**
-    *   AI Bridge（`127.0.0.1:57320` / NDJSON、既定 OFF） — `bridge_set` / `bridge_status`
+    *   ブリッジ（設定画面の表示名は MCP Server。`127.0.0.1:57320` / NDJSON、既定 OFF） — `bridge_set` / `bridge_status`
     *   読み出し（`status` / `tail` / `read_range` / `subscribe`）と送信（`send`）、`ports`
-    *   送信の GUI 可視化（`bridge-activity` → 設定画面の AI Bridge 行）
+    *   送信の GUI 可視化（`bridge-activity` → 設定画面の MCP Server 行）
     *   MCP stdio アダプタ `mcp/`（7 ツール。別プロセス）
 
 > [!NOTE]
@@ -105,7 +105,7 @@
 | 項目 | 内容 | 参照 |
 | --- | --- | --- |
 | **検索 / フィルタ** | Phase 8。UI は実装済みでバックエンドの検索ロジックが未実装。正規表現か部分一致かは未確定 | SYS-F-309 / GAP-01 / TBD-N3 |
-| **AI Bridge の拡張** | トークン設定 UI ほか（詳細 TBD）。protocol v1 の互換規則も併せて決める | TBD-R7 / TBD-RS10 |
+| **ブリッジの拡張** | トークン設定 UI ほか（詳細 TBD）。protocol v1 の互換規則も併せて決める | TBD-R7 / TBD-RS10 |
 | **プロッタのドッキング / フロート** | **スコープ内。実装予定だが時期未定**（オーナー決定 2026-09-03） | SYS-F-905 / GAP-06 / TBD-R6 |
 
 ---

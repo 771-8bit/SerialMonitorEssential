@@ -102,7 +102,7 @@ export default function AiGuideWindow() {
         <header className="guide-header">
           <h1>AI Integration (MCP)</h1>
           <span className={`guide-status ${enabled ? 'on' : 'off'}`} data-testid="bridge-status">
-            {enabled ? `AI Bridge: ON (127.0.0.1:${port})` : 'AI Bridge: OFF'}
+            {enabled ? `MCP Server: ON (127.0.0.1:${port})` : 'MCP Server: OFF'}
           </span>
         </header>
 
@@ -120,11 +120,9 @@ export default function AiGuideWindow() {
           <h2>Setup</h2>
           <ol>
             <li>
-              Turn on <strong>AI Bridge</strong> in the Settings panel of the main window.{' '}
+              Turn on <strong>MCP Server</strong> in the Settings panel of the main window.{' '}
               {enabled ? (
-                <span className="guide-ok">
-                  Done — the bridge is listening on 127.0.0.1:{port}.
-                </span>
+                <span className="guide-ok">Done — listening on 127.0.0.1:{port}.</span>
               ) : (
                 <span className="guide-warn">It is currently OFF.</span>
               )}
@@ -179,9 +177,9 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
                   <code>serial_digest</code>
                 </td>
                 <td>
-                  Summarise the whole capture in one call: line templates with counts, alarm
-                  totals, rare and brand-new lines, plus a cursor to follow it with. Costs the
-                  same whether the device sent 4 KB or 4 GB.
+                  Summarise the whole capture in one call: line templates with counts, alarm totals,
+                  rare and brand-new lines, plus a cursor to follow it with. Costs the same whether
+                  the device sent 4 KB or 4 GB.
                 </td>
               </tr>
               <tr>
@@ -189,8 +187,8 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
                   <code>serial_watch</code>
                 </td>
                 <td>
-                  Report only what changed since a cursor, so following a fast device does not
-                  grow the reply.
+                  Report only what changed since a cursor, so following a fast device does not grow
+                  the reply.
                 </td>
               </tr>
               <tr>
@@ -198,8 +196,8 @@ Claude : serial_send("AT+GMR") -> serial_wait_for("OK|ERROR")
                   <code>serial_sample</code>
                 </td>
                 <td>
-                  Quote real received lines, capped and with duplicates folded, each with the
-                  offset it starts at.
+                  Quote real received lines, capped and with duplicates folded, each with the offset
+                  it starts at.
                 </td>
               </tr>
               <tr>

@@ -6,6 +6,8 @@
 | --- | --- | --- |
 | `open_port` | `port_name`, `config: SerialConfig` | 指定設定でポートを開く |
 | `close_port` | なし | ポートを閉じる |
+| `reopen_port` | `port_name`, `config: SerialConfig` | 自動再接続（SYS-F-807）。ポートを開き、**既存のデータストアに追記を再開**する（ストアが無ければ新規）。切断済みのハンドルが残っていても動くが、生きている接続があれば `Err` |
+| `set_reconnecting` | `waiting: bool` | 自動再接続の待機に入った / 出たことを記録する。ブリッジの `status.reconnecting` に反映 |
 | `write_data` | `data: Vec<u8>` | データを送信する |
 | `write_dtr` | `level: bool` | DTR信号を設定する |
 | `write_rts` | `level: bool` | RTS信号を設定する |
@@ -16,8 +18,8 @@
 | `export_log` | `path: String` | 受信データをファイルにエクスポート |
 | `clear_data` | なし | 受信データをクリア |
 | `get_clipboard_text` | `mode: String` | クリップボード用テキストを取得（hex/ascii） |
-| `bridge_status` | なし | AI Bridge の状態を取得（`{ enabled, port, connections, last_activity }`）。失敗しない |
-| `bridge_set` | `enabled: bool`, `port: Option<u16>` | AI Bridge の起動 / 停止。`enabled=true` で同じポートが稼働中なら no-op、ポートが変われば再起動。戻り値は `bridge_status` と同じ形 |
+| `bridge_status` | なし | ブリッジ（設定画面の MCP Server）の状態を取得（`{ enabled, port, connections, last_activity }`）。失敗しない |
+| `bridge_set` | `enabled: bool`, `port: Option<u16>` | ブリッジの起動 / 停止。`enabled=true` で同じポートが稼働中なら no-op、ポートが変われば再起動。戻り値は `bridge_status` と同じ形 |
 | `bridge_guide_info` | なし | AI 連携ガイド用の情報（`{ exe_path, bridge_enabled, bridge_port, app_version }`）。`exe_path` は実行中バイナリの絶対パスで、ガイドが MCP 登録コマンドに埋め込む（SYS-F-1108） |
 | `open_ai_guide_window` | なし | AI 連携ガイドウィンドウ（label: `ai-guide`, `ai-guide.html`）を開く。既に開いていればフォーカスする |
 
@@ -28,7 +30,7 @@
 | `serial-status` | `{ connected: bool, error: string \| null }` | 接続状態の変化。受信スレッドが致命的 I/O エラーを検知したときに `connected=false` で発火する。フロントエンドはこれを受けて `close_port` を呼び、バックエンド状態を再同期する（SYS-F-107） |
 | `data-update` | `{ total_bytes: u64 }` | 新規データ受信通知。フロントエンドは `get_display_rows` で表示データを取得。 |
 | `log-error` | `{ message: string }` | ディスクフルなどのエラー通知。Logger スレッドの `on_error` コールバック経由で発火し、**同種のエラーは 5 秒に 1 回まで**に抑制される（SYS-F-205） |
-| `bridge-activity` | `{ kind: string, bytes: usize, preview: string }` | AI Bridge 経由の活動通知（現状 `kind: "send"` のみ）。`preview` は送信内容の先頭 64 文字。**AI の送信を人間が画面で確認できるようにするための必須経路**（SYS-F-1103） |
+| `bridge-activity` | `{ kind: string, bytes: usize, preview: string }` | ブリッジ経由の活動通知（現状 `kind: "send"` のみ）。`preview` は送信内容の先頭 64 文字。**AI の送信を人間が画面で確認できるようにするための必須経路**（SYS-F-1103） |
 
 > **Note:** `data-update` イベントはフレームレート（約60fps = 16ms間隔）に合わせて発火する。高頻度なデータ受信があってもUIへの通知はフレームレートで間引かれる。データ本体はイベントに含めず、`get_display_rows` APIで必要な範囲のみを取得する。
 
@@ -36,7 +38,7 @@
 
 ---
 
-## AI Bridge プロトコル (NDJSON / TCP)
+## ブリッジプロトコル (NDJSON / TCP)
 
 Tauri IPC とは別に、外部プロセス（MCP アダプタ等）向けの**ローカル専用ソケット**がある。
 
@@ -179,7 +181,7 @@ exe パス入りで表示する。`mcp/server.mjs` は開発用リファレン�
 
 アプリが持つ**索引**（`src-tauri/src/insight/`）から答えるツール。
 `get_data` を 1 回も呼ばないので、応答の大きさが到着レートに依存しない
-（[26 §7.3](26_ai_api_design.md)）。索引は **AI Bridge が ON の間だけ**動く。
+（[26 §7.3](26_ai_api_design.md)）。索引は **MCP Server（ブリッジ）が ON の間だけ**動く。
 
 | パラメータ | 既定 | 意味 |
 | --- | --- | --- |

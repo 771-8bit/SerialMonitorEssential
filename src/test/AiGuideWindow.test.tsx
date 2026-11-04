@@ -45,7 +45,7 @@ describe('AiGuideWindow', () => {
     render(<AiGuideWindow />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('bridge-status')).toHaveTextContent('AI Bridge: OFF');
+      expect(screen.getByTestId('bridge-status')).toHaveTextContent('MCP Server: OFF');
     });
   });
 
@@ -55,7 +55,7 @@ describe('AiGuideWindow', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('bridge-status')).toHaveTextContent(
-        'AI Bridge: ON (127.0.0.1:60000)'
+        'MCP Server: ON (127.0.0.1:60000)'
       );
     });
   });
@@ -90,6 +90,6 @@ describe('AiGuideWindow', () => {
     await waitFor(() => {
       expect(screen.getByText(/claude mcp add serial-monitor/)).toBeInTheDocument();
     });
-    expect(screen.getByTestId('bridge-status')).toHaveTextContent('AI Bridge: OFF');
+    expect(screen.getByTestId('bridge-status')).toHaveTextContent('MCP Server: OFF');
   });
 });

@@ -5,7 +5,7 @@
 //! 読み取り失敗が続いたらスキップアヘッド）。ただし docs/26 の要求により
 //! **スキップは必ず `gap` として記録し、隠さない**。
 //!
-//! `bridge_set(enabled=true)` で開始し `false` で停止する。AI Bridge は既定
+//! `bridge_set(enabled=true)` で開始し `false` で停止する。ブリッジ（MCP Server）は既定
 //! OFF なので、使わない利用者は CPU もメモリも一切払わない。
 
 use std::sync::atomic::{AtomicBool, Ordering};

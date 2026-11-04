@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""AI Bridge のライブ E2E: 内蔵 MCP アダプタ（exe --mcp）経由で実往復を検証する。
+"""MCP Server（ブリッジ）のライブ E2E: 内蔵 MCP アダプタ（exe --mcp）経由で実往復を検証する。
 
 前提（run_bridge_e2e.ps1 が自動化する。手動でやる場合）:
-  1. アプリが起動し、設定画面で AI Bridge が ON（127.0.0.1:57320）
+  1. アプリが起動し、設定画面で MCP Server が ON（127.0.0.1:57320）
   2. アプリが com0com ペアの片側（既定 COM16）へ接続済み
   3. もう片側（既定 COM15）で pong_bot.py が動作中
 

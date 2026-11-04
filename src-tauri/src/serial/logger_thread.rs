@@ -81,7 +81,7 @@ pub fn spawn_logger_thread(
                 error!("[Logger] Failed to create temp file: {:?}", e);
                 // ここで return するとログは一切書かれない（受信データは
                 // finished_list に留まり続ける）。利用者に必ず知らせる。
-                notify_error(format!("一時ファイルを作成できません: {e}"));
+                notify_error(format!("Cannot create the temporary log file: {e}"));
                 return;
             }
         };

@@ -10,6 +10,7 @@ use log::warn;
 
 use chrono::{Local, TimeZone};
 use data_store::DataStore;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
@@ -29,6 +30,10 @@ use tauri::{AppHandle, State};
 pub struct SerialState {
     pub port: Arc<Mutex<Option<Arc<tx::OpenPort>>>>,
     pub data_store: Arc<Mutex<Option<Arc<DataStore>>>>,
+    /// 自動再接続の待機中（デバイスが消え、戻るのを待っている）。フロントエンドが
+    /// 待機の出入りで `set_reconnecting` を呼ぶ。ブリッジの `status` がこれを返し、
+    /// エージェントが「ボードが再起動中なので待つべき」と判断できるようにする
+    pub reconnecting: Arc<AtomicBool>,
 }
 
 /// フレンドリー名からデバイスパスを取り出す
@@ -44,6 +49,7 @@ fn extract_port_path(port_name: &str) -> &str {
     }
 }
 
+/// 手動の Connect。新しいセッションを始める（受信データは新しいストアへ。SYS-F-803）
 #[tauri::command]
 pub fn open_port(
     state: State<'_, SerialState>,
@@ -51,8 +57,45 @@ pub fn open_port(
     port_name: String,
     config: port::SerialConfig,
 ) -> Result<(), String> {
+    open_port_impl(&state, app, &port_name, config, false)
+}
+
+/// 自動再接続。デバイスが消えて戻ってきたとき、**同じストアに追記を再開**する
+/// （オフセットは続き、ブリッジに `reset` は出ない。切断前のログが残る。SYS-F-807）。
+/// ストアが無い（切断中に Clear した）ときは新しいストアで始める。
+///
+/// `serial-status` を受けたフロントの `close_port` と順序が前後してもよいよう、
+/// 切断済みの `OpenPort` が残っていても動く。ただし生きている接続を奪うことはしない
+/// （待機中に利用者が手動で繋いだ場合など）。
+#[tauri::command]
+pub fn reopen_port(
+    state: State<'_, SerialState>,
+    app: AppHandle,
+    port_name: String,
+    config: port::SerialConfig,
+) -> Result<(), String> {
+    open_port_impl(&state, app, &port_name, config, true)
+}
+
+/// 自動再接続の待機に入った / 出たことを記録する（ブリッジの `status.reconnecting`）
+#[tauri::command]
+pub fn set_reconnecting(state: State<'_, SerialState>, waiting: bool) {
+    state.reconnecting.store(waiting, Ordering::Relaxed);
+}
+
+fn open_port_impl(
+    state: &SerialState,
+    app: AppHandle,
+    port_name: &str,
+    config: port::SerialConfig,
+    keep_store: bool,
+) -> Result<(), String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    if keep_store && port_guard.as_ref().is_some_and(|p| p.is_connected()) {
+        return Err("a port is already connected".to_string());
+    }
 
     // Stop the old session's reception FIRST (without destroying its capture):
     // the worker thread holds an Arc to the old SerialPort, so the OS COM
@@ -68,7 +111,7 @@ pub fn open_port(
     }
 
     // Parse the device path out of the friendly name
-    let port_path = extract_port_path(&port_name);
+    let port_path = extract_port_path(port_name);
 
     // Try to open the new port BEFORE destroying the previous session's data.
     // If the open fails (port busy, device absent, bad config), the previous
@@ -76,6 +119,15 @@ pub fn open_port(
     let port = port::SerialPort::new(port_path, config)?;
     let port_arc = Arc::new(tx::OpenPort::new(port_path, Box::new(port)));
     *port_guard = Some(port_arc.clone());
+    state.reconnecting.store(false, Ordering::Relaxed);
+
+    // 自動再接続: 同じストアで受信を再開する（start_reception が前回の総バイト数から続ける）
+    if keep_store {
+        if let Some(existing_store) = store_guard.as_ref() {
+            log::info!("[reopen_port] Resuming reception on the existing DataStore");
+            return existing_store.start_reception(port_arc, app, existing_store.clone());
+        }
+    }
 
     // Now it is safe to drop the old DataStore (deletes its temp files)
     if let Some(existing_store) = store_guard.take() {

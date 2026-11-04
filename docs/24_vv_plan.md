@@ -22,6 +22,7 @@
 - [05_testing.md](05_testing.md) — 現行のテスト実行コマンド
 - [23_traceability.md](23_traceability.md) — GAP 一覧（本計画の入力）
 - [22_architecture_description.md](22_architecture_description.md) — 状態機械の定義（状態遷移テストの元）
+- [27_open_verification.md](27_open_verification.md) — 未確認事項の正本（本書の「未実施」は OV-ID で参照）
 - `test_tools/README.md` — 実機・仮想 COM の手順
 
 ---
@@ -457,7 +458,7 @@ SetForegroundWindow が効かずホイールが別窓に飛んだ自動化フレ
 | 受信検証 | `test_tools/verify_received_data.py`（欠落・順序の検査） |
 | メモリ計測 | `test_tools/monitor_memory.py`, `test_tools/analyze_memory.py` |
 | UI 自動操作 | Windows UI Automation (UIA) + スクリーンショット検証 |
-| AI Bridge E2E | `test_tools/e2e/run_bridge_e2e.ps1`（一括: 起動→UIA 設定→`pong_bot.py`→`mcp_bridge_live.py`）。GUI 不要の `mcp_stdio_smoke.py` は **CI（Tier 1、両 OS）でも実行** |
+| ブリッジ（MCP Server）E2E | `test_tools/e2e/run_bridge_e2e.ps1`（一括: 起動→UIA 設定→`pong_bot.py`→`mcp_bridge_live.py`）。GUI 不要の `mcp_stdio_smoke.py` は **CI（Tier 1、両 OS）でも実行** |
 
 #### 6.1.1 ハーネスの言語方針（2026-09-04 決定）
 
@@ -517,7 +518,7 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 | E-18 | ▶LIVE ボタンとダブルクリックの両方で LIVE へ戻る | SYS-F-605 |
 | E-19 | レンジ外へ飛ぶ値を注入し、Y 軸が即座に拡大することを確認。その後 3 秒以上経ってから縮小することを確認 | SYS-F-521, 522 |
 | E-20 | 125% / 150% DPI での State Timeline 描画 | SYS-NF-304 |
-| E-21 | **AI Bridge 実往復**（`run_bridge_e2e.ps1` で自動化済）: 内蔵 MCP アダプタ経由の status → send "PING" → wait_for "PONG \d+" MATCH → read_tail、`serial_wait_for` ブロック中の ping 即応答（<2s）、`notifications/cancelled` による即中断と応答抑止、GUI への送信表示 | SYS-F-1103, 1107 |
+| E-21 | **ブリッジ実往復**（`run_bridge_e2e.ps1` で自動化済）: 内蔵 MCP アダプタ経由の status → send "PING" → wait_for "PONG \d+" MATCH → read_tail、`serial_wait_for` ブロック中の ping 即応答（<2s）、`notifications/cancelled` による即中断と応答抑止、GUI への送信表示 | SYS-F-1103, 1107 |
 
 ### 6.4 合否基準
 
@@ -533,8 +534,8 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 主要な操作組合せを機械実行できる状態にはなっている）。
 E-13〜E-20 は**一部実施済み**（2026-09-03、[07 検証節](07_plotter_spec.md#検証)に記録:
 E-13 は 10s/30s の 2 幅のみ、E-14・E-16・E-18 は実施済み。
-E-15（ピクセル完全一致）・E-17・E-19・E-20 は未実施）。
-**E-21（AI Bridge）は `run_bridge_e2e.ps1` としてスクリプト化済み**で、
+E-15（ピクセル完全一致）・E-17・E-19・E-20 は未実施 → [27 OV-6](27_open_verification.md)）。
+**E-21（ブリッジ）は `run_bridge_e2e.ps1` としてスクリプト化済み**で、
 ワンコマンドで再実行できる（2026-09-03 実施・全 PASS）。
 
 **T2-1/T2-2 ペアワイズ E2E 回帰（2026-09-04 実施・7/7 PASS）**: AI Bridge/MCP/
@@ -604,11 +605,11 @@ is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
 - **`data.bin` のテール**: アプリは最後の 64KB 未満チャンクをメモリに保持するため、
   送信直後の検証は最大 1 チャンク（<64KB）過小になる。**アプリを Disconnect すると
   最終チャンクがディスクへ flush** され `data.bin` が完全一致する（検証手順に明記）。
-- **未実施の追加項目（docs/26 §9 / DEBT-9）**: 上記はすべて **AI Bridge OFF** での
+- ~~**未実施の追加項目（docs/26 §9 / DEBT-9）**~~ **→ 下の T2-5c で実施済（2026-11-04）**: 上記はすべて **MCP Server OFF** での
   測定である。索引スレッド（`insight/thread.rs`）は `DataStore` を読む 2 本目の
-  リーダなので、**AI Bridge を ON にしたままの欠落ゼロと索引の追随**は別途測る必要が
+  リーダなので、**MCP Server を ON にしたままの欠落ゼロと索引の追随**は別途測る必要が
   ある。High Speed USB-serial 治具が入手でき次第、本 T2-5 に
-  「AI Bridge ON・12Mbps でキャプチャ欠落ゼロ、かつ `serial_digest` の
+  「MCP Server ON・12Mbps でキャプチャ欠落ゼロ、かつ `serial_digest` の
   `index_lag_bytes` が定常で 0 に戻る」を追加する。現時点の実測は ~2 Mbps まで。
 
 **T2-5b FT232H 自己ループバック（2026-11-03 実施・FAIL＝欠陥を検出）**: FT232H
@@ -622,7 +623,7 @@ is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
   FT232H の 1 KB 受信 FIFO があふれる形）。→ **フロー制御なしのループバックでは
   「60 秒欠落 0」はアプリ以前にトランスポートが満たさない**。SYS-NF-101 の受入には
   RTS/CTS（D2–D3 ジャンパ）か、別個の送信元を要する。
-- **アプリ経路（AI Bridge ON・12 Mbaud・ブリッジ `send` で送信 → `read_range` で読み戻し）**:
+- **アプリ経路（MCP Server ON・12 Mbaud・ブリッジ `send` で送信 → `read_range` で読み戻し）**:
   | 1 回の send | 実効送信 | 欠落率 |
   |---|---|---|
   | 1 KiB（20 秒） | 0.15 MB/s | 0.26% |
@@ -655,7 +656,7 @@ is_timeout、`bridge_set`/`bridge_guide_info`）、mcp_stdio.rs
 
 **T2-5c DEBT-10 修正後の受入（2026-11-04 実施・PASS）**: ADR-14 改訂 3（受信ワーカーが
 ポートを単独所有し送信をキュー経由で 1 ms 分ずつ交互に書く・無進捗タイムアウト 3 s・
-Windows のタイマ精度 1 ms）の release ビルドで、AI Bridge ON・12 Mbaud・FT232H
+Windows のタイマ精度 1 ms）の release ビルドで、MCP Server ON・12 Mbaud・FT232H
 （D0–D1 / D2–D3 ジャンパ）。`run_app_loopback.ps1`。
 
 | 条件 | 結果 |
@@ -681,7 +682,7 @@ Windows のタイマ精度 1 ms）の release ビルドで、AI Bridge ON・12 M
   （3 秒間 1 バイトも受理されなければ失敗）に置き換えて解消（別エージェントのレビューで承認）。
 - 方式の妥当性は pyserial で同じ交互方式（1200 B 書く → 溜まった分を読む）を再現して確認した:
   ほぼ線速度で欠落 0.15%（基準並み）。交互方式そのものは受信を落とさない。
-- **未実施（要手作業）**: 低ボーレートの送信中に D2–D3 ジャンパを一時的に外して戻す試験
+- **未実施（要手作業） → [27 OV-5](27_open_verification.md)**: 低ボーレートの送信中に D2–D3 ジャンパを一時的に外して戻す試験
   （CTS 停止からの再開を実機で通す。ループバックでは CTS 停止がほぼ起きないため）。
   単体では偽ポートの `StallAfter` で停止 → 再開・重複なしを固定済み。
 

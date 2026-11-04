@@ -43,13 +43,17 @@ function renderPanel() {
       isConnected={false}
       onConnect={vi.fn()}
       onDisconnect={vi.fn()}
+      autoReconnect={false}
+      onAutoReconnectChange={vi.fn()}
+      reconnectWaitingFor={null}
+      reconnectedAt={null}
     />
   );
 }
 
-const bridgeCheckbox = () => screen.getByLabelText('AI Bridge');
+const bridgeCheckbox = () => screen.getByLabelText('MCP Server');
 
-describe('SettingsPanel - AI Bridge', () => {
+describe('SettingsPanel - MCP Server', () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(bridgeStatus());
@@ -75,7 +79,7 @@ describe('SettingsPanel - AI Bridge', () => {
     renderPanel();
     expect(bridgeCheckbox().closest('label')).toHaveAttribute(
       'title',
-      'ローカルのAIエージェント用ブリッジ（127.0.0.1のみ・既定OFF）'
+      'Local access for MCP clients and scripts (127.0.0.1 only, off by default)'
     );
   });
 
@@ -147,8 +151,8 @@ describe('SettingsPanel - AI Bridge', () => {
     renderPanel();
     fireEvent.click(bridgeCheckbox());
 
-    const hint = await screen.findByText(/接続 2/);
-    expect(hint).toHaveTextContent('送信 12 bytes');
+    const hint = await screen.findByText(/Clients: 2/);
+    expect(hint).toHaveTextContent('Sent 12 bytes');
     // 人間が AI の送信内容を確認できる（制御文字は可視化される）
     expect(hint).toHaveTextContent('AT+GMR··');
   });

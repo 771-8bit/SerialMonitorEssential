@@ -20,7 +20,7 @@ In this setup, **the app itself acts as the multiplexer**.
 ```
   Device ── COM port ── SerialMonitorEssential (the app is the sole owner)
                               ├── GUI ............ what a human watches and sends from
-                              └── AI Bridge (TCP) ── MCP server ── AI agent
+                              └── bridge (TCP) ──── MCP adapter ── AI agent
 ```
 
 Humans use the GUI, the AI uses MCP. Both see **the same receive buffer and the same port**,
@@ -29,13 +29,13 @@ while you verify on screen" work without fighting over the port.
 
 | Layer | What it is | Role |
 | --- | --- | --- |
-| Layer 1 | AI Bridge inside the app | Runs an NDJSON TCP server on `127.0.0.1:57320` |
+| Layer 1 | Bridge inside the app (the "MCP Server" toggle in Settings) | Runs an NDJSON TCP server on `127.0.0.1:57320` |
 | Layer 2 | This directory (`server.mjs`) | A stdio server that translates that TCP into MCP tools |
 
 ## Prerequisites
 
 1. **SerialMonitorEssential must be running.**
-2. **Turn on "AI Bridge" in the settings panel** (off by default).
+2. **Turn on "MCP Server" in the settings panel** (off by default).
 3. Node.js **20 or later**.
 4. Install dependencies:
 
@@ -44,9 +44,9 @@ while you verify on screen" work without fighting over the port.
    npm install
    ```
 
-If the app is not running or AI Bridge is off, the tools do not throw; they return a
-bilingual (Japanese + English) error message telling you to start the app and turn on
-AI Bridge in its settings.
+If the app is not running or MCP Server is off, the tools do not throw; they return an
+error message telling you to start the app and turn on
+MCP Server in its settings.
 
 ## Registering with Claude Code
 
@@ -80,8 +80,8 @@ After registering, you should see `serial-monitor` in `claude mcp list`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SME_BRIDGE_HOST` | `127.0.0.1` | AI Bridge host. Anything other than loopback is not recommended. |
-| `SME_BRIDGE_PORT` | `57320` | AI Bridge port. Must match the setting in the app. |
+| `SME_BRIDGE_HOST` | `127.0.0.1` | Bridge host. Anything other than loopback is not recommended. |
+| `SME_BRIDGE_PORT` | `57320` | Bridge port. Must match the setting in the app. |
 | `SME_BRIDGE_TOKEN` | (none) | Only needed if a token is configured on the app side. `auth` is sent automatically right after connecting. |
 
 ## Tools
@@ -110,7 +110,7 @@ Notes:
 - `serial_find` reports an exact count, or `AT LEAST` when the scan was cut short (3 s budget)
   or skipped unreadable bytes. A zero always comes with the coverage that produced it, so
   "not found" cannot be mistaken for "could not look".
-- `serial_digest` / `serial_watch` need the index, which runs only while the AI Bridge is on.
+- `serial_digest` / `serial_watch` need the index, which runs only while MCP Server is on.
   Turning the bridge on does not index what arrived before it: the reply states the coverage,
   and any lag or unreadable region is reported rather than hidden. A count of zero always
   comes with the coverage that produced it.
@@ -155,7 +155,7 @@ passed straight to `serial_read_range`.
 ## Security
 
 - **Listens on `127.0.0.1` only.** Not reachable from external networks.
-- **Off by default.** Runs only when AI Bridge is explicitly turned on in the app's settings.
+- **Off by default.** Runs only when MCP Server is explicitly turned on in the app's settings.
 - **Every send is shown in the GUI.** A human can see on screen what the AI wrote.
 - Token authentication can be enabled with `SME_BRIDGE_TOKEN` if needed (against other
   processes on the same PC).

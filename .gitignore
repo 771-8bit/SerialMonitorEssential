@@ -32,3 +32,9 @@ test_result.txt
 # Python
 __pycache__/
 *.py[cod]
+
+# Generated test coverage
+coverage/
+
+# Personal notes for AI assistants (kept locally, not published)
+agents/

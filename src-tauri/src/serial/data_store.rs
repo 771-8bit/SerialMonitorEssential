@@ -127,6 +127,9 @@ impl DataStore {
         info!("[DataStore] Starting reception");
         // 既に動作中の場合は停止（そのワーカーが I/O を port へ返す）
         self.stop_reception();
+        // 新しいストアなら 0。自動再接続で同じストアに受信を再開するときは、
+        // 前回までの続きのオフセットから追記する（停止後に数えるので最終チャンクも含む）
+        let start_offset = self.total_bytes();
 
         let parked = port.take_io().ok_or_else(|| "port not open".to_string())?;
 
@@ -142,6 +145,7 @@ impl DataStore {
             self.free_pool.clone(),
             self.finished_list.clone(),
             self.line_index.clone(), // Phase 2: pass line_index for pre-indexing
+            start_offset,
             self.stop_flag.clone(),
             Box::new(move |error: String| {
                 use tauri::Emitter;

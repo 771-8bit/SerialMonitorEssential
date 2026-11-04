@@ -73,7 +73,7 @@
   border-bottom: none;
 }
 
-/* AI Bridge row: endpoint + activity hint */
+/* MCP Server row: endpoint + activity hint */
 .bridge-endpoint {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 12px;
@@ -107,4 +107,15 @@
 
 .baud-dropdown-edit:hover {
   background-color: #3a3a3a;
+}
+
+/* Auto reconnect state, next to the checkbox */
+.reconnect-status {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
+}
+
+.reconnect-status.waiting {
+  color: #e0a040;
 }

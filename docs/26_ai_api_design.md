@@ -88,7 +88,7 @@ pub struct BridgeCtx {
 
 - インデックスは**ブリッジの所有物**であり、プロッタ窓やメイン窓の開閉に影響されない。
 - `IndexThread` は `bridge_set(enabled=true)`（`bridge.rs:989` 付近）で開始し、
-  `false` で停止する。**AI Bridge は既定 OFF** なので、使わない利用者は CPU/メモリを
+  `false` で停止する。**ブリッジ（MCP Server）は既定 OFF** なので、使わない利用者は CPU/メモリを
   一切払わない。
 - スレッド構造は実績のある `PlotterThread::run` に倣う（毎回ストアを再解決、
   `Arc::ptr_eq` で世代差し替え検知、1 MiB で読み出し上限、読み取り失敗が続いたら
@@ -510,11 +510,11 @@ INDEX stream does not look line oriented (11.3% control bytes): the line counts 
 - 行指向でないストリームでは行数もテンプレートも意味を持たない。判定して
   固定枠で明言する（§7.6）が、**判定自体はヒューリスティック**であり、
   制御バイトの少ないバイナリ（例: 0x80 以上が支配的なフレーム）は見逃す。
-- 索引は AI Bridge が ON のときだけ動く。OFF の利用者はコストゼロだが、
+- 索引はブリッジ（MCP Server）が ON のときだけ動く。OFF の利用者はコストゼロだが、
   ON にした直後は履歴の索引が無い（`coverage_pct` で明示）。
 - 12 Mbps での索引スレッドの追随性能は**未実測**（現時点の実測は ~2 Mbps まで）。
   FT232H 級の治具が入手でき次第、[24 §6.5](24_vv_plan.md) の T2-5 に
-  「AI Bridge ON のままキャプチャ欠落ゼロ + 索引が追随」を追加して測る。
+  「MCP Server ON のままキャプチャ欠落ゼロ + 索引が追随」を追加して測る。
 
 ---
 

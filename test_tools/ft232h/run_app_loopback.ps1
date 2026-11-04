@@ -1,7 +1,7 @@
 # FT232H 自己ループバックでのアプリ受信試験を一括実行する（SYS-NF-101 / DEBT-9）
 #
 # やること:
-#   1. アプリ起動 → UIA で AI Bridge ON・ボーレート選択・$Port へ接続
+#   1. アプリ起動 → UIA で MCP Server ON・ボーレート選択・$Port へ接続
 #   2. app_loopback.py（ブリッジ send で連続送信 → read_range で読み戻し SHA-256 比較、
 #      digest の index_lag_bytes を記録）
 #   3. 後片付け（アプリ終了）
@@ -83,7 +83,7 @@ function Invoke-Ui([string[]]$UiArgs, [string]$What) {
   Fail "could not $What"
 }
 
-Invoke-Ui @("-Action", "toggle", "-Name", "AI Bridge", "-State", "On") "turn AI Bridge on"
+Invoke-Ui @("-Action", "toggle", "-Name", "MCP Server", "-State", "On") "turn MCP Server on"
 Invoke-Ui @("-Action", "select-port", "-Name", $Port) "select $Port"
 # ボーレートは独自ドロップダウン: トリガは Text '<rate>' + Text ' bps'、選択肢は ListItem '<rate>'。
 # ' bps' をクリックして開き、ListItem に限定してクリックする（Text '<rate>' と名前が衝突するため）。

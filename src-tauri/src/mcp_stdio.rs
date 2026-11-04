@@ -3,7 +3,7 @@
 //! インストール済みのアプリだけで AI 連携が完結するよう、MCP サーバを
 //! アプリ本体に内蔵する（Node.js 不要）。`serial-monitor-essential --mcp` は
 //! GUI を起動せず、stdin/stdout で MCP (JSON-RPC 2.0, 行区切り) を話し、
-//! ローカルの AI Bridge (bridge.rs, NDJSON TCP) へ中継する。
+//! ローカルのブリッジ (bridge.rs, NDJSON TCP。設定画面の表示名は「MCP Server」) へ中継する。
 //!
 //! - 公開ツールは `mcp/server.mjs`（開発用 Node 実装）と同一の 7 種。
 //!   出力テキストの形式も揃えてある。ツールを追加・変更するときは両方を
@@ -73,25 +73,30 @@ const LATEST_PROTOCOL_VERSION: &str = "2025-06-18";
 // ブリッジ接続（トレイトで抽象化: テストはモックを差す）
 // ============================================================================
 
-/// AI Bridge への 1 リクエスト（メソッド + params -> result）
+/// ブリッジへの 1 リクエスト（メソッド + params -> result）
 pub trait Bridge {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String>;
 }
 
 fn unreachable_message(host: &str, port: u16, detail: &str) -> String {
     format!(
-        "シリアルブリッジに接続できません ({host}:{port})。\n\
-         SerialMonitorEssential を起動し、設定画面で「AI Bridge」を ON にしてください。\n\
-         Cannot reach the SerialMonitorEssential bridge at {host}:{port}.\n\
-         Start the app and turn on \"AI Bridge\" in its settings.\n({detail})"
+        "Cannot reach the SerialMonitorEssential bridge at {host}:{port}.\n\
+         Start the app and turn on \"MCP Server\" in its settings.\n({detail})"
     )
 }
 
+/// `serial_status` の接続状態。再接続待ちなら、エージェントが「待てば同じキャプチャに
+/// 続きが来る」と分かるように書く（Node 版と同じ文言）
+fn connected_label(connected: bool, reconnecting: bool) -> &'static str {
+    match (connected, reconnecting) {
+        (true, _) => "yes",
+        (false, true) => "no (device went away; the app reconnects when it returns and the capture continues at the same offsets)",
+        (false, false) => "no",
+    }
+}
+
 fn bridge_error_message(method: &str, error: &str) -> String {
-    format!(
-        "ブリッジがエラーを返しました (method={method}): {error}\n\
-         The bridge returned an error (method={method}): {error}"
-    )
+    format!("The bridge returned an error (method={method}): {error}")
 }
 
 /// 実 TCP のブリッジクライアント（遅延接続・自動 auth・切断時 1 回だけ再接続）
@@ -186,9 +191,7 @@ impl TcpBridgeClient {
                     ) =>
                 {
                     return Err(format!(
-                        "ブリッジへの要求がタイムアウトしました (method={method}, {}ms)。\n\
-                         The bridge did not answer in time (method={method}, {}ms).",
-                        self.timeout.as_millis(),
+                        "The bridge did not answer in time (method={method}, {}ms).",
                         self.timeout.as_millis()
                     ))
                 }
@@ -791,19 +794,13 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
         .filter(|c| !c.is_whitespace() && !matches!(c, ',' | ':' | ';' | '_' | '-'))
         .collect();
     if cleaned.is_empty() {
-        return Err("hex が空です / hex string is empty".to_string());
+        return Err("hex string is empty".to_string());
     }
     if !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(
-            "16進数として不正な文字が含まれています / hex string contains non-hex characters"
-                .to_string(),
-        );
+        return Err("hex string contains non-hex characters".to_string());
     }
     if !cleaned.len().is_multiple_of(2) {
-        return Err(
-            "16進数は2桁ずつ (バイト単位) で指定してください / hex string must have an even number of digits"
-                .to_string(),
-        );
+        return Err("hex string must have an even number of digits".to_string());
     }
     Ok(cleaned
         .as_bytes()
@@ -867,7 +864,7 @@ pub fn wait_for_pattern_from(
 ) -> Result<WaitOutcome, String> {
     // ブリッジ側でも検証されるが、ここで弾くと往復せずに理由を返せる
     regex::bytes::Regex::new(&format!("(?m){pattern}"))
-        .map_err(|e| format!("パターンが不正です / invalid pattern: {e}"))?;
+        .map_err(|e| format!("invalid pattern: {e}"))?;
     let started = Instant::now();
 
     let mut from = start;
@@ -990,7 +987,7 @@ pub fn wait_for_pattern(
 ) -> Result<WaitOutcome, String> {
     // 不正なパターンは往復する前に弾く（開始位置を引きに行く意味がない）
     regex::bytes::Regex::new(&format!("(?m){pattern}"))
-        .map_err(|e| format!("パターンが不正です / invalid pattern: {e}"))?;
+        .map_err(|e| format!("invalid pattern: {e}"))?;
     let status = bridge.request("status", json!({}))?;
     let total = status
         .get("total_bytes")
@@ -1346,9 +1343,13 @@ pub fn call_tool_with_cancel(
                 .unwrap_or("(none)");
             // `raw: {全 JSON}` は上の 4 行と同じ内容を JSON で繰り返すだけで、
             // 情報ゼロのままトークンを倍にしていた（docs/26 §5）。
+            let reconnecting = res
+                .get("reconnecting")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             Ok(format!(
                 "connected: {}\nport: {}\ntotal_bytes: {}\napp_version: {} (protocol {})",
-                if connected { "yes" } else { "no" },
+                connected_label(connected, reconnecting),
                 port,
                 res.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
                 res.get("app_version")
@@ -2398,6 +2399,28 @@ mod tests {
         assert_eq!(res["error"]["code"], json!(-32602));
     }
 
+    /// 再接続待ちは「待てば続きが来る」と分かる書き方で出る（ブリッジ未対応の古い
+    /// 応答では `reconnecting` が無いので従来どおり "no"）
+    #[test]
+    fn test_tools_call_status_reports_reconnecting() {
+        let mut bridge = MockBridge::new(vec![
+            Ok(
+                json!({ "connected": false, "reconnecting": true, "port_name": "COM3", "total_bytes": 42, "app_version": "0.1.0", "protocol": 1 }),
+            ),
+            Ok(
+                json!({ "connected": false, "port_name": null, "total_bytes": 0, "app_version": "0.1.0", "protocol": 1 }),
+            ),
+        ]);
+        let call =
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_status"}}"#;
+        let res = rpc(&mut bridge, call);
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("connected: no (device went away;"), "{text}");
+        let res = rpc(&mut bridge, call);
+        let text = res["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("connected: no\n"), "{text}");
+    }
+
     #[test]
     fn test_tools_call_status_success_and_bridge_error() {
         let mut bridge = MockBridge::new(vec![
@@ -2965,7 +2988,7 @@ mod tests {
         // 誰も聞いていないポート -> 接続失敗の案内文（両言語）
         let mut client = TcpBridgeClient::new("127.0.0.1".to_string(), 1, None);
         let err = call_tool(&mut client, "serial_status", &json!({})).unwrap_err();
-        assert!(err.contains("AI Bridge"));
+        assert!(err.contains("MCP Server"));
         assert!(err.contains("Cannot reach"));
     }
 

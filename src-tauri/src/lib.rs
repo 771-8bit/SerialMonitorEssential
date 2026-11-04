@@ -76,6 +76,7 @@ pub fn run() {
         .manage(SerialState {
             port: std::sync::Arc::new(Mutex::new(None)),
             data_store: std::sync::Arc::new(Mutex::new(None)),
+            reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
         .manage(PlotterState {
             aggregator: PlotterAggregator::new(),
@@ -87,6 +88,8 @@ pub fn run() {
             serial::list_ports,
             serial::open_port,
             serial::close_port,
+            serial::reopen_port,
+            serial::set_reconnecting,
             serial::write_data,
             serial::get_read_data,
             serial::get_display_rows,

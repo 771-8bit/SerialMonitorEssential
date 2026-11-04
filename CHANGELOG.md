@@ -9,6 +9,22 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+### Added
+
+- **Auto Reconnect** (the former placeholder "Auto Connect" checkbox): when the device goes away
+  (unplugged or reset) and comes back on the same port, the app reopens it and keeps appending
+  to the same capture, so the output from before the reset is kept. Off by default; the setting
+  is remembered. The bridge `status` reports `reconnecting: true` while waiting, and the MCP
+  `serial_status` tool says so.
+
+### Changed
+
+- The settings toggle formerly labelled **AI Bridge** is now **MCP Server** (same feature,
+  same port and protocol; `SME_BRIDGE_*` environment variables are unchanged).
+- All user-facing text is English only: the remaining Japanese UI strings (bridge tooltip,
+  connection/send status, log-error alert) were translated, and MCP error messages are no
+  longer bilingual.
+
 ### Fixed
 
 - Sending no longer stops reception. Previously a send held the port lock for the
