@@ -29,6 +29,8 @@ interface UseByteScrollReturn {
   scrollTop: number;
   scrollHeight: number;
   visibleRows: number;
+  /** Height of the scroll viewport in px (0 until measured) */
+  viewportHeight: number;
 
   // Handlers
   handleScroll: (e: React.UIEvent<HTMLDivElement>) => void;
@@ -48,6 +50,7 @@ export function useByteScroll({
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [visibleRows, setVisibleRows] = useState(25);
+  const [viewportHeight, setViewportHeight] = useState(0);
 
   // Refs for preventing re-render loops and managing scroll anchoring
   const lastUpdateRef = useRef(0);
@@ -115,6 +118,7 @@ export function useByteScroll({
       const height = el.clientHeight;
       if (height > 0) {
         setVisibleRows(Math.ceil(height / ROW_HEIGHT));
+        setViewportHeight(height);
       }
     };
 
@@ -341,6 +345,7 @@ export function useByteScroll({
     scrollTop,
     scrollHeight,
     visibleRows,
+    viewportHeight,
     handleScroll,
     getByteOffset,
     scrollTo,

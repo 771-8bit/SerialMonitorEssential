@@ -87,3 +87,27 @@ export function clampByteOffset(byteOffset: number, totalBytes: number): number 
 
 /** Start line that asks the backend for the last lines (clamped there atomically) */
 export const TAIL_START_LINE = Number.MAX_SAFE_INTEGER;
+
+/**
+ * First visible row for a scroll position, for fixed-height rows.
+ *
+ * Maps the full scroll range onto the full row range: the top shows row 0 and the
+ * bottom shows the last page. With unscaled heights this is simply
+ * scrollTop / ROW_HEIGHT. When the scroll height is capped (huge captures) the plain
+ * ratio scrollTop / scrollHeight never reaches the last rows, because the maximum
+ * scrollTop is scrollHeight - viewport, which in rows is far less than a page.
+ */
+export function rowAtScrollTop(
+  scrollTop: number,
+  scrollHeight: number,
+  viewportHeight: number,
+  totalRows: number
+): number {
+  const maxScroll = scrollHeight - viewportHeight;
+  const lastTopRow = Math.max(0, totalRows - viewportHeight / ROW_HEIGHT);
+  if (maxScroll <= 0 || viewportHeight <= 0) {
+    // Not measured yet / everything fits: the plain ratio
+    return scrollHeight > 0 ? Math.floor((scrollTop / scrollHeight) * totalRows) : 0;
+  }
+  return Math.floor(Math.min(1, Math.max(0, scrollTop / maxScroll)) * lastTopRow);
+}
