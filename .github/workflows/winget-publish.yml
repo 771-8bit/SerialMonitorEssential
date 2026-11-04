@@ -1,0 +1,174 @@
+# winget-pkgs へのマニフェスト提出を「機械的な手順」としてだけ固定したワークフロー。
+#
+# ──────────────────────────────────────────────────────────────────────────
+# オーナー規約（厳守）
+#   winget-pkgs への提出は、本リポジトリでのリリース + 動作確認 + 明示的な許可の後。
+#   リリース済みバイナリでの動作確認とオーナーの明示的許可なしに実行してはならない。
+# ──────────────────────────────────────────────────────────────────────────
+#
+# 自動提出は行わない。実行には次の 3 つが同時に揃う必要がある（3 重ゲート）。
+#   1. 人間による workflow_dispatch（タグ push や Release 公開では発火しない）
+#   2. confirm 入力に確認フレーズ "I-HAVE-OWNER-APPROVAL" を打ち込むこと
+#   3. リポジトリシークレット WINGET_TOKEN が登録されていること
+# どれか 1 つでも欠ければジョブは提出前に停止する。
+#
+# 実行の前提となる順序は packaging/winget/README.md 「公開手順」を参照。
+#   Release publish → 公開済みバイナリで動作確認 → オーナーの許可 → 本ワークフローを dispatch
+#
+# 初回提出には使えない（wingetcreate update は既存パッケージ専用）。
+# 初回は手動 PR または wingetcreate new で行う。下部にコメントとして両経路を残す。
+
+name: Winget Publish (manual, approval-gated)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'リリース済みのバージョン番号（v なし。例: 0.1.0）'
+        required: true
+        type: string
+      confirm:
+        description: 'オーナーの許可と動作確認が済んでいる場合のみ I-HAVE-OWNER-APPROVAL と入力'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Submit manifest update to winget-pkgs
+    runs-on: windows-latest
+
+    steps:
+      # ゲート 2: 確認フレーズ。誤操作での dispatch をここで止める。
+      - name: Verify approval phrase
+        shell: pwsh
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:CONFIRM -cne 'I-HAVE-OWNER-APPROVAL') {
+            Write-Host '::error::confirm 入力が一致しません。'
+            Write-Host '::error::winget-pkgs への提出は、リリース済みバイナリでの動作確認とオーナーの明示的許可の後にのみ許される。'
+            Write-Host '::error::許可を得ている場合のみ confirm に I-HAVE-OWNER-APPROVAL を入力して再実行すること。'
+            exit 1
+          }
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Host "::error::version の形式が不正です: '$env:VERSION'（期待: 0.1.0 のような x.y.z）"
+            exit 1
+          }
+          Write-Host "承認フレーズを確認。対象バージョン: $env:VERSION"
+
+      # ゲート 3: シークレット。無いまま進むと wingetcreate が終盤で落ちるので先に止める。
+      - name: Verify WINGET_TOKEN is present
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
+            Write-Host '::error::シークレット WINGET_TOKEN が未登録です。'
+            Write-Host '::error::microsoft/winget-pkgs をフォークして PR を作れる PAT（classic: public_repo）を'
+            Write-Host '::error::Settings > Secrets and variables > Actions に WINGET_TOKEN として登録してください。'
+            Write-Host '::error::GITHUB_TOKEN は他リポジトリへの PR 作成権限がないため使用できません。'
+            exit 1
+          }
+          Write-Host 'WINGET_TOKEN を確認。'
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Release が draft のままだとここで落ちる。それが正しい挙動である
+      # （draft のアセット URL は winget の検証パイプラインから到達できない）。
+      - name: Download published release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          gh release download "v$env:VERSION" --repo "$env:GITHUB_REPOSITORY" --pattern '*-setup.exe' --dir dist
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::v$env:VERSION の Release から *-setup.exe を取得できません。publish 済みか確認してください。"
+            exit 1
+          }
+          $files = @(Get-ChildItem dist -Filter '*-setup.exe')
+          if ($files.Count -ne 1) {
+            Write-Host "::error::*-setup.exe が 1 個ではありません（$($files.Count) 個）。アセットを確認してください。"
+            exit 1
+          }
+          Write-Host "取得: $($files[0].Name)"
+
+      - name: Compute SHA256 and resolve asset URL
+        id: asset
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $file = @(Get-ChildItem dist -Filter '*-setup.exe')[0]
+          $sha  = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash
+          $url  = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$($file.Name)"
+          "sha=$sha"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "url=$url"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "InstallerUrl   : $url"
+          Write-Host "InstallerSha256: $sha"
+
+      - name: Install wingetcreate
+        shell: pwsh
+        run: |
+          # ホストランナーの winget は非対話セッションで不安定なため、実行ファイルを直接取得する。
+          Invoke-WebRequest -Uri 'https://aka.ms/wingetcreate/latest' -OutFile wingetcreate.exe
+          .\wingetcreate.exe --version
+
+      # 既存パッケージの「バージョン更新」。マニフェストは winget-pkgs 上の直近版から
+      # 引き継がれ、URL / バージョン / SHA-256 のみが差し替わる。
+      # packaging/winget/ のテンプレートは、その引き継がれる内容の記録・レビュー用である。
+      - name: Submit manifest update
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          ASSET_URL: ${{ steps.asset.outputs.url }}
+        run: |
+          .\wingetcreate.exe update 771-8bit.serial-monitor-essential `
+            --urls "$env:ASSET_URL" `
+            --version "$env:VERSION" `
+            --submit `
+            --token "$env:WINGET_TOKEN"
+
+      - name: Report
+        if: success()
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          Write-Host "winget-pkgs へ PR を作成しました（v$env:VERSION）。"
+          Write-Host 'https://github.com/microsoft/winget-pkgs/pulls で自動検証とレビューの結果を確認してください。'
+          Write-Host '初回提出はレビューに数日かかります。'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 初回提出（本ワークフローでは実行しない）
+#
+# wingetcreate update は winget-pkgs に既存のパッケージにしか使えない。
+# 初回は次のどちらかを手元で実行する。手動 PR のほうが指摘への対応が容易で確実。
+#
+# (A) 手動 PR — packaging/winget/README.md 「初回提出は手動 PR でよい」参照
+#     1. packaging/winget/ の 3 ファイルの <VERSION> / <SHA256> / <PRODUCT_CODE> を置換
+#     2. winget-pkgs のフォークの
+#        manifests/7/771-8bit/serial-monitor-essential/<VERSION>/ に配置
+#     3. ローカル検証:
+#          winget validate --manifest <dir>
+#          winget install  --manifest <dir>   # 実際に入るので確認後アンインストールする
+#     4. PR を出す
+#
+# (B) wingetcreate new — 対話的に生成して提出する。生成物と
+#     packaging/winget/ のテンプレートの差分を確認してから submit すること。
+#
+#     .\wingetcreate.exe new "<ASSET_URL>" `
+#       --out .\generated `
+#       --token "$env:WINGET_TOKEN"
+#     # 生成結果を確認してから:
+#     .\wingetcreate.exe submit .\generated --token "$env:WINGET_TOKEN"
+#
+# komac でも同じことができる（komac new / komac update）。どちらを使ってもよい。
+# ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,9 @@
+# テンプレート。<VERSION> を実バージョン（例: 0.1.0）に置換して使う。
+# 手順と前提は同ディレクトリの README.md を参照。
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+
+PackageIdentifier: 771-8bit.serial-monitor-essential
+PackageVersion: <VERSION>
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b423a0bc0efad1eafc1f421b2bee112c38b1c6473de7c073cc52a1ba05538d7c # shrinks to spec = StreamSpec { start_ms: 0, n: 1989, channels: 1, ts_seed: 560792412871559, val_seed: 0 }, pixel_width = 50, max_points = 50
+cc 98aafed88d06c299608b092b96f1259234a437ced9b4259a4a6e902077235bda # shrinks to spec = StreamSpec { start_ms: 0, n: 1908, channels: 2, ts_seed: 3588626926448226305, val_seed: 0 }, max_points = 50
+cc 558b931cd52041848f29ebf5a96f1f1d8a0146ec7aaa1e50dc83e4c755ad020c # shrinks to spec = StreamSpec { start_ms: 0, n: 1917, channels: 2, ts_seed: 11605113174016797232, val_seed: 0 }, pixel_width = 50, max_points = 50, use_average = false
+cc 8629fca54fb15c8b35c09e383afa88bf49375f430c37952d29b2262aeb78da05 # shrinks to spec = StreamSpec { start_ms: 0, n: 1892, channels: 3, ts_seed: 6099191249859508196, val_seed: 0 }, pixel_width = 50, max_points = 50, use_average = false
+cc 6cfa8c8f82a8bdfcd7bb5a280f1fafdccfdf654bb59c16a7230525823791c64e # shrinks to spec = StreamSpec { start_ms: 0, n: 1878, channels: 3, ts_seed: 9487274873391755049, val_seed: 0 }, pixel_width = 50, max_points = 50
+cc b19c284fa061115e74357f30a0f2eba0089761da9486a67f1d697ab0c1a60e4f # shrinks to spec = StreamSpec { start_ms: 3163, n: 1319, channels: 1, ts_seed: 12353548026579714354, val_seed: 155876212035127069 }, pixel_width = 134, max_points = 1000, realtime = false
