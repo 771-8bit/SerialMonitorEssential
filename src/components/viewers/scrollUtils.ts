@@ -84,3 +84,6 @@ export function calculateBottomByteOffset(
 export function clampByteOffset(byteOffset: number, totalBytes: number): number {
   return Math.max(0, Math.min(byteOffset, totalBytes));
 }
+
+/** Start line that asks the backend for the last lines (clamped there atomically) */
+export const TAIL_START_LINE = Number.MAX_SAFE_INTEGER;

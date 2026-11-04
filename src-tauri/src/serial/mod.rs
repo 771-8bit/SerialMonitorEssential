@@ -357,6 +357,35 @@ pub struct AsciiLine {
 pub struct AsciiLinesPayload {
     lines: Vec<AsciiLine>,
     total_lines: u64,
+    /// Line index of `lines[0]` actually served. A request past the end is clamped to
+    /// the last `line_count` lines, so a viewer that asks for "the tail" gets it
+    /// atomically even while the line count grows (issue #3).
+    start_line: u64,
+    /// Whether the served range runs to the end of the data. Not derivable from
+    /// `lines.len()`: after a trailing LF the line index holds an empty last line,
+    /// which is not sent.
+    reaches_end: bool,
+}
+
+/// Clamp a requested start line so that a request past the end serves the last
+/// `line_count` lines instead of nothing.
+fn clamp_start_line(start_line: u64, line_count: u32, total_lines: u64) -> u64 {
+    start_line.min(total_lines.saturating_sub(line_count as u64))
+}
+
+/// Timestamp text for a line, the same everywhere (view, Copy, Save): local
+/// `HH:MM:SS.d`. Timestamps are recorded about every 100 ms, so tenths are the real
+/// precision; lines received before the first record show `--:--:--.0`.
+pub(crate) fn format_line_timestamp(ts_millis: Option<u64>) -> String {
+    ts_millis
+        .and_then(|ms| {
+            Local
+                .timestamp_millis_opt(ms as i64)
+                .single()
+                .map(|dt| (ms, dt))
+        })
+        .map(|(ms, dt)| format!("{}.{}", dt.format("%H:%M:%S"), (ms % 1000) / 100))
+        .unwrap_or_else(|| "--:--:--.0".to_string())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -395,6 +424,8 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines: 0,
+                start_line: 0,
+                reaches_end: true,
             });
         }
 
@@ -407,16 +438,23 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines: 0,
+                start_line: 0,
+                reaches_end: true,
             });
         }
 
+        let start_line = clamp_start_line(start_line, line_count, total_lines);
+
         // Get line offsets for requested range
         let line_offsets = data_store.get_line_offsets(start_line, line_count);
+        let reaches_end = start_line + line_offsets.len() as u64 >= total_lines;
 
         if line_offsets.is_empty() {
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines,
+                start_line,
+                reaches_end,
             });
         }
 
@@ -431,6 +469,8 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines,
+                start_line,
+                reaches_end,
             });
         }
 
@@ -442,6 +482,8 @@ pub fn get_ascii_lines(
                 return Ok(AsciiLinesPayload {
                     lines: vec![],
                     total_lines,
+                    start_line,
+                    reaches_end,
                 });
             }
         };
@@ -458,23 +500,9 @@ pub fn get_ascii_lines(
                 let text = bytes_to_ascii(line_data);
 
                 // Get timestamp from timestamp_index using binary search
-                let timestamp = if show_timestamp {
-                    if let Some(ts_millis) = data_store.get_timestamp_for_offset(line_start) {
-                        // Use chrono to convert UTC timestamp (millis) to Local time
-                        // timestamp_millis_opt handles the conversion safely
-                        if let Some(dt) = Local.timestamp_millis_opt(ts_millis as i64).single() {
-                            let time_str = dt.format("%H:%M:%S").to_string();
-                            let d = (ts_millis % 1000) / 100;
-                            Some(format!("{}.{}", time_str, d))
-                        } else {
-                            Some("--:--:--.0".to_string())
-                        }
-                    } else {
-                        Some("--:--:--.0".to_string())
-                    }
-                } else {
-                    None
-                };
+                let timestamp = show_timestamp.then(|| {
+                    format_line_timestamp(data_store.get_timestamp_for_offset(line_start))
+                });
 
                 lines.push(AsciiLine {
                     offset: line_start,
@@ -484,11 +512,18 @@ pub fn get_ascii_lines(
             }
         }
 
-        Ok(AsciiLinesPayload { lines, total_lines })
+        Ok(AsciiLinesPayload {
+            lines,
+            total_lines,
+            start_line,
+            reaches_end,
+        })
     } else {
         Ok(AsciiLinesPayload {
             lines: vec![],
             total_lines: 0,
+            start_line: 0,
+            reaches_end: true,
         })
     }
 }
@@ -680,6 +715,27 @@ mod tests {
         assert_eq!(byte_to_ascii(0x7f), '␡'); // DEL -> U+2421
                                               // Non-ASCII should be '·'
         assert_eq!(byte_to_ascii(0xff), '·');
+    }
+
+    #[test]
+    fn clamp_start_line_serves_the_tail_for_requests_past_the_end() {
+        // In range: unchanged
+        assert_eq!(clamp_start_line(10, 50, 1000), 10);
+        assert_eq!(clamp_start_line(950, 50, 1000), 950);
+        // Past the end (a viewer asking for "the tail"): the last line_count lines
+        assert_eq!(clamp_start_line(u64::MAX, 50, 1000), 950);
+        assert_eq!(clamp_start_line(990, 50, 1000), 950);
+        // Fewer lines than requested: everything from line 0
+        assert_eq!(clamp_start_line(u64::MAX, 50, 20), 0);
+        assert_eq!(clamp_start_line(0, 50, 0), 0);
+    }
+
+    #[test]
+    fn line_timestamp_has_tenths_and_a_fallback() {
+        assert_eq!(format_line_timestamp(None), "--:--:--.0");
+        let s = format_line_timestamp(Some(1_700_000_000_987));
+        assert_eq!(s.len(), "HH:MM:SS.d".len());
+        assert!(s.ends_with(".9"), "{s}");
     }
 
     #[test]

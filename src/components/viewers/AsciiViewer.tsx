@@ -2,6 +2,7 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ROW_HEIGHT, BUFFER_ROWS } from './viewerConstants';
 import { useByteScroll } from './useByteScroll';
+import { TAIL_START_LINE } from './scrollUtils';
 import './AsciiViewer.css';
 
 interface AsciiLine {
@@ -13,6 +14,10 @@ interface AsciiLine {
 interface AsciiLinesPayload {
   lines: AsciiLine[];
   total_lines: number;
+  /** Line index of lines[0]; a request past the end is clamped to the last lines */
+  start_line: number;
+  /** Whether the served lines run to the end of the data */
+  reaches_end: boolean;
 }
 
 interface AsciiViewerProps {
@@ -38,6 +43,13 @@ export default function AsciiViewer({
   const [lines, setLines] = useState<AsciiLine[]>([]);
   const [totalLines, setTotalLines] = useState(0);
   const [currentStartLine, setCurrentStartLine] = useState(0);
+  // Whether the fetched block contains the last line (issue #3). The block is then
+  // laid out bottom-anchored, so the newest line is at the very bottom even when
+  // Line Wrap makes rows taller than ROW_HEIGHT (the scroll model assumes fixed
+  // rows) or the scroll height is scaled down for huge captures. Decided by the
+  // data, not the scroll position, so entering/leaving the mode cannot oscillate.
+  const [reachesEnd, setReachesEnd] = useState(false);
+  const isTail = reachesEnd && lines.length > 0;
 
   // Fetching guard
   const fetchingRef = useRef(false);
@@ -161,7 +173,8 @@ export default function AsciiViewer({
             setLines(payload.lines);
             setTotalLines(payload.total_lines);
             totalLinesRef.current = payload.total_lines;
-            setCurrentStartLine(target);
+            setCurrentStartLine(payload.start_line ?? target);
+            setReachesEnd(payload.reaches_end ?? false);
           } catch (err) {
             console.error('Failed to fetch lines:', err);
           }
@@ -190,7 +203,11 @@ export default function AsciiViewer({
 
     // Calculate start line from byte ratio (same approach as HexViewer)
     const scrollRatio = totalBytes > 0 ? byteOffset / totalBytes : 0;
-    const startLine = Math.max(0, Math.floor(scrollRatio * effectiveTotalLines) - BUFFER_ROWS);
+    // Auto Scroll always shows the end: ask for the tail rather than a position
+    // derived from the (fixed-row, possibly scaled) scroll model.
+    const startLine = autoScroll
+      ? TAIL_START_LINE
+      : Math.max(0, Math.floor(scrollRatio * effectiveTotalLines) - BUFFER_ROWS);
 
     // Force refetch when totalBytes changes (new data arrived)
     const forceRefetch = totalBytes !== lastTotalBytesRef.current;
@@ -206,6 +223,7 @@ export default function AsciiViewer({
 
     fetchLines(startLine, forceRefetch || viewportGrew || timestampToggled);
   }, [
+    autoScroll,
     totalBytes,
     scrollTop,
     getByteOffset,
@@ -214,6 +232,17 @@ export default function AsciiViewer({
     visibleRows,
     showTimestamp,
   ]);
+
+  // Auto Scroll: pin to the real bottom of the rendered rows. The shared scroll hook
+  // scrolls to the bottom of the fixed-row model, which is short of the real bottom
+  // when wrapped rows are taller. Declared after the hook so this runs after its
+  // auto-scroll effect in the same commit.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!autoScroll || !isTail || !el) return;
+    const bottom = el.scrollHeight - el.clientHeight;
+    if (Math.abs(el.scrollTop - bottom) > 1) el.scrollTop = bottom;
+  }, [autoScroll, isTail, lines, totalBytes, asciiScrollHeight, containerRef]);
 
   // Handle Ctrl+A to warn user about partial selection.
   // Skip when focus is in an editable element (Send textarea, search input,
@@ -318,8 +347,25 @@ export default function AsciiViewer({
       onCopy={handleCopy}
     >
       <div className="ascii-scroll-container" ref={containerRef} onScroll={handleScroll}>
-        <div style={{ height: asciiScrollHeight, position: 'relative' }}>
-          <div style={{ position: 'absolute', top: displayTop, width: '100%' }}>
+        <div
+          style={
+            isTail
+              ? {
+                  // Bottom-anchored: grows (instead of overflowing) when wrapped rows
+                  // are taller than the model, so the last line is always reachable
+                  minHeight: asciiScrollHeight,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'flex-end',
+                }
+              : { height: asciiScrollHeight, position: 'relative' }
+          }
+        >
+          <div
+            style={
+              isTail ? { width: '100%' } : { position: 'absolute', top: displayTop, width: '100%' }
+            }
+          >
             {lines.map((line) => (
               <div
                 key={line.offset}
@@ -343,8 +389,8 @@ export default function AsciiViewer({
           <span className="ascii-debug">
             scrollTop={scrollTop.toFixed(0)} | scrollHeight={asciiScrollHeight.toLocaleString()} |
             byteOffset={getByteOffset().toLocaleString()} | displayTop=
-            {displayTop.toLocaleString()} | startLine={currentStartLine.toLocaleString()} |
-            isScaled={isScaled ? 'YES' : 'no'} | scale=
+            {displayTop.toLocaleString()} | startLine={currentStartLine.toLocaleString()} | tail=
+            {isTail ? 'YES' : 'no'} | isScaled={isScaled ? 'YES' : 'no'} | scale=
             {(asciiScrollHeight / naturalLineHeight || 1).toFixed(4)}
           </span>
         )}
