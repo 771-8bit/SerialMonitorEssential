@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useTheme } from '../../utils/theme';
 import './AiGuideWindow.css';
 
 /** バックエンド `bridge_guide_info` の戻り値 */
@@ -59,6 +60,7 @@ function CopyBlock({ label, text }: { label: string; text: string }) {
 }
 
 export default function AiGuideWindow() {
+  useTheme(); // follow the Theme setting (issue #6)
   const [info, setInfo] = useState<BridgeGuideInfo | null>(null);
 
   // ブリッジの ON/OFF とポートを表示に反映するため 2 秒ごとに取得する

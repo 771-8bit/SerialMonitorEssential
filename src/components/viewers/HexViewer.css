@@ -2,8 +2,8 @@
   font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
   font-size: 13px;
   line-height: 20px;
-  background-color: #1e1e1e;
-  border: 1px solid #3c3c3c;
+  background-color: var(--bg-viewer);
+  border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
   min-width: 0;
@@ -23,18 +23,18 @@
 .hex-row {
   display: flex;
   padding: 0 8px;
-  color: #d4d4d4;
+  color: var(--text);
   user-select: none;
   /* rows themselves not selectable, only content */
 }
 
 .hex-row:hover {
-  background-color: #2a2d2e;
+  background-color: var(--bg-hover);
 }
 
 .hex-offset {
   width: 70px;
-  color: #569cd6;
+  color: var(--syntax-offset);
   flex-shrink: 0;
   user-select: none;
   /* Offset not selectable */
@@ -44,7 +44,7 @@
 .hex-bytes {
   width: 370px;
   flex-shrink: 0;
-  color: #ce9178;
+  color: var(--syntax-string);
   letter-spacing: 0.5px;
   user-select: text;
   /* Enable selection */
@@ -56,7 +56,7 @@
   width: 230px;
   flex-shrink: 0;
   padding-left: 8px;
-  border-left: 1px solid #3c3c3c;
+  border-left: 1px solid var(--border);
   box-sizing: border-box;
   user-select: none;
   /* Disable selection */
@@ -70,7 +70,7 @@
   justify-content: center;
   width: 14px;
   height: 20px;
-  color: #dcdcaa;
+  color: var(--syntax-fn);
   font-size: 13px;
   text-align: center;
   flex-shrink: 0;
@@ -89,9 +89,9 @@
   display: flex;
   justify-content: space-between;
   padding: 8px 12px;
-  background-color: #2d2d2d;
-  border-top: 1px solid #3c3c3c;
-  color: #6c6c6c;
+  background-color: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
   font-size: 12px;
 }
 
@@ -102,20 +102,20 @@
 }
 
 .hex-viewer ::-webkit-scrollbar-track {
-  background: #1e1e1e;
+  background: var(--bg-viewer);
 }
 
 .hex-viewer ::-webkit-scrollbar-thumb {
-  background: #424242;
+  background: var(--scrollbar-thumb);
   border-radius: 5px;
 }
 
 .hex-viewer ::-webkit-scrollbar-thumb:hover {
-  background: #5c5c5c;
+  background: var(--scrollbar-thumb-hover);
 }
 
 .hex-debug {
   font-size: 10px;
-  color: #808080;
+  color: var(--text-dim);
   font-family: 'Consolas', monospace;
 }

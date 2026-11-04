@@ -186,18 +186,7 @@ export default function ReceivePanel({
               disabled={viewMode === 'hex' || !showTimestamp}
               className="separator-select"
               title="Separator between Timestamp and Data"
-              style={{
-                marginLeft: '8px',
-                background: '#3c3c3c',
-                color: '#d4d4d4',
-                border: '1px solid #555',
-                borderRadius: '3px',
-                padding: '1px 4px',
-                fontSize: '11px',
-                outline: 'none',
-                cursor: 'pointer',
-                opacity: !showTimestamp || viewMode === 'hex' ? 0.5 : 1,
-              }}
+              style={{ opacity: !showTimestamp || viewMode === 'hex' ? 0.5 : 1 }}
             >
               <option value=" ">Space</option>
               <option value=",">Comma</option>

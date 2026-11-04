@@ -15,12 +15,12 @@
 
 .search-input {
   flex: 1;
-  border: 1px solid #444;
+  border: 1px solid var(--border);
   border-radius: 3px;
   padding: 4px 8px;
   font-size: 13px;
-  background: #2a2a2a;
-  color: #eee;
+  background: var(--bg-input);
+  color: var(--text);
   height: 28px;
   box-sizing: border-box;
 }
@@ -31,7 +31,7 @@
 }
 
 .search-input::placeholder {
-  color: #888;
+  color: var(--text-dim);
 }
 
 .filter-toggle {
@@ -49,8 +49,8 @@
 /* Viewer Wrapper */
 .viewer-wrapper {
   flex: 1;
-  border: 1px solid #444;
-  background: #0f0f0f;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
   min-height: 0;
   position: relative;
   overflow: hidden;
@@ -62,7 +62,7 @@
   justify-content: space-between;
   align-items: center;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-muted);
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -112,7 +112,7 @@
 .control-separator {
   width: 1px;
   height: 16px;
-  background-color: #555;
+  background-color: var(--border);
   margin: 0 4px;
 }
 
@@ -123,23 +123,23 @@
   gap: 6px;
   padding: 2px 4px;
   border-radius: 4px;
-  background: #1a1a1a;
+  background: var(--bg-panel);
 }
 
 .mode-label {
   font-size: 11px;
   font-weight: 500;
-  color: #666;
+  color: var(--text-dim);
   transition: color 0.2s;
   user-select: none;
 }
 
 .mode-label.active.hex {
-  color: #ff7043;
+  color: var(--hex-mode);
 }
 
 .mode-label.active.ascii {
-  color: #4fc3f7;
+  color: var(--info);
 }
 
 /* Slide Switch */
@@ -191,4 +191,18 @@
 
 .switch input:focus + .slider {
   box-shadow: 0 0 3px rgba(79, 195, 247, 0.5);
+}
+
+/* Timestamp separator select (was inline-styled) */
+.separator-select {
+  margin-left: 8px;
+  background: var(--bg-active);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+  height: auto;
+  outline: none;
+  cursor: pointer;
 }

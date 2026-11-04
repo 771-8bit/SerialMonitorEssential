@@ -13,7 +13,7 @@
   padding: 16px 24px 24px;
   font-size: 13px;
   line-height: 1.6;
-  color: var(--text-color, #ddd);
+  color: var(--text);
   user-select: text;
   cursor: auto;
 }
@@ -26,7 +26,7 @@
 .ai-guide h2 {
   font-size: 14px;
   margin: 20px 0 6px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--border);
   padding-bottom: 4px;
 }
 
@@ -37,7 +37,7 @@
 }
 
 .ai-guide code {
-  background: #2a2a2a;
+  background: var(--bg-input);
   padding: 1px 4px;
   border-radius: 3px;
   font-family: Consolas, 'Courier New', monospace;
@@ -62,26 +62,26 @@
 }
 
 .guide-status.on {
-  background: #1d4620;
-  color: #8ce99a;
+  background: var(--success-bg);
+  color: var(--success-text);
 }
 
 .guide-status.off {
-  background: #4a1d1d;
-  color: #ffa8a8;
+  background: var(--danger-bg);
+  color: var(--danger-text);
 }
 
 .guide-ok {
-  color: #8ce99a;
+  color: var(--success-text);
 }
 
 .guide-warn {
-  color: #ffa8a8;
+  color: var(--danger-text);
 }
 
 .guide-copy-block {
   margin: 10px 0;
-  border: 1px solid #444;
+  border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -91,7 +91,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px;
-  background: #333;
+  background: var(--bg-active);
   font-size: 12px;
 }
 
@@ -104,7 +104,7 @@
 .guide-copy-block pre {
   margin: 0;
   padding: 8px;
-  background: #1e1e1e;
+  background: var(--bg-viewer);
   font-family: Consolas, 'Courier New', monospace;
   font-size: 12px;
   white-space: pre-wrap;
@@ -113,8 +113,8 @@
 }
 
 .guide-transcript {
-  background: #1e1e1e;
-  border: 1px solid #444;
+  background: var(--bg-viewer);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px;
   font-family: Consolas, 'Courier New', monospace;
@@ -129,7 +129,7 @@
 }
 
 .guide-tools td {
-  border: 1px solid #444;
+  border: 1px solid var(--border);
   padding: 4px 8px;
   vertical-align: top;
 }
@@ -140,17 +140,17 @@
 
 .guide-note {
   font-size: 12px;
-  color: #999;
+  color: var(--text-muted);
 }
 
 .guide-footer {
   margin-top: 24px;
   padding-top: 8px;
-  border-top: 1px solid #444;
+  border-top: 1px solid var(--border);
   display: flex;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
   font-size: 11px;
-  color: #999;
+  color: var(--text-muted);
 }

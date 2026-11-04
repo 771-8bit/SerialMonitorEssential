@@ -1,11 +1,92 @@
+/*
+ * Theme (issue #6): semantic color tokens. <html data-theme="dark|light"> is set
+ * from the Theme setting (Dark / Light / System); `color-scheme` makes the native
+ * widgets (select popups, checkboxes, scrollbars) match instead of following the OS.
+ * Accent, status and chart-series colors are shared by both themes.
+ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-app: #242424;
+  --bg-panel: #1a1a1a;
+  --bg-viewer: #1e1e1e;
+  --bg-elevated: #252526;
+  --bg-input: #2a2a2a;
+  --bg-sunken: #0f0f0f;
+  --bg-hover: #3a3a3a;
+  --bg-active: #444;
+  --bg-overlay: rgba(30, 30, 30, 0.9);
+  --border: #3c3c3c;
+  --border-strong: #5a5a5a;
+  --text: #e8e8e8;
+  --text-muted: #bbbbbb;
+  --text-dim: #888;
+  --info: #8cf;
+  --timestamp: #6a9955;
+  --hex-bytes: #bfa;
+  --hex-ascii: #eca;
+  --hex-mode: #ff7043;
+  --syntax-offset: #569cd6;
+  --syntax-string: #ce9178;
+  --syntax-fn: #dcdcaa;
+  --success-text: #8ce99a;
+  --success-bg: #1d4620;
+  --danger-text: #ffa8a8;
+  --danger-bg: #4a1d1d;
+  --warn-text: #f0a830;
+  --scrollbar-thumb: #424242;
+  --scrollbar-thumb-hover: #5c5c5c;
+  /* Chart canvas (read from JS) */
+  --chart-axis: #888;
+  --chart-grid: #333;
+  --chart-tick: #444;
+  --chart-label: #9cdcfe;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-app: #ececec;
+  --bg-panel: #ffffff;
+  --bg-viewer: #ffffff;
+  --bg-elevated: #f3f3f3;
+  --bg-input: #ffffff;
+  --bg-sunken: #ffffff;
+  --bg-hover: #e4e4e4;
+  --bg-active: #d4d4d4;
+  --bg-overlay: rgba(255, 255, 255, 0.94);
+  --border: #c8c8c8;
+  --border-strong: #9a9a9a;
+  --text: #1f1f1f;
+  --text-muted: #444;
+  --text-dim: #6b6b6b;
+  --info: #0b62b8;
+  --timestamp: #2e7d32;
+  --hex-bytes: #1a7f37;
+  --hex-ascii: #9a5b00;
+  --hex-mode: #d84315;
+  --syntax-offset: #0451a5;
+  --syntax-string: #a31515;
+  --syntax-fn: #795e26;
+  --success-text: #1a7f37;
+  --success-bg: #e3f4e6;
+  --danger-text: #c62828;
+  --danger-bg: #fdeaea;
+  --warn-text: #a35400;
+  --scrollbar-thumb: #c1c1c1;
+  --scrollbar-thumb-hover: #a8a8a8;
+  --chart-axis: #555;
+  --chart-grid: #e2e2e2;
+  --chart-tick: #c8c8c8;
+  --chart-label: #0451a5;
+}
+
 :root {
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  color: var(--text);
+  background-color: var(--bg-app);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -19,7 +100,7 @@ body {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  color: #f6f6f6;
+  color: var(--text);
   user-select: none;
   /* Disable text selection */
   -webkit-user-select: none;
@@ -53,8 +134,8 @@ textarea {
 .settings-panel,
 .send-panel,
 .receive-panel {
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -62,7 +143,7 @@ textarea {
 
 .panel-header {
   font-size: 12px;
-  color: #aaa;
+  color: var(--text-muted);
   margin-bottom: 6px;
   font-weight: 400;
 }
@@ -86,7 +167,7 @@ textarea {
   align-items: center;
   flex-wrap: wrap;
   padding-top: 4px;
-  border-top: 1px dashed #444;
+  border-top: 1px dashed var(--border);
 }
 
 .advanced-group {
@@ -94,7 +175,7 @@ textarea {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-muted);
 }
 
 .checkbox-group {
@@ -113,9 +194,9 @@ select,
 input[type='text'],
 input[type='number'] {
   padding: 4px 8px;
-  border: 1px solid #444;
-  background-color: #2a2a2a;
-  color: #eee;
+  border: 1px solid var(--border);
+  background-color: var(--bg-input);
+  color: var(--text);
   border-radius: 3px;
   font-size: 13px;
   height: 28px;
@@ -129,22 +210,22 @@ input[type='checkbox'] {
 button {
   padding: 0 12px;
   height: 28px;
-  border: 1px solid #444;
+  border: 1px solid var(--border);
   border-radius: 3px;
-  background-color: #2a2a2a;
-  color: #eee;
+  background-color: var(--bg-input);
+  color: var(--text);
   cursor: pointer;
   font-size: 13px;
   transition: all 0.1s;
 }
 
 button:hover {
-  background-color: #3a3a3a;
-  border-color: #666;
+  background-color: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 button:active {
-  background-color: #444;
+  background-color: var(--bg-active);
 }
 
 button:disabled {
@@ -188,9 +269,9 @@ button:disabled {
   flex: 1;
   height: 80px;
   resize: none;
-  border: 1px solid #444;
-  background-color: #0f0f0f;
-  color: #eee;
+  border: 1px solid var(--border);
+  background-color: var(--bg-sunken);
+  color: var(--text);
   border-radius: 3px;
   font-family: 'Consolas', monospace;
   font-size: 13px;
@@ -222,7 +303,7 @@ button:disabled {
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-muted);
 }
 
 .send-options label {
@@ -251,22 +332,22 @@ button:disabled {
   height: 100%;
   display: flex;
   flex-direction: column;
-  color: #eee;
+  color: var(--text);
   /* Ensure text is light */
 }
 
 /* Ensure HexViewer content is readable in dark mode */
 .hex-offset {
-  color: #888;
+  color: var(--text-dim);
 }
 
 .hex-bytes {
-  color: #bfa;
+  color: var(--hex-bytes);
   /* Slightly green for bytes */
 }
 
 .hex-ascii {
-  color: #eca;
+  color: var(--hex-ascii);
   /* Slightly orange for ascii */
 }
 
@@ -276,10 +357,10 @@ button:disabled {
 }
 
 .hex-footer {
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--border);
   padding-top: 4px;
   font-size: 11px;
-  color: #888;
+  color: var(--text-dim);
 }
 
 .receive-footer {
@@ -287,7 +368,7 @@ button:disabled {
   justify-content: space-between;
   align-items: center;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-muted);
 }
 
 .footer-left,

@@ -5,6 +5,7 @@ import { COLORS } from './chartColors';
 import { StateRow } from './stateTimelinePlugin';
 import './PlotterWindow.css';
 import { usePersistentState, isOneOf } from '../../utils/persist';
+import { useTheme } from '../../utils/theme';
 
 // Aggregation mode type matching Rust AggregationMode
 type AggregationMode = 'Average' | 'Peak';
@@ -68,6 +69,8 @@ export const WINDOW_OPTIONS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 const DEFAULT_WINDOW_SEC = 10;
 
 export default function PlotterWindow() {
+  // Follow the Theme setting (issue #6)
+  const [, , theme] = useTheme();
   const [data, setData] = useState<PlotterChartPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(true);
@@ -497,6 +500,7 @@ export default function PlotterWindow() {
             <div className="chart-area" ref={chartContainerRef}>
               <LineChart
                 ref={chartHandleRef}
+                theme={theme}
                 alignedData={data!.aligned_data}
                 channelNames={data!.channel_names}
                 bandData={data!.band_data}

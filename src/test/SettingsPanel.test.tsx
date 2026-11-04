@@ -47,6 +47,8 @@ function renderPanel(onRefreshPorts = vi.fn()) {
       onAutoReconnectChange={vi.fn()}
       reconnectWaitingFor={null}
       reconnectedAt={null}
+      theme="dark"
+      onThemeChange={vi.fn()}
     />
   );
 }

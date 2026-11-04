@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { THEME_OPTIONS, type ThemeSetting } from '../utils/theme';
 import './SettingsPanel.css';
 
 /** バックエンド `BridgeActivity` に対応（直近の活動） */
@@ -72,7 +73,16 @@ interface SettingsPanelProps {
   reconnectWaitingFor: string | null;
   /** Time (ms) of the last automatic reconnect, shown until the next manual action */
   reconnectedAt: number | null;
+  /** Color theme (issue #6) */
+  theme: ThemeSetting;
+  onThemeChange: (theme: ThemeSetting) => void;
 }
+
+const THEME_LABELS: Record<ThemeSetting, string> = {
+  dark: 'Dark',
+  light: 'Light',
+  system: 'System',
+};
 
 const AUTO_RECONNECT_TOOLTIP =
   'When the device goes away (unplugged or reset) and comes back, reopen it automatically. ' +
@@ -92,6 +102,8 @@ export default function SettingsPanel({
   onAutoReconnectChange,
   reconnectWaitingFor,
   reconnectedAt,
+  theme,
+  onThemeChange,
 }: SettingsPanelProps) {
   const [baudRateEditing, setBaudRateEditing] = useState(false);
   const [baudDropdownOpen, setBaudDropdownOpen] = useState(false);
@@ -474,6 +486,21 @@ export default function SettingsPanel({
             </span>
           </>
         )}
+
+        <label className="theme-control" title="Color theme (System follows the OS setting)">
+          Theme
+          <select
+            value={theme}
+            onChange={(e) => onThemeChange(e.target.value as ThemeSetting)}
+            aria-label="Theme"
+          >
+            {THEME_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {THEME_LABELS[t]}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@
  */
 
 import type uPlot from 'uplot';
+import { themeColor } from '../../utils/theme';
 
 // Types for state data
 export interface StateSegment {
@@ -192,6 +193,10 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
 
         ctx.save();
 
+        // Theme colors (issue #6), read once per draw
+        const rowBackground = themeColor('--bg-elevated', '#252526');
+        const labelColor = themeColor('--chart-label', '#9cdcfe');
+
         // Clip to state timeline area (below X-axis)
         const totalStateHeight = rows.length * (rh + rg);
         ctx.beginPath();
@@ -204,7 +209,7 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
           const y0 = stateAreaTop + r * (rh + rg) + rg / 2;
 
           // Draw channel label background
-          ctx.fillStyle = '#252526';
+          ctx.fillStyle = rowBackground;
           ctx.fillRect(plotLeft, y0, plotWidth, rh);
 
           // Draw each segment. Abnormal ones go in a second pass so their
@@ -261,7 +266,7 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
           const row = rows[r];
           const y0 = stateAreaTop + r * (rh + rg) + rg / 2;
 
-          ctx.fillStyle = '#9cdcfe';
+          ctx.fillStyle = labelColor;
           ctx.font = scaleFontPx('11px sans-serif', dpr);
           ctx.textBaseline = 'middle';
           ctx.textAlign = 'right';

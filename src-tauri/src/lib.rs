@@ -90,6 +90,7 @@ pub fn run() {
         // AI ブリッジ: 既定 OFF。ここでは状態を登録するだけで自動起動はしない。
         .manage(bridge::BridgeState::new())
         .invoke_handler(tauri::generate_handler![
+            set_window_theme,
             serial::list_ports,
             serial::open_port,
             serial::close_port,
@@ -123,6 +124,19 @@ pub fn run() {
 }
 
 /// Open the plotter window (single instance)
+/// Title bar theme of the calling window (issue #6): "dark" / "light", or
+/// anything else to follow the OS. Each window calls this for itself, so no
+/// window permission is needed.
+#[tauri::command]
+fn set_window_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
+    let theme = match theme.as_deref() {
+        Some("dark") => Some(tauri::Theme::Dark),
+        Some("light") => Some(tauri::Theme::Light),
+        _ => None,
+    };
+    window.set_theme(theme).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn open_plotter_window(
     app: tauri::AppHandle,

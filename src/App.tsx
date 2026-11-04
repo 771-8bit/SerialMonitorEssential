@@ -7,6 +7,7 @@ import SendPanel from './components/SendPanel';
 import ReceivePanel, { OutputFormat } from './components/ReceivePanel';
 import { portPath } from './utils/portUtils';
 import { isSerialConfig } from './utils/serialConfig';
+import { useTheme } from './utils/theme';
 import { usePersistentState, loadSetting, saveSetting, isBoolean, isString } from './utils/persist';
 import './App.css';
 
@@ -44,6 +45,7 @@ function App() {
   const [selectedPort, setSelectedPort] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
   const [totalBytes, setTotalBytes] = useState<number>(0);
+  const [theme, setTheme] = useTheme();
 
   // Settings remembered across restarts (issue #7)
   const [autoScroll, setAutoScroll] = usePersistentState('receive.autoScroll', true, isBoolean);
@@ -418,6 +420,8 @@ function App() {
           }}
           reconnectWaitingFor={waitingFor}
           reconnectedAt={reconnectedAt}
+          theme={theme}
+          onThemeChange={setTheme}
         />
       </div>
 
