@@ -12,6 +12,11 @@
 # 通ったときだけ publish する。draft の間は利用者から見えない。
 #
 # コード署名は行っていない（docs/25 §6 R-1 / TBD-RS4）。
+#
+# プレリリース（タグに '-' を含む。例: v0.1.0-beta.1。docs/25 §1.1）:
+#   - GitHub Release を prerelease として作る
+#   - Windows は NSIS のみ。MSI（WiX）は英字のプレリリース識別子を受け付けない
+#     （"pre-release identifier ... must be numeric-only ... for msi target"、2026-11-04 に確認）
 # インストーラ実行時に SmartScreen の警告が出ることを Release 本文に明記すること。
 
 name: Release
@@ -53,20 +58,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # bundle.targets = "all" のため、Windows では NSIS(.exe) と MSI(.msi) の両方が
-      # src-tauri/target/release/bundle/ 配下に生成される。
+      # 正式版: bundle.targets = "all" のため NSIS(.exe) と MSI(.msi) の両方を作る。
+      # プレリリース: NSIS のみ（MSI はプレリリースのバージョンを受け付けない）。
+      # 添付するファイルは release-assets/ に集め、どちらの場合も同じ指定で上げる。
       - name: Build Tauri app
-        run: npm run tauri build
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          if [[ "${{ github.ref_name }}" == *-* ]]; then
+            npm run tauri build -- --bundles nsis
+          else
+            npm run tauri build
+            cp src-tauri/target/release/bundle/msi/*.msi release-assets/
+          fi
+          cp src-tauri/target/release/bundle/nsis/*.exe release-assets/
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          files: release-assets/*
 
   build-linux:
     name: Build Linux packages and draft release
@@ -119,6 +133,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

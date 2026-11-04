@@ -9,6 +9,12 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] - 2026-11-04 (pre-release)
+
+First beta of the Tauri/Rust version, released to validate it in real use. It contains
+everything listed under 0.1.0 below plus the changes in this section. The Windows build is the
+NSIS installer only (the MSI format does not accept pre-release versions).
+
 ### Added
 
 - **Auto Reconnect** (the former placeholder "Auto Connect" checkbox): when the device goes away

@@ -68,8 +68,9 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
 ## Installation
 
 Installers are attached to each release on the
-[Releases](https://github.com/771-8bit/SerialMonitorEssential/releases) page. Version 0.1.0 is
-the first release of the Tauri/Rust version; tags up to `v0.0.8` are the old C# version.
+[Releases](https://github.com/771-8bit/SerialMonitorEssential/releases) page. The Tauri/Rust version
+starts with the **0.1.0 beta** (marked "Pre-release"); tags up to `v0.0.8` are the old C# version.
+Bug reports from the beta are very welcome.
 
 ### Windows 10 / 11 (x64)
 
