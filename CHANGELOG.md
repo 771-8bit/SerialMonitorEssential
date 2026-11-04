@@ -19,6 +19,11 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Changed
 
+- Plotter: the default downsampling mode **LTTB is replaced by Peak**, which draws the minimum and
+  maximum sample of every pixel column at their real times. LTTB drew bucket averages, so a
+  single-sample spike of 400 was drawn as about 41 in a 10 s window and smaller spikes vanished in
+  a 300 s window. Incoming samples are also no longer averaged in groups of 10 before storage, so
+  slow streams are drawn sample for sample and already-drawn points no longer change.
 - The settings toggle formerly labelled **AI Bridge** is now **MCP Server** (same feature,
   same port and protocol; `SME_BRIDGE_*` environment variables are unchanged).
 - All user-facing text is English only: the remaining Japanese UI strings (bridge tooltip,

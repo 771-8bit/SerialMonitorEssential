@@ -743,7 +743,7 @@ mod tests {
         // Give the thread some elapsed time so the backlog can spread backwards
         thread::sleep(Duration::from_millis(60));
 
-        // 8 lines: below the default bucket_size (10) so points stay raw
+        // 8 lines, each kept as its own sample (bucket_size 1, below max_points)
         let store = Arc::new(DataStore::new().expect("create store"));
         store.push_test_data(b"1\n2\n3\n4\n5\n6\n7\n8\n");
         *handle.lock().unwrap() = Some(store);

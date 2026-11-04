@@ -260,14 +260,14 @@ describe('PlotterWindow', () => {
 
   // ==================== Mode Options Tests ====================
 
-  it('has LTTB and Average options in mode selector', async () => {
+  it('has Peak and Average options in mode selector', async () => {
     await act(async () => {
       render(<PlotterWindow />);
     });
 
     const modeSelect = screen.getByRole('combobox', { name: 'Downsample mode' });
     const optionValues = Array.from(modeSelect.querySelectorAll('option')).map((opt) => opt.value);
-    expect(optionValues).toContain('Lttb');
+    expect(optionValues).toContain('Peak');
     expect(optionValues).toContain('Average');
   });
 
@@ -284,7 +284,7 @@ describe('PlotterWindow', () => {
 
     // Verify the select element exists and has the expected default value
     expect(modeSelect).toBeDefined();
-    expect(modeSelect.value).toBe('Lttb');
+    expect(modeSelect.value).toBe('Peak');
   });
 
   // ==================== Window Selector Tests ====================

@@ -34,7 +34,7 @@ struct ViewCache {
 
 /// Internal bucket storing all statistics for mode-agnostic storage
 ///
-/// This allows switching between LTTB and Average modes at display time
+/// This allows switching between Peak and Average modes at display time
 /// without losing precision, since we store all necessary statistics.
 #[derive(Debug, Clone)]
 struct AggregatedBucket {
@@ -48,22 +48,48 @@ struct AggregatedBucket {
     avg: f64,
     /// Number of raw points this bucket represents (for weighted averaging)
     count: usize,
+    /// Time of the sample that is `min` (Peak mode draws it at its real time)
+    ts_min: u64,
+    /// Time of the sample that is `max`
+    ts_max: u64,
 }
 
 impl AggregatedBucket {
-    /// Convert to AggregatedPoint based on aggregation mode
-    fn to_point(&self, mode: &AggregationMode) -> AggregatedPoint {
-        match mode {
-            AggregationMode::Lttb => AggregatedPoint::Single {
-                ts: self.ts,
-                value: self.avg,
-            },
-            AggregationMode::Average => AggregatedPoint::MinMax {
-                ts: self.ts,
-                min: self.min,
-                max: self.max,
-                avg: self.avg,
-            },
+    /// One raw sample
+    fn sample(ts: u64, value: f64) -> Self {
+        Self {
+            ts,
+            min: value,
+            max: value,
+            avg: value,
+            count: 1,
+            ts_min: ts,
+            ts_max: ts,
+        }
+    }
+
+    /// Fold another bucket's extremes into this one. The smaller (larger) value
+    /// wins and, on equal values, the earlier time wins. This makes the merge
+    /// associative and commutative, so the extremes do not depend on how the
+    /// samples were grouped (level-ups, batch vs. one-by-one: P-5 / P-7).
+    fn merge_extremes(&mut self, other: &AggregatedBucket) {
+        if other.min < self.min || (other.min == self.min && other.ts_min < self.ts_min) {
+            self.min = other.min;
+            self.ts_min = other.ts_min;
+        }
+        if other.max > self.max || (other.max == self.max && other.ts_max < self.ts_max) {
+            self.max = other.max;
+            self.ts_max = other.ts_max;
+        }
+    }
+
+    /// Average-mode point: weighted average as the line, min/max as the band
+    fn to_average_point(&self) -> AggregatedPoint {
+        AggregatedPoint::MinMax {
+            ts: self.ts,
+            min: self.min,
+            max: self.max,
+            avg: self.avg,
         }
     }
 }
@@ -86,91 +112,6 @@ fn find_range_end(buckets: &[AggregatedBucket], time_max: u64) -> usize {
         Ok(i) => i + 1, // Found exact match, include it
         Err(i) => i,    // Not found, i is insertion point
     }
-}
-
-/// LTTB (Largest Triangle Three Buckets) downsampling algorithm
-///
-/// Selects n points from the input data that best preserve visual features.
-/// Uses triangle area maximization: for each bucket, selects the point that
-/// forms the largest triangle with the previously selected point and the
-/// average of the next bucket.
-///
-/// Returns indices of selected points in the original data array.
-fn lttb_downsample(data: &[AggregatedBucket], target_points: usize) -> Vec<usize> {
-    let n = data.len();
-
-    // If data is already small enough, return all indices
-    if n <= target_points || target_points < 3 {
-        return (0..n).collect();
-    }
-
-    let mut selected = Vec::with_capacity(target_points);
-
-    // Always include first point
-    selected.push(0);
-
-    // Calculate bucket size for middle points
-    let bucket_size = (n - 2) as f64 / (target_points - 2) as f64;
-
-    for i in 0..(target_points - 2) {
-        // Current bucket range
-        let bucket_start = ((i as f64 * bucket_size) + 1.0).floor() as usize;
-        let bucket_end = (((i + 1) as f64 * bucket_size) + 1.0).floor() as usize;
-        let bucket_end = bucket_end.min(n - 1);
-
-        // Next bucket range (for calculating average point)
-        let next_start = bucket_end;
-        let next_end = (((i + 2) as f64 * bucket_size) + 1.0).floor() as usize;
-        let next_end = next_end.min(n);
-
-        // Calculate average point of next bucket
-        let (avg_ts, avg_val) = if next_start < next_end {
-            let mut sum_ts: f64 = 0.0;
-            let mut sum_val: f64 = 0.0;
-            let count = (next_end - next_start) as f64;
-            for bucket in data.iter().take(next_end).skip(next_start) {
-                sum_ts += bucket.ts as f64;
-                sum_val += bucket.avg;
-            }
-            (sum_ts / count, sum_val / count)
-        } else {
-            // Fallback to last point
-            (data[n - 1].ts as f64, data[n - 1].avg)
-        };
-
-        // Get previously selected point
-        let prev_idx = *selected.last().unwrap();
-        let prev_ts = data[prev_idx].ts as f64;
-        let prev_val = data[prev_idx].avg;
-
-        // Find point in current bucket with maximum triangle area
-        let mut best_idx = bucket_start;
-        let mut best_area = f64::NEG_INFINITY;
-
-        for (j, bucket) in data.iter().enumerate().take(bucket_end).skip(bucket_start) {
-            // Calculate triangle area using the shoelace formula
-            // Area = 0.5 * |x1(y2-y3) + x2(y3-y1) + x3(y1-y2)|
-            let curr_ts = bucket.ts as f64;
-            let curr_val = bucket.avg;
-
-            let area = ((prev_ts * (curr_val - avg_val))
-                + (curr_ts * (avg_val - prev_val))
-                + (avg_ts * (prev_val - curr_val)))
-                .abs();
-
-            if area > best_area {
-                best_area = area;
-                best_idx = j;
-            }
-        }
-
-        selected.push(best_idx);
-    }
-
-    // Always include last point
-    selected.push(n - 1);
-
-    selected
 }
 
 /// Quantize a bucket width to the 1-2-5 series (1,2,5,10,20,50,... ms),
@@ -197,12 +138,11 @@ fn quantize_bucket_width_125(raw_width_ms: u64) -> u64 {
     }
 }
 
-/// Accumulator for one absolute-time-aligned cell.
+/// Accumulator for one absolute-time-aligned cell: the merged extremes plus the
+/// running count-weighted sum for the average.
 struct AlignedCell {
-    min: f64,
-    max: f64,
+    merged: AggregatedBucket,
     weighted_sum: f64,
-    count: usize,
 }
 
 /// Aggregate buckets into ABSOLUTE-TIME-ALIGNED cells of the given width.
@@ -213,7 +153,8 @@ struct AlignedCell {
 /// sliding-window requests - only the newest cell changes as data arrives.
 ///
 /// Stats are merged exactly like `aggregate_buckets_preserving`: min of mins,
-/// max of maxs, count-weighted average, sum of counts.
+/// max of maxs (with their times, `merge_extremes`), count-weighted average,
+/// sum of counts.
 fn aggregate_buckets_aligned(data: &[AggregatedBucket], width_ms: u64) -> Vec<AggregatedBucket> {
     let width = width_ms.max(1);
 
@@ -222,32 +163,160 @@ fn aggregate_buckets_aligned(data: &[AggregatedBucket], width_ms: u64) -> Vec<Ag
 
     for bucket in data {
         let idx = bucket.ts / width;
-        let cell = cells.entry(idx).or_insert(AlignedCell {
-            min: f64::INFINITY,
-            max: f64::NEG_INFINITY,
-            weighted_sum: 0.0,
-            count: 0,
-        });
-        cell.min = cell.min.min(bucket.min);
-        cell.max = cell.max.max(bucket.max);
-        cell.weighted_sum += bucket.avg * bucket.count as f64;
-        cell.count += bucket.count;
+        match cells.get_mut(&idx) {
+            Some(cell) => {
+                cell.merged.merge_extremes(bucket);
+                cell.merged.count += bucket.count;
+                cell.weighted_sum += bucket.avg * bucket.count as f64;
+            }
+            None => {
+                cells.insert(
+                    idx,
+                    AlignedCell {
+                        merged: bucket.clone(),
+                        weighted_sum: bucket.avg * bucket.count as f64,
+                    },
+                );
+            }
+        }
     }
 
     cells
         .into_iter()
-        .map(|(idx, cell)| AggregatedBucket {
-            ts: idx * width + width / 2,
-            min: cell.min,
-            max: cell.max,
-            avg: if cell.count > 0 {
-                cell.weighted_sum / cell.count as f64
+        .map(|(idx, cell)| {
+            let mut merged = cell.merged;
+            merged.ts = idx * width + width / 2;
+            merged.avg = if merged.count > 0 {
+                cell.weighted_sum / merged.count as f64
             } else {
                 0.0
-            },
-            count: cell.count,
+            };
+            merged
         })
         .collect()
+}
+
+/// One extreme sample collected into a Peak cell
+#[derive(Clone, Copy)]
+struct PeakSample {
+    ts: u64,
+    value: f64,
+}
+
+/// Accumulator for one Peak cell
+struct PeakCell {
+    min: Option<PeakSample>,
+    max: Option<PeakSample>,
+    weighted_sum: f64,
+    count: usize,
+}
+
+/// Peak-detect envelope (SYS-F-515 / UN-03).
+///
+/// Every stored bucket contributes its two extreme samples, (ts_min, min) and
+/// (ts_max, max). Each sample goes into the absolute-time-aligned cell of ITS
+/// OWN time - not the bucket's `ts` - so the output stays in time order even
+/// when a bucket straddles a cell boundary (SYS-NF-602). Each cell then emits
+/// its minimum and its maximum sample in the order they occurred. The values
+/// are real samples, never averages, so the highest and the lowest sample in
+/// the window always appear (why this replaced a triangle-area selection that
+/// could drop a spike: ADR-15).
+///
+/// Cells depend only on absolute time, so a finished cell is identical on every
+/// later request (SYS-F-511); only the newest cell and the cells cut by the
+/// window edges can change (SYS-F-504).
+///
+/// The chart aligns all channels on shared millisecond timestamps and cannot
+/// draw two values at one instant. When a cell's minimum and maximum fall in the
+/// same millisecond, the one farther from the cell average (the spike) is kept.
+fn peak_envelope(
+    data: &[AggregatedBucket],
+    width_ms: u64,
+    time_min: u64,
+    time_max: u64,
+) -> Vec<AggregatedPoint> {
+    let width = width_ms.max(1);
+    let mut cells: BTreeMap<u64, PeakCell> = BTreeMap::new();
+
+    for bucket in data {
+        let extremes = [
+            PeakSample {
+                ts: bucket.ts_min,
+                value: bucket.min,
+            },
+            PeakSample {
+                ts: bucket.ts_max,
+                value: bucket.max,
+            },
+        ];
+        for sample in extremes {
+            if sample.ts < time_min || sample.ts > time_max {
+                continue;
+            }
+            let cell = cells.entry(sample.ts / width).or_insert(PeakCell {
+                min: None,
+                max: None,
+                weighted_sum: 0.0,
+                count: 0,
+            });
+            let lower = cell.min.is_none_or(|m| {
+                sample.value < m.value || (sample.value == m.value && sample.ts < m.ts)
+            });
+            if lower {
+                cell.min = Some(sample);
+            }
+            let higher = cell.max.is_none_or(|m| {
+                sample.value > m.value || (sample.value == m.value && sample.ts < m.ts)
+            });
+            if higher {
+                cell.max = Some(sample);
+            }
+        }
+        // The average only breaks same-millisecond ties; attribute it to the
+        // cell of the bucket's own timestamp.
+        if let Some(cell) = cells.get_mut(&(bucket.ts / width)) {
+            cell.weighted_sum += bucket.avg * bucket.count as f64;
+            cell.count += bucket.count;
+        }
+    }
+
+    let mut points = Vec::with_capacity(cells.len() * 2);
+    for cell in cells.into_values() {
+        let (Some(min), Some(max)) = (cell.min, cell.max) else {
+            continue;
+        };
+        if min.ts == max.ts {
+            let keep = if min.value == max.value || cell.count == 0 {
+                max
+            } else {
+                let avg = cell.weighted_sum / cell.count as f64;
+                if max.value - avg >= avg - min.value {
+                    max
+                } else {
+                    min
+                }
+            };
+            points.push(AggregatedPoint::Single {
+                ts: keep.ts,
+                value: keep.value,
+            });
+        } else {
+            let (first, second) = if min.ts < max.ts {
+                (min, max)
+            } else {
+                (max, min)
+            };
+            points.push(AggregatedPoint::Single {
+                ts: first.ts,
+                value: first.value,
+            });
+            points.push(AggregatedPoint::Single {
+                ts: second.ts,
+                value: second.value,
+            });
+        }
+    }
+    points
 }
 
 /// Inner data structure (protected by RwLock)
@@ -278,6 +347,10 @@ struct PlotterAggregatorInner {
 
     /// Raw data buffer (not yet aggregated)
     raw_buffer: HashMap<String, VecDeque<(u64, f64)>>,
+
+    /// Latest numeric value per channel (legend). Kept separately because
+    /// raw_buffer is drained into buckets on every add when bucket_size is 1.
+    latest: HashMap<String, f64>,
 
     /// Current aggregation level (1 = 1 raw point per aggregated point, doubles on level-up)
     current_level: usize,
@@ -351,6 +424,7 @@ impl PlotterAggregator {
                 history: HashMap::new(),
                 buffer: HashMap::new(),
                 raw_buffer: HashMap::new(),
+                latest: HashMap::new(),
                 current_level: 1,
                 bucket_size: config.bucket_size,
                 state_data: HashMap::new(),
@@ -428,6 +502,7 @@ impl PlotterAggregator {
             if let Some(raw_buf) = inner.raw_buffer.get_mut(channel) {
                 raw_buf.push_back((timestamp_ms, value));
             }
+            inner.latest.insert(channel.to_string(), value);
             inner
                 .channel_types
                 .insert(channel.to_string(), ChannelType::Line);
@@ -644,35 +719,23 @@ impl PlotterAggregator {
     /// Stores min, max, avg, and count for mode-agnostic storage.
     /// The aggregation mode is applied at display time, not storage time.
     fn aggregate_chunk(chunk: &[(u64, f64)]) -> AggregatedBucket {
-        if chunk.is_empty() {
-            return AggregatedBucket {
-                ts: 0,
-                min: 0.0,
-                max: 0.0,
-                avg: 0.0,
-                count: 0,
-            };
+        let Some(&(first_ts, first_value)) = chunk.first() else {
+            let mut empty = AggregatedBucket::sample(0, 0.0);
+            empty.count = 0;
+            return empty;
+        };
+
+        // Fold the samples with the same tie rule as every other merge
+        let mut bucket = AggregatedBucket::sample(first_ts, first_value);
+        for &(ts, value) in &chunk[1..] {
+            bucket.merge_extremes(&AggregatedBucket::sample(ts, value));
         }
 
         // Use average of first and last timestamp for better bucket positioning
-        let ts = (chunk[0].0 + chunk[chunk.len() - 1].0) / 2;
-        let count = chunk.len();
-
-        let min = chunk.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-        let max = chunk
-            .iter()
-            .map(|(_, v)| *v)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let sum: f64 = chunk.iter().map(|(_, v)| *v).sum();
-        let avg = sum / count as f64;
-
-        AggregatedBucket {
-            ts,
-            min,
-            max,
-            avg,
-            count,
-        }
+        bucket.ts = (first_ts + chunk[chunk.len() - 1].0) / 2;
+        bucket.count = chunk.len();
+        bucket.avg = chunk.iter().map(|(_, v)| *v).sum::<f64>() / chunk.len() as f64;
+        bucket
     }
 
     /// Level up: merge history + buffer, re-aggregate at new level
@@ -707,9 +770,14 @@ impl PlotterAggregator {
             }
         }
 
-        // Double the current level and bucket size
-        inner.current_level *= 2;
-        inner.bucket_size = (inner.bucket_size * 2).min(1000); // Cap bucket size
+        // Count level-ups. bucket_size is NOT doubled: growing it would bring
+        // back count-based raw grouping (2, 4, 8, ... samples averaged into one
+        // bucket, and already-drawn points changing when a group fills).
+        // Memory stays bounded because history is re-aggregated to
+        // max_points / 2 here. Level-ups now recur every max_points / 2
+        // samples for as long as data arrives, so saturate instead of
+        // overflowing (it only feeds ">= N" checks).
+        inner.current_level = inner.current_level.saturating_mul(2);
     }
 
     /// Aggregate buckets preserving all statistics for mode-agnostic storage
@@ -733,87 +801,53 @@ impl PlotterAggregator {
         let time_max = data.last().map(|b| b.ts).unwrap_or(0);
         let time_range = time_max.saturating_sub(time_min);
 
-        if time_range == 0 {
-            // All at same timestamp: merge all into one bucket
-            let total_count: usize = data.iter().map(|b| b.count).sum();
-            let overall_min = data.iter().map(|b| b.min).fold(f64::INFINITY, f64::min);
-            let overall_max = data.iter().map(|b| b.max).fold(f64::NEG_INFINITY, f64::max);
-            // Weighted average
-            let weighted_sum: f64 = data.iter().map(|b| b.avg * b.count as f64).sum();
-            let overall_avg = if total_count > 0 {
-                weighted_sum / total_count as f64
-            } else {
-                0.0
-            };
-            return vec![AggregatedBucket {
-                ts: time_min,
-                min: overall_min,
-                max: overall_max,
-                avg: overall_avg,
-                count: total_count,
-            }];
-        }
-
-        // Calculate bucket width
-        let data_rate = data.len() as f64 / time_range as f64;
-        let bucket_width = if data_rate > 0.0 {
-            let points_per_bucket = data.len() as f64 / target_points as f64;
-            (points_per_bucket / data_rate).max(1.0) as u64
+        // Calculate bucket width (all at one timestamp => everything in one bucket)
+        let bucket_width = if time_range == 0 {
+            1
         } else {
-            time_range / target_points as u64
-        }
-        .max(1);
+            let data_rate = data.len() as f64 / time_range as f64;
+            if data_rate > 0.0 {
+                let points_per_bucket = data.len() as f64 / target_points as f64;
+                (points_per_bucket / data_rate).max(1.0) as u64
+            } else {
+                time_range / target_points as u64
+            }
+            .max(1)
+        };
 
         let num_buckets = ((time_range / bucket_width) + 1) as usize;
 
-        // Track stats per bucket
-        let mut bucket_mins: Vec<f64> = vec![f64::INFINITY; num_buckets];
-        let mut bucket_maxs: Vec<f64> = vec![f64::NEG_INFINITY; num_buckets];
-        let mut bucket_weighted_sums: Vec<f64> = vec![0.0; num_buckets];
-        let mut bucket_counts: Vec<usize> = vec![0; num_buckets];
-        let mut bucket_times: Vec<u64> = vec![0; num_buckets];
-        let mut bucket_has_data: Vec<bool> = vec![false; num_buckets];
+        // Per output bucket: merged stats (first input bucket's ts is kept as the
+        // output ts) and the running count-weighted sum for the average.
+        let mut merged: Vec<Option<(AggregatedBucket, f64)>> = vec![None; num_buckets];
 
-        // Assign data to buckets, preserving all stats with weighted average
         for bucket in data {
             let bucket_idx = ((bucket.ts - time_min) / bucket_width) as usize;
-            if bucket_idx < num_buckets {
-                bucket_mins[bucket_idx] = bucket_mins[bucket_idx].min(bucket.min);
-                bucket_maxs[bucket_idx] = bucket_maxs[bucket_idx].max(bucket.max);
-                bucket_weighted_sums[bucket_idx] += bucket.avg * bucket.count as f64;
-                bucket_counts[bucket_idx] += bucket.count;
-                if bucket_times[bucket_idx] == 0 {
-                    bucket_times[bucket_idx] = bucket.ts;
+            let Some(slot) = merged.get_mut(bucket_idx) else {
+                continue;
+            };
+            match slot {
+                Some((acc, weighted_sum)) => {
+                    acc.merge_extremes(bucket);
+                    acc.count += bucket.count;
+                    *weighted_sum += bucket.avg * bucket.count as f64;
                 }
-                bucket_has_data[bucket_idx] = true;
+                None => *slot = Some((bucket.clone(), bucket.avg * bucket.count as f64)),
             }
         }
 
-        // Build result
-        let mut result = Vec::with_capacity(num_buckets);
-        for i in 0..num_buckets {
-            if !bucket_has_data[i] {
-                continue;
-            }
-            let ts = if bucket_times[i] != 0 {
-                bucket_times[i]
-            } else {
-                time_min + (i as u64 * bucket_width)
-            };
-            let avg = if bucket_counts[i] > 0 {
-                bucket_weighted_sums[i] / bucket_counts[i] as f64
-            } else {
-                0.0
-            };
-            result.push(AggregatedBucket {
-                ts,
-                min: bucket_mins[i],
-                max: bucket_maxs[i],
-                avg,
-                count: bucket_counts[i],
-            });
-        }
-        result
+        merged
+            .into_iter()
+            .flatten()
+            .map(|(mut acc, weighted_sum)| {
+                acc.avg = if acc.count > 0 {
+                    weighted_sum / acc.count as f64
+                } else {
+                    0.0
+                };
+                acc
+            })
+            .collect()
     }
 
     /// Get ranged plotter data with dynamic aggregation
@@ -946,9 +980,7 @@ impl PlotterAggregator {
 
             let estimated_size = hist_data.map(|h| h.len()).unwrap_or(0)
                 + buf_data.map(|b| b.len()).unwrap_or(0)
-                + raw_buf
-                    .map(|r| r.len() / inner.current_level.max(1))
-                    .unwrap_or(0);
+                + raw_buf.map(|r| r.len()).unwrap_or(0);
             let mut all_buckets: Vec<AggregatedBucket> =
                 Vec::with_capacity(estimated_size.min(target_points * 2));
 
@@ -970,44 +1002,15 @@ impl PlotterAggregator {
                 }
             }
 
-            // Add points from raw_buffer (these are still unsorted in VecDeque,
-            // so we need to iterate, but raw_buffer is typically small)
+            // Add points from raw_buffer as individual count-1 buckets. With the
+            // default bucket_size of 1 it is drained on every add, so this only
+            // matters for test configs with a larger bucket_size. Grouping by
+            // count here would be order/offset dependent (the group a point
+            // lands in shifts as points drain into `buffer`), so never do that.
             if let Some(raw_buf) = raw_buf {
-                // Collect raw points in range - raw_buffer is small, O(n) is acceptable
-                if req.is_realtime {
-                    // Realtime: keep raw points as individual count-1 buckets.
-                    // Chunking by count is order/offset dependent (the chunk a
-                    // point lands in shifts as the window slides and as points
-                    // drain into `buffer`), which makes the resulting bucket
-                    // timestamps wobble. Individual points feed the
-                    // absolute-time-aligned grid below deterministically.
-                    for &(ts, v) in raw_buf.iter() {
-                        if ts >= time_min_ms && ts <= time_max_ms {
-                            all_buckets.push(AggregatedBucket {
-                                ts,
-                                min: v,
-                                max: v,
-                                avg: v,
-                                count: 1,
-                            });
-                        }
-                    }
-                } else {
-                    let display_bucket = inner.current_level.max(1);
-                    let mut chunk_buffer: Vec<(u64, f64)> = Vec::with_capacity(display_bucket);
-
-                    for &(ts, v) in raw_buf.iter() {
-                        if ts >= time_min_ms && ts <= time_max_ms {
-                            chunk_buffer.push((ts, v));
-                            if chunk_buffer.len() >= display_bucket {
-                                all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
-                                chunk_buffer.clear();
-                            }
-                        }
-                    }
-                    // Handle remaining points
-                    if !chunk_buffer.is_empty() {
-                        all_buckets.push(Self::aggregate_chunk(&chunk_buffer));
+                for &(ts, v) in raw_buf.iter() {
+                    if ts >= time_min_ms && ts <= time_max_ms {
+                        all_buckets.push(AggregatedBucket::sample(ts, v));
                     }
                 }
             }
@@ -1016,27 +1019,35 @@ impl PlotterAggregator {
 
             // Convert buckets to points based on current aggregation mode.
             //
-            // Realtime uses a DIFFERENT downsampling strategy from frozen/zoomed
-            // views, for display stability:
+            // Peak (SYS-F-515): the min/max envelope on an absolute-time-aligned
+            // grid, the same for realtime and frozen / zoomed views. Each cell
+            // emits up to two points, so about target / 2 cells keeps the point
+            // count within the pixel width (SYS-F-516).
             //
-            // Both `aggregate_buckets_preserving` (bucket_idx = (ts - time_min) /
-            // width, width derived from the current span) and LTTB (which re-picks
-            // representative points from whatever is currently in range) produce
-            // output that depends on the window's exact position. In a sliding
-            // realtime window that position changes every frame, so ALL historical
-            // buckets re-form and the whole waveform shimmers.
-            //
-            // Instead, realtime aggregates onto an ABSOLUTE-TIME-ALIGNED grid with
-            // a 1-2-5 quantized width (Grafana/RRDtool style). A cell's boundaries
-            // depend only on absolute time, so once formed it is byte-for-byte
-            // identical on every later fetch; only the newest, still-filling cell
-            // changes as data arrives. The quantized width also absorbs the few-ms
-            // jitter in the window span, keeping the grid itself constant.
-            //
-            // Non-realtime (frozen / zoomed) requests keep the original behaviour:
-            // the range is static there, so LTTB / preserving aggregation is stable
-            // and gives better feature preservation.
-            let points: Vec<AggregatedPoint> = if req.is_realtime {
+            // Average: realtime uses a DIFFERENT downsampling strategy from
+            // frozen/zoomed views, for display stability. `aggregate_buckets_preserving`
+            // (bucket_idx = (ts - time_min) / width, width derived from the current
+            // span) depends on the window's exact position; in a sliding realtime
+            // window that changes every frame, so ALL historical buckets would
+            // re-form and the waveform would shimmer. Realtime therefore aggregates
+            // onto an ABSOLUTE-TIME-ALIGNED grid with a 1-2-5 quantized width
+            // (Grafana/RRDtool style): a cell's boundaries depend only on absolute
+            // time, so once formed it is identical on every later fetch; only the
+            // newest, still-filling cell changes. Frozen / zoomed ranges are static,
+            // so the preserving aggregation is stable there.
+            let points: Vec<AggregatedPoint> = if aggregation_mode == AggregationMode::Peak {
+                let span = time_max_ms.saturating_sub(time_min_ms);
+                // A span of N cell widths can touch N + 1 cells (partial cells at
+                // both edges), so aim for target / 2 - 1 to stay within target.
+                let cells = (target_points / 2).saturating_sub(1).max(1) as u64;
+                let width = quantize_bucket_width_125(span / cells);
+                let envelope = peak_envelope(&all_buckets, width, time_min_ms, time_max_ms);
+                let samples: usize = all_buckets.iter().map(|b| b.count).sum();
+                if envelope.len() < samples {
+                    any_aggregated = true;
+                }
+                envelope
+            } else if req.is_realtime {
                 let span = time_max_ms.saturating_sub(time_min_ms);
                 let width = quantize_bucket_width_125(span / target_points.max(1) as u64);
 
@@ -1046,46 +1057,26 @@ impl PlotterAggregator {
                     any_aggregated = true;
                     aggregate_buckets_aligned(&all_buckets, width)
                         .iter()
-                        .map(|b| b.to_point(&aggregation_mode))
+                        .map(AggregatedBucket::to_average_point)
                         .collect()
                 } else {
                     all_buckets
                         .iter()
-                        .map(|b| b.to_point(&aggregation_mode))
+                        .map(AggregatedBucket::to_average_point)
                         .collect()
                 }
+            } else if all_buckets.len() > target_points * threshold && time_max_ms > time_min_ms {
+                // Preserving aggregation keeps the min/max band
+                any_aggregated = true;
+                Self::aggregate_buckets_preserving(&all_buckets, target_points)
+                    .iter()
+                    .map(AggregatedBucket::to_average_point)
+                    .collect()
             } else {
-                // Check if further aggregation is needed for display
-                let needs_aggregation = all_buckets.len() > target_points * threshold;
-
-                if needs_aggregation && time_max_ms > time_min_ms {
-                    any_aggregated = true;
-                    match aggregation_mode {
-                        AggregationMode::Lttb => {
-                            // Use true LTTB algorithm for feature-preserving downsampling
-                            let selected_indices = lttb_downsample(&all_buckets, target_points);
-                            selected_indices
-                                .iter()
-                                .map(|&idx| all_buckets[idx].to_point(&aggregation_mode))
-                                .collect()
-                        }
-                        AggregationMode::Average => {
-                            // Use preserving aggregation for Average mode (keeps min/max bands)
-                            let aggregated_buckets =
-                                Self::aggregate_buckets_preserving(&all_buckets, target_points);
-                            aggregated_buckets
-                                .iter()
-                                .map(|b| b.to_point(&aggregation_mode))
-                                .collect()
-                        }
-                    }
-                } else {
-                    // Just convert to points based on mode
-                    all_buckets
-                        .iter()
-                        .map(|b| b.to_point(&aggregation_mode))
-                        .collect()
-                }
+                all_buckets
+                    .iter()
+                    .map(AggregatedBucket::to_average_point)
+                    .collect()
             };
 
             aggregated_data.insert(channel.clone(), points);
@@ -1432,11 +1423,8 @@ impl PlotterAggregator {
 
                 let (latest_value, point_count) = match channel_type {
                     ChannelType::Line | ChannelType::Auto => {
-                        // Get latest from raw_buffer (most recent data)
                         let raw_buf = inner.raw_buffer.get(name);
-                        let latest = raw_buf
-                            .and_then(|b| b.back())
-                            .map(|(_, v)| format!("{:.2}", v));
+                        let latest = inner.latest.get(name).map(|v| format!("{:.2}", v));
                         // Count includes history + buffer + raw_buffer
                         let hist_count = inner.history.get(name).map(|h| h.len()).unwrap_or(0);
                         let buf_count = inner.buffer.get(name).map(|b| b.len()).unwrap_or(0);
@@ -1487,6 +1475,7 @@ impl PlotterAggregator {
             inner.history.clear();
             inner.buffer.clear();
             inner.raw_buffer.clear();
+            inner.latest.clear();
             inner.current_level = 1;
             inner.bucket_size = inner.config.bucket_size;
             inner.state_data.clear();
@@ -1539,13 +1528,7 @@ impl PlotterAggregator {
                 // Add raw_buffer data as individual buckets
                 if let Some(raw_data) = inner.raw_buffer.get(&channel) {
                     for &(ts, value) in raw_data.iter() {
-                        all_buckets.push(AggregatedBucket {
-                            ts,
-                            min: value,
-                            max: value,
-                            avg: value,
-                            count: 1,
-                        });
+                        all_buckets.push(AggregatedBucket::sample(ts, value));
                     }
                 }
 
@@ -1616,14 +1599,13 @@ mod tests {
         let agg = PlotterAggregator::with_config(config);
         agg.set_enabled(true);
 
-        // Add 50 points - with new design (bucket_size=10), this will create
-        // 5 aggregated points in buffer, plus 0 remaining in raw_buffer
+        // Add 50 points: with the default bucket_size of 1 each becomes its own
+        // count-1 bucket (no averaging below the max_points cap)
         for i in 0..50 {
             agg.add_data_point("ch0", i * 100, ChannelValue::Numeric(i as f64));
         }
 
-        // New design: 50 raw points -> 5 aggregated points (bucket_size=10)
-        assert!(agg.total_points() > 0, "should have data");
+        assert_eq!(agg.total_points(), 50, "every sample is kept below the cap");
     }
 
     #[test]
@@ -1925,7 +1907,7 @@ mod tests {
         assert!(!data_avg.is_empty(), "Should have data before switching");
 
         // Find peaks in Average mode
-        let (_avg_min, _avg_max) =
+        let (avg_min, avg_max) =
             data_avg
                 .iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, p| match p {
@@ -1933,39 +1915,31 @@ mod tests {
                     AggregatedPoint::MinMax { min, max, .. } => (acc.0.min(*min), acc.1.max(*max)),
                 });
 
-        // Switch to LTTB mode
-        agg.set_aggregation_mode(AggregationMode::Lttb);
+        // Switch to Peak mode
+        agg.set_aggregation_mode(AggregationMode::Peak);
         agg.rebuild_aggregation();
 
-        // Get data as LTTB mode
-        let payload_lttb = agg.get_ranged_data(&req);
-        let data_lttb = payload_lttb.line_data.get("ch0").unwrap();
+        // Get data as Peak mode
+        let payload_peak = agg.get_ranged_data(&req);
+        let data_peak = payload_peak.line_data.get("ch0").unwrap();
         assert!(
-            !data_lttb.is_empty(),
-            "Should have data after switching to LTTB"
+            !data_peak.is_empty(),
+            "Should have data after switching to Peak"
         );
 
-        // Find peaks in LTTB mode
-        let (lttb_min, lttb_max) =
-            data_lttb
+        // Find peaks in Peak mode
+        let (peak_min, peak_max) =
+            data_peak
                 .iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, p| match p {
                     AggregatedPoint::Single { value, .. } => (acc.0.min(*value), acc.1.max(*value)),
                     AggregatedPoint::MinMax { min, max, .. } => (acc.0.min(*min), acc.1.max(*max)),
                 });
 
-        // Peaks should still be reasonable (within 50% of original, accounting for mode differences)
-        // Note: New uniform-level design + LTTB uses midpoints, so significant precision loss is expected
-        assert!(
-            lttb_max > 50.0,
-            "Max peak should be reasonably preserved after mode switch, got {}",
-            lttb_max
-        );
-        assert!(
-            lttb_min < -50.0,
-            "Min peak should be reasonably preserved after mode switch, got {}",
-            lttb_min
-        );
+        // Peak draws real extreme samples, so it shows exactly the extremes
+        // that the Average mode's band shows
+        assert_eq!(peak_max, avg_max, "max changed across the mode switch");
+        assert_eq!(peak_min, avg_min, "min changed across the mode switch");
 
         // Switch back to Average
         agg.set_aggregation_mode(AggregationMode::Average);
@@ -1986,7 +1960,7 @@ mod tests {
         // This is the key test for the new design where all stats are stored in AggregatedBucket
         let config = PlotterConfig {
             max_points: 100,
-            aggregation_mode: AggregationMode::Lttb,
+            aggregation_mode: AggregationMode::Peak,
             ..Default::default()
         };
         let agg = PlotterAggregator::with_config(config);
@@ -1999,21 +1973,21 @@ mod tests {
             agg.add_data_point("ch0", i * 10, ChannelValue::Numeric(value));
         }
 
-        // Get data in LTTB mode
+        // Get data in Peak mode
         let req = PlotterDataRequest {
             time_min_ms: None,
             time_max_ms: None,
             pixel_width: 100,
             is_realtime: false,
         };
-        let payload_lttb = agg.get_ranged_data(&req);
-        let data_lttb = payload_lttb.line_data.get("ch0").unwrap();
+        let payload_peak = agg.get_ranged_data(&req);
+        let data_peak = payload_peak.line_data.get("ch0").unwrap();
 
-        // LTTB mode should return Single points
-        let lttb_has_single = data_lttb
+        // Peak mode should return Single points
+        let peak_has_single = data_peak
             .iter()
             .any(|p| matches!(p, AggregatedPoint::Single { .. }));
-        assert!(lttb_has_single, "LTTB mode should return Single points");
+        assert!(peak_has_single, "Peak mode should return Single points");
 
         // Switch to Average mode WITHOUT calling rebuild_aggregation
         agg.set_aggregation_mode(AggregationMode::Average);
@@ -2059,16 +2033,16 @@ mod tests {
             max_ts
         );
 
-        // Switch back to LTTB - should also work without rebuild
-        agg.set_aggregation_mode(AggregationMode::Lttb);
-        let payload_lttb2 = agg.get_ranged_data(&req);
-        let data_lttb2 = payload_lttb2.line_data.get("ch0").unwrap();
-        let lttb2_has_single = data_lttb2
+        // Switch back to Peak - should also work without rebuild
+        agg.set_aggregation_mode(AggregationMode::Peak);
+        let payload_peak2 = agg.get_ranged_data(&req);
+        let data_peak2 = payload_peak2.line_data.get("ch0").unwrap();
+        let peak2_has_single = data_peak2
             .iter()
             .any(|p| matches!(p, AggregatedPoint::Single { .. }));
         assert!(
-            lttb2_has_single,
-            "LTTB mode should return Single points after switching back"
+            peak2_has_single,
+            "Peak mode should return Single points after switching back"
         );
     }
 
@@ -2082,7 +2056,7 @@ mod tests {
         // Regression test: verify get_ranged_data returns correct data with large dataset
         let config = PlotterConfig {
             max_points: 1000,
-            aggregation_mode: AggregationMode::Lttb,
+            aggregation_mode: AggregationMode::Peak,
             ..Default::default()
         };
         let agg = PlotterAggregator::with_config(config);
@@ -2226,6 +2200,8 @@ mod tests {
                 max: 10.0,
                 avg: 5.0,
                 count: 10,
+                ts_min: 0,
+                ts_max: 0,
             },
             AggregatedBucket {
                 ts: 100,
@@ -2233,6 +2209,8 @@ mod tests {
                 max: 15.0,
                 avg: 10.0,
                 count: 10,
+                ts_min: 100,
+                ts_max: 100,
             },
             AggregatedBucket {
                 ts: 200,
@@ -2240,6 +2218,8 @@ mod tests {
                 max: 20.0,
                 avg: 15.0,
                 count: 10,
+                ts_min: 200,
+                ts_max: 200,
             },
             AggregatedBucket {
                 ts: 300,
@@ -2247,6 +2227,8 @@ mod tests {
                 max: 25.0,
                 avg: 20.0,
                 count: 10,
+                ts_min: 300,
+                ts_max: 300,
             },
             AggregatedBucket {
                 ts: 400,
@@ -2254,6 +2236,8 @@ mod tests {
                 max: 30.0,
                 avg: 25.0,
                 count: 10,
+                ts_min: 400,
+                ts_max: 400,
             },
         ];
 
@@ -2699,105 +2683,118 @@ mod tests {
         assert!(payload.band_data.is_none(), "Should have no band data");
     }
 
-    // ==================== LTTB Algorithm Tests ====================
+    // ==================== Peak envelope tests (SYS-F-515 / UN-03) ====================
 
-    #[test]
-    fn test_lttb_downsample_small_data() {
-        // When data is smaller than target, return all indices
-        let data: Vec<AggregatedBucket> = (0..5)
-            .map(|i| AggregatedBucket {
-                ts: i * 100,
-                min: i as f64,
-                max: i as f64,
-                avg: i as f64,
-                count: 1,
-            })
-            .collect();
-
-        let result = lttb_downsample(&data, 10);
-        assert_eq!(result, vec![0, 1, 2, 3, 4]);
+    fn sample_buckets(values: &[(u64, f64)]) -> Vec<AggregatedBucket> {
+        values
+            .iter()
+            .map(|&(ts, v)| AggregatedBucket::sample(ts, v))
+            .collect()
     }
 
-    #[test]
-    fn test_lttb_downsample_preserves_endpoints() {
-        // LTTB always includes first and last points
-        let data: Vec<AggregatedBucket> = (0..100)
-            .map(|i| AggregatedBucket {
-                ts: i * 100,
-                min: i as f64,
-                max: i as f64,
-                avg: i as f64,
-                count: 1,
+    fn single_values(points: &[AggregatedPoint]) -> Vec<(u64, f64)> {
+        points
+            .iter()
+            .map(|p| match p {
+                AggregatedPoint::Single { ts, value } => (*ts, *value),
+                AggregatedPoint::MinMax { .. } => panic!("Peak mode emits Single points only"),
             })
-            .collect();
-
-        let result = lttb_downsample(&data, 10);
-
-        assert_eq!(result[0], 0, "First point should always be included");
-        assert_eq!(
-            *result.last().unwrap(),
-            99,
-            "Last point should always be included"
-        );
-        assert_eq!(result.len(), 10, "Should return exactly target points");
+            .collect()
     }
 
+    /// A single-sample spike survives any amount of downsampling at its real
+    /// value (the mode it replaced drew the bucket average: 400 became about 41)
     #[test]
-    fn test_lttb_preserves_peak() {
-        // Create data with a clear peak - LTTB should select it
-        let mut data: Vec<AggregatedBucket> = Vec::new();
-
-        // Flat baseline at 0
-        for i in 0..20 {
-            data.push(AggregatedBucket {
-                ts: i * 100,
-                min: 0.0,
-                max: 0.0,
-                avg: 0.0,
-                count: 1,
-            });
-        }
-
-        // Sharp peak at position 25
-        for i in 20..30 {
-            let peak_value = if i == 25 { 100.0 } else { 0.0 };
-            data.push(AggregatedBucket {
-                ts: i * 100,
-                min: peak_value,
-                max: peak_value,
-                avg: peak_value,
-                count: 1,
-            });
-        }
-
-        // Back to baseline
-        for i in 30..50 {
-            data.push(AggregatedBucket {
-                ts: i * 100,
-                min: 0.0,
-                max: 0.0,
-                avg: 0.0,
-                count: 1,
-            });
-        }
-
-        let result = lttb_downsample(&data, 10);
-
-        // The peak at index 25 should be selected (forms largest triangle)
+    fn test_peak_envelope_keeps_single_sample_spike() {
+        let mut data: Vec<(u64, f64)> = (0..1000).map(|i| (i * 10, 1.2)).collect();
+        data[437].1 = 400.0;
+        let points = single_values(&peak_envelope(&sample_buckets(&data), 1000, 0, 9990));
+        assert!(points.contains(&(4370, 400.0)), "{points:?}");
         assert!(
-            result.contains(&25),
-            "LTTB should select the peak point. Selected: {:?}",
-            result
+            points.len() <= 20,
+            "two points per 1 s cell at most: {}",
+            points.len()
         );
     }
 
+    /// Each cell emits its min and max in the order they occurred, at their real times
     #[test]
-    fn test_lttb_mode_uses_lttb_algorithm() {
-        // Test that LTTB mode actually uses the LTTB algorithm
+    fn test_peak_envelope_orders_extremes_by_time() {
+        // cell 0: max first, then min; cell 1: min first, then max
+        let data = [
+            (0, 0.0),
+            (10, 9.0),
+            (20, -3.0),
+            (100, 5.0),
+            (110, -1.0),
+            (120, 7.0),
+        ];
+        let points = single_values(&peak_envelope(&sample_buckets(&data), 100, 0, 200));
+        assert_eq!(points, vec![(10, 9.0), (20, -3.0), (110, -1.0), (120, 7.0)]);
+    }
+
+    /// Sparse data (fewer samples than cells) is drawn sample for sample
+    #[test]
+    fn test_peak_envelope_is_lossless_for_sparse_data() {
+        let data = [(0, 1.0), (1000, 3.0), (2000, 2.0)];
+        let points = single_values(&peak_envelope(&sample_buckets(&data), 100, 0, 2000));
+        assert_eq!(points, data.to_vec());
+    }
+
+    /// Samples outside the requested window are not emitted
+    #[test]
+    fn test_peak_envelope_respects_window() {
+        let data = [(50, 100.0), (150, 1.0), (250, -100.0)];
+        let points = single_values(&peak_envelope(&sample_buckets(&data), 10, 100, 200));
+        assert_eq!(points, vec![(150, 1.0)]);
+    }
+
+    /// A merged bucket whose extremes straddle a cell boundary still yields
+    /// points in time order (each extreme goes to the cell of its own time)
+    #[test]
+    fn test_peak_envelope_uses_extreme_times_for_cells() {
+        let mut straddling = AggregatedBucket::sample(95, 0.0);
+        straddling.merge_extremes(&AggregatedBucket::sample(105, 9.0));
+        let data = vec![straddling, AggregatedBucket::sample(103, -2.0)];
+        let points = single_values(&peak_envelope(&data, 100, 0, 200));
+        let times: Vec<u64> = points.iter().map(|p| p.0).collect();
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "{points:?}");
+        assert!(points.contains(&(105, 9.0)) && points.contains(&(103, -2.0)));
+    }
+
+    /// Same-millisecond min and max cannot both be drawn: the spike is kept
+    #[test]
+    fn test_peak_envelope_same_millisecond_keeps_the_spike() {
+        let data = [(0, 1.0), (1, 1.0), (5, 50.0), (5, 0.9), (9, 1.0)];
+        let points = single_values(&peak_envelope(&sample_buckets(&data), 10, 0, 9));
+        // min 0.9 and max 50.0 are both at 5 ms; 50.0 is farther from the average
+        assert_eq!(points, vec![(5, 50.0)]);
+    }
+
+    /// The merge of extremes does not depend on grouping (associative tie rule)
+    #[test]
+    fn test_merge_extremes_is_grouping_independent() {
+        let samples = [(5, 2.0), (1, 7.0), (3, 2.0), (4, 7.0), (2, -1.0), (6, -1.0)];
+        let fold = |order: &[usize]| {
+            let mut acc = AggregatedBucket::sample(samples[order[0]].0, samples[order[0]].1);
+            for &i in &order[1..] {
+                acc.merge_extremes(&AggregatedBucket::sample(samples[i].0, samples[i].1));
+            }
+            (acc.min, acc.ts_min, acc.max, acc.ts_max)
+        };
+        let expected = (-1.0, 2, 7.0, 1);
+        assert_eq!(fold(&[0, 1, 2, 3, 4, 5]), expected);
+        assert_eq!(fold(&[5, 4, 3, 2, 1, 0]), expected);
+        assert_eq!(fold(&[3, 0, 5, 1, 4, 2]), expected);
+    }
+
+    #[test]
+    fn test_peak_mode_returns_real_extremes() {
+        // Peak mode returns only Single points, and they are real samples:
+        // the triangle wave's peaks (100) and troughs (0) survive downsampling
         let config = PlotterConfig {
             max_points: 100,
-            aggregation_mode: AggregationMode::Lttb,
-            aggregation_threshold: Some(2), // Trigger aggregation easily
+            aggregation_mode: AggregationMode::Peak,
             ..Default::default()
         };
         let agg = PlotterAggregator::with_config(config);
@@ -2823,11 +2820,11 @@ mod tests {
         let payload = agg.get_ranged_data(&req);
         let data = payload.line_data.get("ch0").unwrap();
 
-        // LTTB mode should return Single points
+        // Peak mode should return Single points
         assert!(
             data.iter()
                 .all(|p| matches!(p, AggregatedPoint::Single { .. })),
-            "LTTB mode should only return Single points"
+            "Peak mode should only return Single points"
         );
 
         // Verify peaks are preserved in some form
@@ -2842,19 +2839,8 @@ mod tests {
         let max_value = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
         let min_value = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
 
-        // Data goes through bucket averaging, so peaks are reduced.
-        // What matters is that LTTB preserves relative variation (max > min)
-        assert!(
-            max_value > min_value,
-            "LTTB should preserve variation: max={}, min={}",
-            max_value,
-            min_value
-        );
-        assert!(
-            max_value > 0.0,
-            "LTTB should preserve some peak values, max was {}",
-            max_value
-        );
+        assert_eq!(max_value, 100.0, "peak averaged away");
+        assert_eq!(min_value, 0.0, "trough averaged away");
     }
 
     #[test]
@@ -3059,7 +3045,12 @@ mod tests {
 
     #[test]
     fn test_aligned_cells_on_absolute_grid() {
-        let agg = PlotterAggregator::new();
+        // Average mode draws one point per cell at the cell centre. Peak mode
+        // draws real sample times instead (test_peak_realtime_*).
+        let agg = PlotterAggregator::with_config(PlotterConfig {
+            aggregation_mode: AggregationMode::Average,
+            ..Default::default()
+        });
         agg.set_enabled(true);
 
         const T0: u64 = 1_000_000;
@@ -3097,6 +3088,85 @@ mod tests {
                 "cell center {} is not on the absolute {} ms grid",
                 ts,
                 width
+            );
+        }
+    }
+
+    /// Peak mode, realtime: a single-sample spike in a long, heavily
+    /// downsampled window is drawn at its real value and time; the output stays
+    /// within the pixel budget and in time order (PF-1, docs/27)
+    #[test]
+    fn test_peak_realtime_keeps_spike_through_level_ups() {
+        let agg = PlotterAggregator::with_config(PlotterConfig {
+            max_points: 1000, // force many level-ups
+            ..Default::default()
+        });
+        agg.set_enabled(true);
+
+        const T0: u64 = 1_000_000;
+        for i in 0..30_000u64 {
+            let value = if i == 12_345 { 400.0 } else { 1.2 };
+            agg.add_data_point("ch0", T0 + i * 10, ChannelValue::Numeric(value));
+        }
+        assert!(
+            current_level(&agg) > 1,
+            "the scenario must exercise level-ups"
+        );
+
+        let pixel_width = 800;
+        let payload = agg.get_ranged_data(&PlotterDataRequest {
+            time_min_ms: Some(T0),
+            time_max_ms: Some(T0 + 300_000),
+            pixel_width,
+            is_realtime: true,
+        });
+        let points = single_values(payload.line_data.get("ch0").unwrap());
+        assert!(points.contains(&(T0 + 123_450, 400.0)), "spike lost");
+        assert!(
+            points.len() <= pixel_width as usize,
+            "{} points",
+            points.len()
+        );
+        assert!(
+            points.windows(2).all(|w| w[0].0 < w[1].0),
+            "not in time order"
+        );
+    }
+
+    /// Slow data below the storage cap is drawn sample for sample, and an
+    /// already-drawn point never changes when later samples arrive (the old
+    /// fixed 10-sample grouping averaged 1 Hz data into 10 s and rewrote it)
+    #[test]
+    fn test_slow_data_is_not_averaged_and_does_not_change() {
+        let agg = PlotterAggregator::new();
+        agg.set_enabled(true);
+        let req = PlotterDataRequest {
+            time_min_ms: Some(0),
+            time_max_ms: Some(60_000),
+            pixel_width: 1000,
+            is_realtime: true,
+        };
+
+        let mut drawn: Vec<Vec<(u64, f64)>> = Vec::new();
+        for i in 0..30u64 {
+            agg.add_data_point(
+                "ch0",
+                i * 1000,
+                ChannelValue::Numeric((i as f64 * 0.7).sin()),
+            );
+            drawn.push(single_values(
+                agg.get_ranged_data(&req).line_data.get("ch0").unwrap(),
+            ));
+        }
+        let expected: Vec<(u64, f64)> = (0..30u64)
+            .map(|i| (i * 1000, (i as f64 * 0.7).sin()))
+            .collect();
+        assert_eq!(drawn.last().unwrap(), &expected);
+        for (n, frame) in drawn.iter().enumerate() {
+            assert_eq!(
+                frame.as_slice(),
+                &expected[..=n],
+                "frame {n} rewrote history"
             );
         }
     }
@@ -3413,6 +3483,57 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
+        /// A1b - Peak mode never averages and never loses an extreme (UN-03 / SYS-F-515).
+        ///
+        /// For static and realtime requests over the whole stream: (1) every
+        /// drawn point is a real input sample (same time, same value), and (2)
+        /// the channel's highest and lowest sample are drawn. The only allowed
+        /// exception is the documented one: the chart cannot place two values
+        /// at one millisecond, so an extreme may give way to another sample of
+        /// the same millisecond.
+        #[test]
+        fn prop_peak_mode_keeps_extremes_and_real_samples(
+            spec in stream_spec(),
+            pixel_width in pixel_width_strategy(),
+            max_points in max_points_strategy(),
+            realtime in any::<bool>(),
+        ) {
+            let agg = aggregator_with(AggregationMode::Peak, max_points);
+            let fed = spec.feed(&agg);
+            let ts = spec.timestamps();
+            let req = PlotterDataRequest {
+                time_min_ms: Some(ts[0]),
+                time_max_ms: Some(*ts.last().unwrap()),
+                pixel_width,
+                is_realtime: realtime,
+            };
+            let payload = agg.get_ranged_data(&req);
+
+            for (ch, values) in fed.iter().enumerate() {
+                let name = StreamSpec::channel_name(ch);
+                let points = single_values(payload.line_data.get(&name).unwrap());
+                let samples: Vec<(u64, f64)> = ts.iter().copied().zip(values.iter().copied()).collect();
+
+                for p in &points {
+                    prop_assert!(samples.contains(p), "{} drew a non-sample point {:?}", name, p);
+                }
+                prop_assert!(points.len() <= pixel_width as usize,
+                    "{} drew {} points for {} px", name, points.len(), pixel_width);
+
+                // An extreme may only be missing if another value shares its millisecond
+                let shares_ms = |t: u64, v: f64| samples.iter().any(|&(st, sv)| st == t && sv != v);
+                let want_max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let want_min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                for (want, label) in [(want_max, "maximum"), (want_min, "minimum")] {
+                    let drawn = points.iter().any(|&(_, v)| v == want);
+                    let excused = samples.iter().any(|&(t, v)| v == want && shares_ms(t, v));
+                    prop_assert!(drawn || excused,
+                        "{} lost its {} {} (n={}, px={}, max_points={}, realtime={})",
+                        name, label, want, spec.n, pixel_width, max_points, realtime);
+                }
+            }
+        }
+
         /// A1 - the min/max envelope is never lost.
         ///
         /// Guards: "a spike can never disappear". Over a full-range Average-mode
@@ -3528,7 +3649,7 @@ mod tests {
             let mode = if use_average {
                 AggregationMode::Average
             } else {
-                AggregationMode::Lttb
+                AggregationMode::Peak
             };
             let agg = aggregator_with(mode, max_points);
             spec.feed(&agg);
@@ -3625,7 +3746,7 @@ mod tests {
                         agg.set_aggregation_mode(if *average {
                             AggregationMode::Average
                         } else {
-                            AggregationMode::Lttb
+                            AggregationMode::Peak
                         });
                     }
                     AggOp::GetChart { pixel_width } => {
@@ -3721,7 +3842,7 @@ mod tests {
             let mode = if use_average {
                 AggregationMode::Average
             } else {
-                AggregationMode::Lttb
+                AggregationMode::Peak
             };
 
             let one_by_one = aggregator_with(mode.clone(), max_points);

@@ -210,9 +210,9 @@ impl TestEnv {
     /// Latest value plotted on `ch0` (the first CSV column), if any.
     ///
     /// Used as the per-line oracle: it identifies the exact line that arrived,
-    /// which `total_points()` alone cannot do. Valid because every test env
-    /// stays well below `bucket_size` (10) raw points per channel, so the most
-    /// recent point is always still in `raw_buffer`.
+    /// which `total_points()` alone cannot do. The aggregator keeps the latest
+    /// value per channel separately from its buckets, so this holds however
+    /// the samples were grouped.
     fn latest_ch0(&self) -> Option<f64> {
         latest_ch0_of(&self.aggregator)
     }

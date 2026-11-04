@@ -160,20 +160,20 @@ function Ensure-ViewState($plotter, [string]$target, [bool]$hasChart) {
 
 # --- covering array (from pairwise_gen2.py; regenerate there when factors change) ---
 $rows = @(
-  @{connected="no"; stream="off"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="LTTB"; viewState="paused"; windowSec="300"; hiddenCh="sin"},
+  @{connected="no"; stream="off"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="Peak"; viewState="paused"; windowSec="300"; hiddenCh="sin"},
   @{connected="no"; stream="on"; viewMode="ascii"; lineWrap="off"; timestamp="off"; separator="Space"; autoScroll="off"; plotterOpen="no"; aggMode="Average"; viewState="live"; windowSec="10"; hiddenCh="none"},
-  @{connected="no"; stream="on"; viewMode="hex"; lineWrap="on"; timestamp="off"; separator="Comma"; autoScroll="on"; plotterOpen="no"; aggMode="LTTB"; viewState="inspect"; windowSec="1"; hiddenCh="none"},
+  @{connected="no"; stream="on"; viewMode="hex"; lineWrap="on"; timestamp="off"; separator="Comma"; autoScroll="on"; plotterOpen="no"; aggMode="Peak"; viewState="inspect"; windowSec="1"; hiddenCh="none"},
   @{connected="yes"; stream="off"; viewMode="ascii"; lineWrap="on"; timestamp="on"; separator="Space"; autoScroll="off"; plotterOpen="yes"; aggMode="Average"; viewState="inspect"; windowSec="1"; hiddenCh="sin"},
   @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="off"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="no"; aggMode="Average"; viewState="paused"; windowSec="10"; hiddenCh="sin"},
-  @{connected="yes"; stream="off"; viewMode="hex"; lineWrap="off"; timestamp="off"; separator="Comma"; autoScroll="off"; plotterOpen="yes"; aggMode="LTTB"; viewState="live"; windowSec="300"; hiddenCh="none"},
-  @{connected="yes"; stream="off"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Space"; autoScroll="on"; plotterOpen="no"; aggMode="LTTB"; viewState="live"; windowSec="10"; hiddenCh="sin"},
+  @{connected="yes"; stream="off"; viewMode="hex"; lineWrap="off"; timestamp="off"; separator="Comma"; autoScroll="off"; plotterOpen="yes"; aggMode="Peak"; viewState="live"; windowSec="300"; hiddenCh="none"},
+  @{connected="yes"; stream="off"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Space"; autoScroll="on"; plotterOpen="no"; aggMode="Peak"; viewState="live"; windowSec="10"; hiddenCh="sin"},
   @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Comma"; autoScroll="on"; plotterOpen="yes"; aggMode="Average"; viewState="paused"; windowSec="300"; hiddenCh="none"},
-  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="on"; separator="Comma"; autoScroll="on"; plotterOpen="yes"; aggMode="LTTB"; viewState="paused"; windowSec="10"; hiddenCh="sin"},
-  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="off"; separator="Tab"; autoScroll="off"; plotterOpen="yes"; aggMode="LTTB"; viewState="paused"; windowSec="1"; hiddenCh="sin"},
-  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="on"; separator="Space"; autoScroll="on"; plotterOpen="no"; aggMode="LTTB"; viewState="paused"; windowSec="300"; hiddenCh="sin"},
-  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="off"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="LTTB"; viewState="inspect"; windowSec="300"; hiddenCh="none"},
-  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="off"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="LTTB"; viewState="live"; windowSec="1"; hiddenCh="sin"},
-  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="LTTB"; viewState="inspect"; windowSec="10"; hiddenCh="sin"}
+  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="on"; separator="Comma"; autoScroll="on"; plotterOpen="yes"; aggMode="Peak"; viewState="paused"; windowSec="10"; hiddenCh="sin"},
+  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="off"; separator="Tab"; autoScroll="off"; plotterOpen="yes"; aggMode="Peak"; viewState="paused"; windowSec="1"; hiddenCh="sin"},
+  @{connected="yes"; stream="on"; viewMode="ascii"; lineWrap="on"; timestamp="on"; separator="Space"; autoScroll="on"; plotterOpen="no"; aggMode="Peak"; viewState="paused"; windowSec="300"; hiddenCh="sin"},
+  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="off"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="Peak"; viewState="inspect"; windowSec="300"; hiddenCh="none"},
+  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="off"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="Peak"; viewState="live"; windowSec="1"; hiddenCh="sin"},
+  @{connected="yes"; stream="on"; viewMode="hex"; lineWrap="on"; timestamp="on"; separator="Tab"; autoScroll="on"; plotterOpen="yes"; aggMode="Peak"; viewState="inspect"; windowSec="10"; hiddenCh="sin"}
 )
 
 $results = @()
@@ -228,7 +228,7 @@ foreach ($row in $rows) {
       $texts = Get-Texts $plotter
       $hasChart = -not ($texts -match "No data yet")
 
-      Select-Combo $plotter "LTTB|Average" ("^" + $row.aggMode + "$")
+      Select-Combo $plotter "Peak|Average" ("^" + $row.aggMode + "$")
       Select-Combo $plotter "^\d+s$" ("^" + $row.windowSec + "s$")
 
       # hidden channel (needs a chart with the sin legend)

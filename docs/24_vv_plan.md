@@ -87,7 +87,7 @@ flowchart TB
 | 時刻索引の二分探索 | SYS-F-207 | `test_get_timestamp_for_offset_*`（4 件） |
 | Logger のフラッシュ閾値 | SYS-F-202 | `test_process_buffer_*`（4 件） |
 | パース規則 | SYS-F-701〜709 | `test_parse_*`（17 件） |
-| 集約・LTTB・ペイロード形式 | SYS-F-511〜516, SYS-NF-601 | aggregator の 36 件 |
+| 集約・Peak・ペイロード形式 | SYS-F-511〜517, SYS-NF-601 | aggregator の 36 件 |
 | 行 -> テンプレート化 | SYS-F-1111 | `insight::mask::tests`（例示 7 件 + プロパティ 4 件） |
 | ウィンドウ解決・カーソル | SYS-F-1111 | `insight::window::tests`（例示 5 件 + プロパティ 2 件） |
 | テンプレート表・差分・世代 | SYS-F-1111 | `insight::index::tests`（12 件） |
@@ -106,7 +106,7 @@ flowchart TB
 | `get_data(offset, length)` | `length=0` / `offset=total_bytes` / チャンク境界ちょうど / archived と finished の継ぎ目 |
 | `quantize_bucket_width_125` | 各 1-2-5 の境界の直前・直後（`0,1,2,3,5,6,10,11,20,21,50,51,...`）。既存テストが 22 ケースで網羅済 |
 | `aggregate_buckets_aligned` | セル境界ちょうどの ts / 空データ / 1 点のみ |
-| LTTB | `target_points < 3` / `n <= target_points` / 端点保存 |
+| `peak_envelope` | 窓の端（窓外の極値を出さない）/ セル境界をまたぐバケット / 同じミリ秒の min と max / 疎なデータ（全点そのまま） |
 | スクロールスケーリング | `MAX_SCROLL_HEIGHT` の直下・直上 / `totalBytes=0` |
 | ボーレート検証 | `0` / 負 / 小数 / 空文字 / 12_000_000 |
 
@@ -395,7 +395,7 @@ INV-2（世代差し替えで旧世代が消える）、S-2（既存バックロ
 | Timestamp 区切り | Space / Comma / Tab | 3 |
 | Auto Scroll | ON / OFF | 2 |
 | プロッタビュー状態 | LIVE / Inspect / Paused | 3 |
-| 間引きモード | LTTB / Average | 2 |
+| 間引きモード | Peak / Average | 2 |
 | LIVE ウィンドウ幅 | 1 / 2 / 5 / 10 / 30 / 60 / 120 / 300 秒 | 8 |
 | ストリーム | 受信中 / 停止中 | 2 |
 | チャンネル表示 | 全表示 / 一部非表示 | 2 |
@@ -500,7 +500,7 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 | E-5 | プロッタを先に開いてから接続 | データが流れる（旧: 動かない） |
 | E-6 | プロッタウィンドウの X 閉じ | スレッド停止・収集停止をログで確認 |
 | E-7 | temp ディレクトリ | `<pid>/<n>` 単位で安全に削除される |
-| E-8 | 間引きモード切替（受信中・停止中） | LTTB ↔ Average、Average の min/max バンド描画 |
+| E-8 | 間引きモード切替（受信中・停止中） | Peak ↔ Average、Average の min/max バンド描画 |
 | E-9 | Pause ↔ Resume、凡例クリック | Y 軸の再スケール |
 | E-10 | Hex ↔ ASCII、Line Wrap / Timestamp / Auto Scroll / DTR / RTS | 各トグルの反映 |
 | E-11 | 複合連続操作 | Clear×3 + Pause/Resume + モード切替×2 + 切断/再接続の連打後に正常回復 |
@@ -534,7 +534,7 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 主要な操作組合せを機械実行できる状態にはなっている）。
 E-13〜E-20 は**一部実施済み**（2026-09-03、[07 検証節](07_plotter_spec.md#検証)に記録:
 E-13 は 10s/30s の 2 幅のみ、E-14・E-16・E-18 は実施済み。
-E-15（ピクセル完全一致）・E-17・E-19・E-20 は未実施 → [27 OV-6](27_open_verification.md)）。
+E-15（ピクセル完全一致）・E-20 は未実施 → [27 OV-6](27_open_verification.md)。E-17・E-19 は 2026-11-04 に実施 → [27 §4](27_open_verification.md)。E-19 は Average モードでのみ PASS で、LTTB モードではスパイクが潰れる欠陥 PF-1 を検出）。
 **E-21（ブリッジ）は `run_bridge_e2e.ps1` としてスクリプト化済み**で、
 ワンコマンドで再実行できる（2026-09-03 実施・全 PASS）。
 
@@ -801,6 +801,10 @@ thread.rs を対象に含めた。
 | US-04 Hex 確認 | バイト位置を見失わずに Hex/ASCII を往復できたか |
 | US-05 コマンド送信 | 履歴の呼び戻しが編集の邪魔をしなかったか |
 | US-06 長時間ログとエクスポート | 途中で重くならなかったか。エクスポートしたファイルが外部ツールで読めたか |
+| US-07 AI と一緒にデバッグ | Setup Guide だけで MCP 登録できたか。エージェントの要約・待機が実際の調査で役立ったか。AI の送信を画面で追えたか（2026-11-04 追加。表から漏れていた） |
+
+**未実施の一覧と記録は [27_open_verification.md §2](27_open_verification.md)**（VA-1〜9。プロッタの VA-1〜3 が最優先）。
+Auto Reconnect（SYS-F-807）は利用者が ON / OFF を選べるので US-02 とは衝突しない（2026-11-04 オーナー判断。US-02 は OFF で確認する）。
 
 **合否基準**: 上記の問いに「いいえ」が出た場合、その体験を新しいニーズ（UN）として
 [20_user_needs.md](20_user_needs.md) に追加してから要求へ変換する。実装の場当たり修正で済ませない。
@@ -863,7 +867,7 @@ thread.rs を対象に含めた。
 | 5 | E2E | 一部実施済（E-1〜E-12、手動） | GAP-30、E-13〜E-20 |
 | 6 | 性能・メモリ計測 | 一部実施済（手動 + `test_tools`） | GAP-10, 26 |
 | 7 | ミューテーション | **基線測定済（2026-09-03）**: parser+thread 103 件・スコア 66.3%。aggregator と改善ループが残 | GAP-29 |
-| 8 | 妥当性確認 | 都度実施（記録なし） | 記録の様式が未定 |
+| 8 | 妥当性確認 | **記録なし（0 件）** | 記録は [27 §2](27_open_verification.md)（TBD-V4 決定）。VA-1〜9 すべて未実施 |
 
 ### 着手順の根拠
 
@@ -884,7 +888,7 @@ thread.rs を対象に含めた。
 | TBD-V1 | E2E の自動化方式。UIA スクリプトを Python で書くか、別のドライバ（WinAppDriver 等）を導入するか未定 |
 | TBD-V2 | E-15（フレーム間のピクセル完全一致）の判定方法。スクリーンショット比較か、uPlot の内部座標を直接検査するか |
 | TBD-V3 | プロパティテストの実行時間の上限。CI の高速ゲートに含めるか、別ジョブにするか |
-| TBD-V4 | 妥当性確認（§8）の記録様式。所見をどこに残すか（本ドキュメント群か、Issue か） |
+| ~~TBD-V4~~ | ~~妥当性確認（§8）の記録様式。所見をどこに残すか（本ドキュメント群か、Issue か）~~ **決定（2026-11-04）**: [27_open_verification.md](27_open_verification.md) §2 に未実施を、§4 に問いへの答えを記録する |
 | TBD-V5 | SYS-NF-107（1 kHz 表示遅延）の測定方法。送信側のタイムスタンプと画面表示の対応をどう取るか |
 
 ---

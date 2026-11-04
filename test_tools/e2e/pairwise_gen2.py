@@ -20,7 +20,7 @@ FACTORS: dict[str, list[str]] = {
     "separator": ["Space", "Comma", "Tab"],
     "autoScroll": ["on", "off"],
     "plotterOpen": ["yes", "no"],
-    "aggMode": ["LTTB", "Average"],
+    "aggMode": ["Peak", "Average"],
     "viewState": ["live", "inspect", "paused"],
     "windowSec": ["1", "10", "300"],
     "hiddenCh": ["none", "sin"],

@@ -13,7 +13,7 @@ FACTORS: dict[str, list[str]] = {
     "timestamp": ["on", "off"],
     "autoScroll": ["on", "off"],
     "plotterOpen": ["yes", "no"],
-    "aggMode": ["LTTB", "Average"],
+    "aggMode": ["Peak", "Average"],
     "plotView": ["live", "paused"],
 }
 

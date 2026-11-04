@@ -6,7 +6,7 @@ import { StateRow } from './stateTimelinePlugin';
 import './PlotterWindow.css';
 
 // Aggregation mode type matching Rust AggregationMode
-type AggregationMode = 'Average' | 'Lttb';
+type AggregationMode = 'Average' | 'Peak';
 
 // Types matching Rust PlotterChartPayload (new uPlot-ready format)
 interface ChannelInfo {
@@ -72,7 +72,7 @@ export default function PlotterWindow() {
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set());
 
   // Aggregation mode setting
-  const [aggregationMode, setAggregationMode] = useState<AggregationMode>('Lttb');
+  const [aggregationMode, setAggregationMode] = useState<AggregationMode>('Peak');
 
   // Width of the sliding live window (seconds)
   const [windowSec, setWindowSec] = useState<number>(DEFAULT_WINDOW_SEC);
@@ -554,8 +554,18 @@ export default function PlotterWindow() {
             }}
             title="Downsampling mode"
           >
-            <option value="Lttb">LTTB</option>
-            <option value="Average">Average</option>
+            <option
+              value="Peak"
+              title="Draws the minimum and maximum of every pixel column at the times they occurred, so a single-sample spike is never lost"
+            >
+              Peak
+            </option>
+            <option
+              value="Average"
+              title="Draws the average of every pixel column, with the minimum-to-maximum range as a shaded band"
+            >
+              Average
+            </option>
           </select>
         </div>
       </div>

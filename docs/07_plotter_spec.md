@@ -148,10 +148,10 @@ pub enum ChannelValue {
 
 | 手法 | 説明 |
 |------|------|
-| **LTTB (Largest Triangle Three Buckets)** | 波形の特徴を維持したダウンサンプリング。各バケットから最も特徴的なポイントを選択 |
+| **Peak（既定）** | ピクセル幅ごとのセルについて、最小と最大のサンプルを実際の時刻で描く（オシロスコープのピークディテクト）。1 サンプルのスパイクも元の値で残る。2026-11-04 に LTTB から置換（ADR-15 / SYS-F-515） |
 | **Average (平均 + Min/Max バンド)** | 各バケットの min/max を帯として描画し、中央線として平均値を表示 |
 
-**モード切替:** データ受信中でも LTTB ↔ Average を即座に切替可能。内部で全統計値（min/max/avg）を保持するため、データの再構築は不要。
+**モード切替:** データ受信中でも Peak ↔ Average を即座に切替可能。内部で全統計値（min/max/avg）を保持するため、データの再構築は不要。
 
 ### UI レイアウト
 
@@ -297,7 +297,7 @@ pub enum ChannelValue {
 |------|------|
 | **チャンネル選択** | 表示するチャンネルを選択（チェックボックス） |
 | **Line/State振り分け** | 各チャンネルをLine ChartかState Timelineに振り分け |
-| **間引きモード** | `Average` (平均+min/maxバンド) / `LTTB` (特徴維持) を選択可能 |
+| **間引きモード** | `Peak` (セルごとの min/max、既定) / `Average` (平均+min/maxバンド) を選択可能 |
 
 ---
 
@@ -329,7 +329,7 @@ pub struct PlotterAggregator {
 }
 
 /// モード非依存の集約バケット
-/// 全統計値を保持することで、表示時に LTTB/Average を即座に切替可能
+/// 全統計値を保持することで、表示時に Peak/Average を即座に切替可能
 #[derive(Debug, Clone)]
 struct AggregatedBucket {
     ts: u64,      // タイムスタンプ（バケット内の先頭/末尾の平均）
@@ -337,31 +337,21 @@ struct AggregatedBucket {
     max: f64,     // 最大値
     avg: f64,     // 平均値
     count: usize, // 生ポイント数（加重平均計算用）
+    ts_min: u64,  // min をとったサンプルの時刻（Peak が実時刻で描くため）
+    ts_max: u64,  // max をとったサンプルの時刻
 }
 
-impl AggregatedBucket {
-    /// 集約モードに応じてAggregatedPointに変換
-    fn to_point(&self, mode: &AggregationMode) -> AggregatedPoint {
-        match mode {
-            AggregationMode::Lttb => AggregatedPoint::Single {
-                ts: self.ts,
-                value: self.avg,  // LTTBは平均値を使用
-            },
-            AggregationMode::Average => AggregatedPoint::MinMax {
-                ts: self.ts,
-                min: self.min,
-                max: self.max,
-            },
-        }
-    }
-}
+// 合わせるときは merge_extremes: 小さい（大きい）値、同値なら早い時刻を残す。
+// 表示: Average は to_average_point（平均の線 + min/max の帯）、
+//       Peak は peak_envelope（各極値を自分の時刻のセルに入れ、セルごとに
+//       min と max を時間順に 2 点出す。平均は描かない）
 ```
 
 **3バッファ設計のフロー:**
 ```text
 1. 新データ → raw_buffer に追加
 
-2. raw_buffer が bucket_size に達したら:
+2. raw_buffer が bucket_size（既定 1。2026-11-04 まで 10）に達したら:
    ┌─────────────────────────────────────────┐
    │  raw_buffer から bucket_size 個を取出   │
    │  ↓                                      │
@@ -376,7 +366,8 @@ impl AggregatedBucket {
    │  ↓                                      │
    │  新しい history として保存               │
    │  ↓                                      │
-   │  current_level *= 2                      │
+   │  current_level を倍（回数の記録のみ。    │
+   │  bucket_size は倍にしない）              │
    └─────────────────────────────────────────┘
 ```
 
@@ -519,7 +510,7 @@ pub struct PlotterChartPayload {
 | データ数 > target_points × threshold | バケット集約（Average/MinMax） |
 
 - **target_points**: `min(pixel_width, 4000)` でキャップ
-- **threshold**: デフォルト2（Average/MinMax）、10（LTTB）
+- **threshold**: デフォルト2（Average の静的範囲のみ。Peak は常にセルの min/max）
 
 #### キャッシュ管理
 
@@ -724,6 +715,19 @@ type StateTimelinePluginOpts = {
 ---
 
 ## 変更履歴
+
+### 2026-11-04: 既定の間引きを Peak に（LTTB と取り込み時の件数平均を廃止）
+
+アプリを実際に動かした画面評価（docs/27 §3 PF-1）で、既定の LTTB モードが 1 サンプルのスパイクを潰すことが分かった
+（値 400 が 10 秒窓で約 41、300 秒窓で約 9。7.3 秒ごとの 6.0 のスパイクは 300 秒窓で消えた）。原因は二段で、
+取り込み時に 10 件ごとに平均して保存し（1 Hz のデータも 10 秒平均）、LTTB モードはバケットの平均を描いていた。
+
+| 変更 | 内容 |
+|------|------|
+| 表示モード | LTTB を **Peak** に置換。セルごとの min / max を実時刻で時間順に描く。LIVE と静的範囲で同じコード（ADR-15 / SYS-F-515） |
+| 保存 | `bucket_size` の既定を 10 → 1、レベルアップでの倍増を廃止（SYS-F-517）。バケットに `ts_min` / `ts_max` を追加（SYS-F-513） |
+| 凡例 | 最新値をチャンネルごとに別保持（`raw_buffer` が毎回空になるため） |
+| 確認 | 同じ信号で再撮影し、外れ値 400 と 6.0 のスパイクが 10 秒窓・300 秒窓とも元の値で描かれることを確認。性質テスト `prop_peak_mode_keeps_extremes_and_real_samples` を追加 |
 
 ### 2026-01-03: フロントエンドメモリリーク修正
 

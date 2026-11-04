@@ -37,8 +37,11 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
 
 ![Plotter](docs/images/plotter.png)
 
-- Oscilloscope-style roll mode with a fixed window (1 s – 300 s). Downsampling (LTTB, or average
-  with min/max bands) is aligned to absolute time, so history does not shift as new data arrives
+- Oscilloscope-style roll mode with a fixed window (1 s – 300 s). Downsampling is aligned to
+  absolute time, so history does not shift as new data arrives
+- **Peak** downsampling (default) draws the minimum and maximum of every pixel column at the times
+  they occurred, like an oscilloscope's peak detect: a single-sample spike keeps its real height
+  in any window. **Average** draws the mean with a min/max band
 - State timeline: non-numeric values such as `motor:ON` are drawn as colored bars on the same
   time axis as the numeric channels
 - LIVE / Inspect / Paused: zooming switches to Inspect, you can pan back through history, and

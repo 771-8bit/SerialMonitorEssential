@@ -33,18 +33,23 @@ pub enum ChannelType {
 pub enum AggregationMode {
     /// Average value in bucket with min/max band
     Average,
-    /// Largest Triangle Three Buckets (feature-preserving)
+    /// Peak detect (SYS-F-515): for every cell of the absolute-time-aligned
+    /// grid, draw the minimum and the maximum sample at the times they
+    /// occurred, so a single-sample spike is never averaged away (UN-03).
+    /// (ADR-15)
     #[default]
-    Lttb,
+    Peak,
 }
 
 impl AggregationMode {
     /// Get default aggregation threshold for this mode
-    /// Threshold = data_count > target_points * threshold triggers aggregation
+    /// Threshold = data_count > target_points * threshold triggers aggregation.
+    /// Only the Average mode's static path uses it; Peak always draws the
+    /// envelope on the grid (which is lossless for sparse data).
     pub fn default_threshold(&self) -> usize {
         match self {
             AggregationMode::Average => 2,
-            AggregationMode::Lttb => 10,
+            AggregationMode::Peak => 1,
         }
     }
 }
@@ -69,8 +74,8 @@ pub struct PlotterConfig {
     /// Cache is invalidated when pixel width changes by more than this percentage.
     #[serde(default = "default_pixel_width_threshold")]
     pub pixel_width_threshold_percent: f32,
-    /// Bucket size for aggregating raw data into buffer
-    /// Higher values mean more compression but less granularity.
+    /// Raw points per stored bucket (see `default_bucket_size`). Kept
+    /// configurable for tests; level-up never changes it.
     #[serde(default = "default_bucket_size")]
     pub bucket_size: usize,
 }
@@ -83,8 +88,12 @@ fn default_pixel_width_threshold() -> f32 {
     0.2
 }
 
+/// Raw points per stored bucket. 1 = keep every sample until the per-channel
+/// cap (`max_points`) forces a level-up. Grouping by a fixed COUNT averaged slow
+/// streams too (1 Hz became 10 s buckets) and changed already-drawn points when
+/// the group filled (2026-11-04, docs/27 PF-1).
 fn default_bucket_size() -> usize {
-    10
+    1
 }
 
 impl Default for PlotterConfig {
@@ -92,7 +101,7 @@ impl Default for PlotterConfig {
         Self {
             max_points: 10000,
             channel_types: HashMap::new(),
-            aggregation_mode: AggregationMode::Lttb,
+            aggregation_mode: AggregationMode::Peak,
             aggregation_threshold: None,
             max_target_points: default_max_target_points(),
             pixel_width_threshold_percent: default_pixel_width_threshold(),
@@ -131,7 +140,7 @@ pub struct PlotterDataRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum AggregatedPoint {
-    /// Single value (LTTB mode)
+    /// Single sample value (Peak mode: an actual minimum or maximum sample)
     Single { ts: u64, value: f64 },
     /// Min-Max pair for waveform peaks (avg is the true weighted average,
     /// used as the center line in Average mode)
@@ -194,7 +203,7 @@ pub struct PlotterChartPayload {
     /// MinMax band data (Average mode only): channel_name -> BandSeriesData
     ///
     /// Uses the same timestamp indices as `aligned_data[0]`.
-    /// `None` for LTTB mode (no bands).
+    /// `None` for Peak mode (no bands).
     pub band_data: Option<HashMap<String, BandSeriesData>>,
 
     /// State timeline data (unchanged from current format)
