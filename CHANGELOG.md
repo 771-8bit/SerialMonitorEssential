@@ -19,6 +19,9 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Changed
 
+- Plotter: zooming into any past range (Inspect / Paused) now shows the data at full resolution,
+  however old it is. The plotter writes every 1 ms cell to temporary files (deleted on Clear and
+  on exit; capped at 4 GiB per session).
 - Plotter: samples are now stored in time-aligned tiers (fine for recent data, coarser for
   older data, boundaries never move). Before, after about 10,000 samples per channel the whole
   history was re-binned periodically, so even the default 10 s window became coarse every 50 s

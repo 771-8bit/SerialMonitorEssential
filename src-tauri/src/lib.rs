@@ -79,7 +79,12 @@ pub fn run() {
             reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
         .manage(PlotterState {
-            aggregator: PlotterAggregator::new(),
+            // The app keeps every 1 ms cell on disk so zooming into old data
+            // always shows full resolution (SYS-F-518)
+            aggregator: PlotterAggregator::with_config(plotter::PlotterConfig {
+                spill_to_disk: true,
+                ..Default::default()
+            }),
             thread: Mutex::new(None),
         })
         // AI ブリッジ: 既定 OFF。ここでは状態を登録するだけで自動起動はしない。

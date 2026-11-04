@@ -12,6 +12,7 @@
 // of 2^k ms, i.e. A / 2 cells whatever k is; tier 0 covers ages [0, A).
 
 use crate::plotter::parser::ChannelValue;
+use crate::plotter::spill::{SpillCell, SpillLog, LEVEL_MS};
 // Note: serde traits are unused here as types are re-exported from data_store
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -119,6 +120,34 @@ impl AggregatedBucket {
     }
 }
 
+impl From<&AggregatedBucket> for SpillCell {
+    fn from(b: &AggregatedBucket) -> Self {
+        SpillCell {
+            ts: b.ts,
+            min: b.min,
+            max: b.max,
+            sum: b.sum,
+            count: b.count as u64,
+            ts_min: b.ts_min,
+            ts_max: b.ts_max,
+        }
+    }
+}
+
+impl From<&SpillCell> for AggregatedBucket {
+    fn from(c: &SpillCell) -> Self {
+        AggregatedBucket {
+            ts: c.ts,
+            min: c.min,
+            max: c.max,
+            sum: c.sum,
+            count: c.count as usize,
+            ts_min: c.ts_min,
+            ts_max: c.ts_max,
+        }
+    }
+}
+
 /// Tiered storage of one line channel (see the module comment)
 #[derive(Debug, Default)]
 struct Pyramid {
@@ -157,7 +186,15 @@ impl Pyramid {
     /// tier k leaves once it ends at least A * 2^k before `now`. The result only
     /// depends on the final `now` (thresholds only grow and merges are
     /// associative), so it is the same however the data was batched (P-7).
-    fn promote(&mut self, now: u64, tier0_span_ms: u64) {
+    ///
+    /// Cells leaving tier 0 are final 1 ms cells; they are also pushed to
+    /// `departed` so they can be written to the disk spill (SYS-F-518).
+    fn promote(
+        &mut self,
+        now: u64,
+        tier0_span_ms: u64,
+        mut departed: Option<&mut Vec<AggregatedBucket>>,
+    ) {
         let mut k = 0;
         while k < self.tiers.len() && k < MAX_TIER {
             let limit = now.saturating_sub(tier0_span_ms.saturating_mul(1 << k));
@@ -166,6 +203,11 @@ impl Pyramid {
                     break;
                 }
                 let cell = self.tiers[k].pop_front().expect("front exists");
+                if k == 0 {
+                    if let Some(out) = departed.as_deref_mut() {
+                        out.push(cell.clone());
+                    }
+                }
                 self.merge_into(k + 1, &cell);
             }
             k += 1;
@@ -175,12 +217,20 @@ impl Pyramid {
     /// Cells overlapping [t0, t1], oldest tier first. Every cell of tier k + 1
     /// starts no later than the first cell of tier k, so the result is sorted
     /// by `ts`.
-    fn collect(&self, t0: u64, t1: u64, out: &mut Vec<AggregatedBucket>) {
+    ///
+    /// Returns the width (ms) of the coarsest cell included (0 if none).
+    fn collect(&self, t0: u64, t1: u64, out: &mut Vec<AggregatedBucket>) -> u64 {
+        let mut coarsest = 0;
         for (k, tier) in self.tiers.iter().enumerate().rev() {
             let width = 1u64 << k;
             let first = tier.partition_point(|c| c.ts + width <= t0);
+            let before = out.len();
             out.extend(tier.iter().skip(first).take_while(|c| c.ts <= t1).cloned());
+            if out.len() > before {
+                coarsest = coarsest.max(width);
+            }
         }
+        coarsest
     }
 
     /// Start of the oldest stored cell
@@ -383,6 +433,9 @@ struct PlotterAggregatorInner {
     /// Latest numeric value per channel (legend)
     latest: HashMap<String, f64>,
 
+    /// Full-resolution disk spill of this session (SYS-F-518), if enabled
+    spill: Option<Arc<SpillLog>>,
+
     /// State data (channel_name -> list of state changes)
     state_data: HashMap<String, Vec<StateChange>>,
 
@@ -438,6 +491,7 @@ impl PlotterAggregator {
 
     /// Create a new plotter aggregator with custom config
     pub fn with_config(config: PlotterConfig) -> Self {
+        let spill = Self::new_spill(&config);
         Self {
             inner: Arc::new(RwLock::new(PlotterAggregatorInner {
                 channels: HashMap::new(),
@@ -445,6 +499,7 @@ impl PlotterAggregator {
                 channel_types: HashMap::new(),
                 pyramids: HashMap::new(),
                 latest: HashMap::new(),
+                spill,
                 state_data: HashMap::new(),
                 config,
                 enabled: false,
@@ -452,6 +507,21 @@ impl PlotterAggregator {
                 data_version: 0,
                 last_data_ts: 0,
             })),
+        }
+    }
+
+    /// A fresh spill generation if the config asks for one. A spill that cannot
+    /// be created (no temp space) only costs zoom detail, so log and go on.
+    fn new_spill(config: &PlotterConfig) -> Option<Arc<SpillLog>> {
+        if !config.spill_to_disk {
+            return None;
+        }
+        match SpillLog::create_default() {
+            Ok(spill) => Some(Arc::new(spill)),
+            Err(e) => {
+                log::warn!("[Aggregator] Plotter disk spill disabled: {e}");
+                None
+            }
         }
     }
 
@@ -661,8 +731,24 @@ impl PlotterAggregator {
     fn maybe_aggregate(inner: &mut PlotterAggregatorInner) {
         let now = inner.last_data_ts;
         let span = inner.config.tier0_span_ms;
-        for pyramid in inner.pyramids.values_mut() {
-            pyramid.promote(now, span);
+        let PlotterAggregatorInner {
+            pyramids,
+            channels,
+            spill,
+            ..
+        } = &mut *inner;
+        let mut departed = Vec::new();
+        for (name, pyramid) in pyramids.iter_mut() {
+            match spill.as_ref() {
+                Some(spill) => {
+                    departed.clear();
+                    pyramid.promote(now, span, Some(&mut departed));
+                    if let (false, Some(&index)) = (departed.is_empty(), channels.get(name)) {
+                        spill.append(index, departed.iter().map(SpillCell::from).collect());
+                    }
+                }
+                None => pyramid.promote(now, span, None),
+            }
         }
 
         // Increment version on any data change
@@ -787,10 +873,40 @@ impl PlotterAggregator {
                 continue;
             }
 
+            // Display cell width for this request (see below)
+            let span = time_max_ms.saturating_sub(time_min_ms);
+            let display_cells = if aggregation_mode == AggregationMode::Peak {
+                (target_points / 2).saturating_sub(1).max(1) as u64
+            } else {
+                target_points.saturating_sub(1).max(1) as u64
+            };
+            let display_width = quantize_bucket_width_pow2(span.div_ceil(display_cells));
+
             // Cells overlapping the range, from every tier, in time order
             let mut all_buckets: Vec<AggregatedBucket> = Vec::new();
-            if let Some(pyramid) = inner.pyramids.get(channel) {
-                pyramid.collect(time_min_ms, time_max_ms, &mut all_buckets);
+            let coarsest = match inner.pyramids.get(channel) {
+                Some(pyramid) => pyramid.collect(time_min_ms, time_max_ms, &mut all_buckets),
+                None => 0,
+            };
+
+            // A zoomed static range over old data needs finer cells than memory
+            // keeps: read them from the disk spill (SYS-F-518). LIVE windows never
+            // need this (ADR-16) and never touch the disk.
+            if !req.is_realtime && coarsest > display_width {
+                if let (Some(spill), Some(&index), Some(pyramid)) = (
+                    inner.spill.as_ref(),
+                    inner.channels.get(channel),
+                    inner.pyramids.get(channel),
+                ) {
+                    all_buckets = Self::collect_full_resolution(
+                        spill,
+                        index,
+                        pyramid,
+                        time_min_ms,
+                        time_max_ms,
+                        display_width,
+                    );
+                }
             }
 
             // Convert buckets to points on an ABSOLUTE-TIME-ALIGNED grid with a
@@ -808,21 +924,16 @@ impl PlotterAggregator {
             //
             // Average: one point per cell (the weighted average, with the
             // min/max band); sparse data is passed through at its own times.
-            let span = time_max_ms.saturating_sub(time_min_ms);
             let points: Vec<AggregatedPoint> = if aggregation_mode == AggregationMode::Peak {
-                let cells = (target_points / 2).saturating_sub(1).max(1) as u64;
-                let width = quantize_bucket_width_pow2(span.div_ceil(cells));
-                let envelope = peak_envelope(&all_buckets, width, time_min_ms, time_max_ms);
+                let envelope = peak_envelope(&all_buckets, display_width, time_min_ms, time_max_ms);
                 let samples: usize = all_buckets.iter().map(|b| b.count).sum();
                 if envelope.len() < samples {
                     any_aggregated = true;
                 }
                 envelope
             } else if span > 0 && all_buckets.len() > target_points {
-                let cells = target_points.saturating_sub(1).max(1) as u64;
-                let width = quantize_bucket_width_pow2(span.div_ceil(cells));
                 any_aggregated = true;
-                aggregate_buckets_aligned(&all_buckets, width)
+                aggregate_buckets_aligned(&all_buckets, display_width)
                     .into_iter()
                     .map(|mut cell| {
                         // The cells at the window edges are cut by the window:
@@ -869,6 +980,39 @@ impl PlotterAggregator {
             end_ms: time_max_ms,
             is_aggregated: any_aggregated,
         }
+    }
+
+    /// Cells of [t0, t1] at least as fine as `width`, from the disk spill plus
+    /// the part of tier 0 not yet spilled (SYS-F-518). The spill level is the
+    /// coarsest one not wider than `width`, so a display cell reads at most ~64
+    /// records; the tail of that level that is still being accumulated is read
+    /// from level 0. Everything newer than the spill is still in tier 0.
+    fn collect_full_resolution(
+        spill: &SpillLog,
+        index: usize,
+        pyramid: &Pyramid,
+        t0: u64,
+        t1: u64,
+        width: u64,
+    ) -> Vec<AggregatedBucket> {
+        if !spill.sync() {
+            log::warn!("[Aggregator] Spill sync timed out; drawing from memory");
+        }
+        let level = LEVEL_MS.iter().rposition(|&w| w <= width).unwrap_or(0);
+        let end = t1.saturating_add(1);
+        let (cells, mut covered) = spill.read(index, level, t0, end);
+        let mut out: Vec<AggregatedBucket> = cells.iter().map(AggregatedBucket::from).collect();
+        if level > 0 {
+            let (fine, fine_covered) = spill.read(index, 0, t0.max(covered), end);
+            out.extend(fine.iter().map(AggregatedBucket::from));
+            covered = covered.max(fine_covered);
+        }
+        // Memory: only what the spill does not hold (tier 0, or every tier past
+        // the point where the spill hit its size cap)
+        let mut memory = Vec::new();
+        pyramid.collect(t0.max(covered), t1, &mut memory);
+        out.extend(memory.into_iter().filter(|c| c.ts >= covered));
+        out
     }
 
     /// Filter state data by time range (helper for get_ranged_data)
@@ -1211,6 +1355,9 @@ impl PlotterAggregator {
             inner.channel_types.clear();
             inner.pyramids.clear();
             inner.latest.clear();
+            // New session, new spill generation; the old one is deleted once
+            // the last reader lets go of it
+            inner.spill = Self::new_spill(&inner.config);
             inner.state_data.clear();
             inner.view_cache = None;
             inner.last_data_ts = 0;
@@ -2679,6 +2826,122 @@ mod tests {
         );
     }
 
+    // ==================== Full-resolution zoom (SYS-F-518) ====================
+
+    fn spill_aggregator(tier_span: u64) -> PlotterAggregator {
+        let agg = PlotterAggregator::with_config(PlotterConfig {
+            tier0_span_ms: tier_span,
+            spill_to_disk: true,
+            ..Default::default()
+        });
+        agg.set_enabled(true);
+        agg
+    }
+
+    fn spill_of(agg: &PlotterAggregator) -> Arc<SpillLog> {
+        agg.inner
+            .read()
+            .unwrap()
+            .spill
+            .clone()
+            .expect("spill enabled")
+    }
+
+    fn wave(i: u64) -> f64 {
+        ((i * 7919) % 1000) as f64 / 10.0
+    }
+
+    /// After an hour at 100 Hz, zooming into a range 50 minutes back shows
+    /// every sample - memory alone only has ~1 s cells there
+    #[test]
+    fn test_static_zoom_is_full_resolution_after_an_hour() {
+        let n = 360_000u64; // 1 h at 100 Hz
+        let feed = |agg: &PlotterAggregator| {
+            for i in 0..n {
+                agg.add_data_point("ch0", i * 10, ChannelValue::Numeric(wave(i)));
+            }
+        };
+        let req = PlotterDataRequest {
+            time_min_ms: Some(600_000), // 10 min into the session
+            time_max_ms: Some(600_400),
+            pixel_width: 1000,
+            is_realtime: false,
+        };
+        let expected: Vec<(u64, f64)> = (60_000..=60_040u64).map(|i| (i * 10, wave(i))).collect();
+
+        let with_spill = spill_aggregator(PlotterConfig::default().tier0_span_ms);
+        feed(&with_spill);
+        let got = single_values(
+            with_spill
+                .get_ranged_data(&req)
+                .line_data
+                .get("ch0")
+                .unwrap(),
+        );
+        assert_eq!(
+            got, expected,
+            "every sample of the zoomed range must be drawn"
+        );
+
+        // Without the spill, memory only keeps coarse cells that old
+        let memory_only = aggregator_with(
+            AggregationMode::Peak,
+            PlotterConfig::default().tier0_span_ms,
+        );
+        feed(&memory_only);
+        let coarse = single_values(
+            memory_only
+                .get_ranged_data(&req)
+                .line_data
+                .get("ch0")
+                .unwrap(),
+        );
+        assert!(
+            coarse.len() < expected.len() / 4,
+            "memory alone was already fine: {}",
+            coarse.len()
+        );
+    }
+
+    /// LIVE windows are drawn from memory only (ADR-16); the disk is never read
+    #[test]
+    fn test_live_window_never_reads_the_spill() {
+        let agg = spill_aggregator(PlotterConfig::default().tier0_span_ms);
+        for i in 0..60_000u64 {
+            agg.add_data_point("ch0", i * 10, ChannelValue::Numeric(wave(i)));
+        }
+        let now = 599_990;
+        for window_s in [1u64, 10, 300] {
+            for pixel_width in [800u32, 4000] {
+                agg.get_ranged_data(&PlotterDataRequest {
+                    time_min_ms: Some(now - window_s * 1000),
+                    time_max_ms: Some(now),
+                    pixel_width,
+                    is_realtime: true,
+                });
+            }
+        }
+        assert_eq!(spill_of(&agg).reads(), 0);
+    }
+
+    /// Clear starts a new spill generation; the old directory is deleted once
+    /// nobody holds it, and the new one works
+    #[test]
+    fn test_clear_switches_spill_generation() {
+        let agg = spill_aggregator(16);
+        for i in 0..2_000u64 {
+            agg.add_data_point("ch0", i * 10, ChannelValue::Numeric(wave(i)));
+        }
+        let old = spill_of(&agg);
+        assert!(old.sync());
+        let old_dir = old.dir().to_path_buf();
+        drop(old);
+        agg.clear();
+        assert!(!old_dir.exists(), "old generation left behind");
+        let new = spill_of(&agg);
+        assert_ne!(new.dir(), old_dir.as_path());
+    }
+
     /// Slow data below the storage cap is drawn sample for sample, and an
     /// already-drawn point never changes when later samples arrive (the old
     /// fixed 10-sample grouping averaged 1 Hz data into 10 s and rewrote it)
@@ -3022,6 +3285,59 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+        /// P-16 (SYS-F-518) - a zoomed static range is drawn at full resolution
+        /// whatever the age of the data: equal to the envelope of the raw samples
+        /// in the range (the display cells cut by either range edge excepted:
+        /// a stored cell straddling an edge keeps only its extremes). Small tier
+        /// spans push nearly everything into coarse memory tiers, so the detail
+        /// must come from the disk spill.
+        #[test]
+        fn prop_static_zoom_is_drawn_from_raw_samples(
+            spec in stream_spec(),
+            tier_span in prop::sample::select(vec![16u64, 64, 256]),
+            from_pct in 0u64..90,
+            len_pct in 1u64..=10,
+            pixel_width in 50u32..=2000,
+        ) {
+            let agg = spill_aggregator(tier_span);
+            let fed = spec.feed(&agg);
+            let ts = spec.timestamps();
+            let (first, last) = (ts[0], *ts.last().unwrap());
+            let total = last - first;
+            let t0 = first + total * from_pct / 100;
+            let t1 = (t0 + (total * len_pct / 100).max(1)).min(last);
+            let payload = agg.get_ranged_data(&PlotterDataRequest {
+                time_min_ms: Some(t0),
+                time_max_ms: Some(t1),
+                pixel_width,
+                is_realtime: false,
+            });
+
+            let target = pixel_width.min(PlotterConfig::default().max_target_points) as u64;
+            let cells = (target / 2).saturating_sub(1).max(1);
+            let width = quantize_bucket_width_pow2((t1 - t0).div_ceil(cells));
+            let edge = |t: u64| t / width == t0 / width || t / width == t1 / width;
+
+            for (ch, values) in fed.iter().enumerate() {
+                let name = StreamSpec::channel_name(ch);
+                let raw: Vec<AggregatedBucket> = ts
+                    .iter()
+                    .zip(values)
+                    .filter(|(&t, _)| t >= t0 && t <= t1)
+                    .map(|(&t, &v)| AggregatedBucket::sample(t, v))
+                    .collect();
+                let expected: Vec<(u64, f64)> = single_values(&peak_envelope(&raw, width, t0, t1))
+                    .into_iter()
+                    .filter(|p| !edge(p.0))
+                    .collect();
+                let got: Vec<(u64, f64)> = single_values(payload.line_data.get(&name).unwrap())
+                    .into_iter()
+                    .filter(|p| !edge(p.0))
+                    .collect();
+                prop_assert_eq!(got, expected, "{} [{}, {}] px={} span={}", name, t0, t1, pixel_width, tier_span);
+            }
+        }
 
         /// A1b - Peak mode never averages and never loses an extreme (UN-03 / SYS-F-515).
         ///

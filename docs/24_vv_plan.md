@@ -210,6 +210,12 @@ flowchart TB
 > 窓内の生サンプルから直接求めた包絡線と一致する（窓の左端で切れる表示セルだけ除く）。
 > 段の折り畳みのタイミングに依存しないことの直接の検査。段を早く畳みすぎる変異で落ちることを確認済。
 
+#### P-16: ズームした静的範囲は生サンプルから描かれる （SYS-F-518）— **実装済: `prop_static_zoom_is_drawn_from_raw_samples`**
+
+> 小さい段の幅でほとんどのデータを粗い段へ追いやったうえで、任意の静的範囲・ピクセル幅について、Peak の描画が
+> 範囲内の生サンプルから直接求めた包絡線と一致する（左右の端で切れる表示セルだけ除く）。細部はディスク保存から来る。
+> ディスクを読む経路を無効にする変異で落ちることを確認済。
+
 #### P-8: 読み出しの一貫性 （SYS-F-203）— **実装済: `prop_get_data_split_read_consistency`**
 
 > 任意の `(offset, length)` について、`get_data` の結果は、
@@ -279,6 +285,7 @@ flowchart TB
 | P-5 整列バケットの安定性 | `prop_aligned_realtime_stability` | **実装済** |
 | P-7 バッチ等価性 | `prop_batch_equivalence` | **実装済**（2026-11-04 から全領域で強形） |
 | P-14 LIVE 窓は生サンプルだけで決まる | `prop_live_window_is_drawn_from_raw_samples` | **実装済**（2026-11-04） |
+| P-16 ズームは生サンプルから描かれる | `prop_static_zoom_is_drawn_from_raw_samples` | **実装済**（2026-11-04） |
 | P-8 読み出し一貫性 | `prop_get_data_split_read_consistency` | **実装済**（INV-13 を発見） |
 | P-9 バージョン単調性 | `prop_version_monotonic` | **実装済** |
 | P-4 点数保存 | `prop_count_conservation`, `test_count_conservation_across_tier_folding` | **実装済** |

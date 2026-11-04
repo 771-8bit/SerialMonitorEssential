@@ -63,6 +63,11 @@ pub struct PlotterConfig {
     /// Tests use small values to exercise the tiers.
     #[serde(default = "default_tier0_span_ms")]
     pub tier0_span_ms: u64,
+    /// Keep every 1 ms cell on disk so any zoomed range can be drawn at full
+    /// resolution (SYS-F-518). On in the app, off by default so unit tests do
+    /// not create files.
+    #[serde(default)]
+    pub spill_to_disk: bool,
 }
 
 fn default_max_target_points() -> u32 {
@@ -87,6 +92,7 @@ impl Default for PlotterConfig {
             max_target_points: default_max_target_points(),
             pixel_width_threshold_percent: default_pixel_width_threshold(),
             tier0_span_ms: default_tier0_span_ms(),
+            spill_to_disk: false,
         }
     }
 }
