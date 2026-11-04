@@ -34,60 +34,107 @@ export interface StateTimelinePluginOpts {
   labelFont?: string;
 }
 
-// Default colors for common states
-const DEFAULT_STATE_COLORS: Record<string, string> = {
-  ON: '#22c55e',
-  OFF: '#6b7280',
-  RUNNING: '#22c55e',
-  STOPPED: '#ef4444',
-  IDLE: '#f59e0b',
-  ERROR: '#dc2626',
-  WARNING: '#f59e0b',
-  OK: '#22c55e',
-  TRUE: '#22c55e',
-  FALSE: '#6b7280',
-  '1': '#22c55e',
-  '0': '#6b7280',
-};
+// ---- State colors (docs/27 PF-4) -----------------------------------------
+//
+// Colors carry meaning: abnormal states are always red/orange, normal running
+// states green, stopped / off / idle states gray, warnings amber. Every other
+// state name gets the next color of a categorical palette that avoids those
+// four hues, in order of first appearance, so two different states never get
+// nearly the same color (the old string-hash hue gave E01/E02/E03 hues one
+// degree apart and painted FAULT_OVERTEMP_LATCHED the same green as ON).
 
-// Generate a consistent color from a string hash
-function hashColor(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    hash = hash & hash;
-  }
+export type StateKind = 'abnormal' | 'warning' | 'normal' | 'neutral' | 'other';
 
-  // Generate HSL with fixed saturation and lightness for readability
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 65%, 50%)`;
+const ABNORMAL =
+  /(FAULT|ERR|ALARM|FAIL|TRIP|CRIT|PANIC|ABORT|EMERG|OVERTEMP|OVERCURRENT|OVERVOLT|OVERLOAD)/;
+const WARNING = /WARN/;
+const NORMAL = new Set([
+  'ON',
+  'RUNNING',
+  'RUN',
+  'OK',
+  'TRUE',
+  '1',
+  'READY',
+  'ENABLED',
+  'ACTIVE',
+  'GOOD',
+]);
+const NEUTRAL = new Set([
+  'OFF',
+  'STOPPED',
+  'STOP',
+  'IDLE',
+  'FALSE',
+  '0',
+  'NONE',
+  'DISABLED',
+  'INACTIVE',
+  'STANDBY',
+]);
+
+/** Meaning of a state name (case-insensitive) */
+export function classifyState(state: string): StateKind {
+  const upper = state.trim().toUpperCase();
+  if (ABNORMAL.test(upper)) return 'abnormal';
+  if (WARNING.test(upper)) return 'warning';
+  if (NORMAL.has(upper)) return 'normal';
+  if (NEUTRAL.has(upper)) return 'neutral';
+  return 'other';
 }
 
-// Color cache for session consistency
-const colorCache = new Map<string, string>();
+const KIND_COLORS: Record<Exclude<StateKind, 'other' | 'abnormal'>, string> = {
+  warning: '#f59e0b',
+  normal: '#22c55e',
+  neutral: '#6b7280',
+};
 
-function getStateColor(state: string, customColors?: Record<string, string>): string {
-  // Check custom colors first
+/** Abnormal states: reds and oranges, distinct per state name */
+const ABNORMAL_PALETTE = ['#dc2626', '#f97316', '#be123c', '#ea580c', '#ef4444', '#c2410c'];
+
+/** Other states: no red, green, gray or amber, so meaning is never implied */
+const CATEGORY_PALETTE = [
+  '#3b82f6', // blue
+  '#a855f7', // purple
+  '#06b6d4', // cyan
+  '#ec4899', // pink
+  '#6366f1', // indigo
+  '#ca8a04', // ochre
+  '#93c5fd', // light blue
+  '#d946ef', // orchid
+];
+
+// Session-stable assignment (first appearance wins)
+const assigned = new Map<string, string>();
+const nextIndex = { abnormal: 0, other: 0 };
+
+/** Forget assigned colors (tests) */
+export function resetStateColors(): void {
+  assigned.clear();
+  nextIndex.abnormal = 0;
+  nextIndex.other = 0;
+}
+
+export function getStateColor(state: string, customColors?: Record<string, string>): string {
   if (customColors?.[state]) {
     return customColors[state];
   }
-
-  // Check default colors (case-insensitive)
-  const upperState = state.toUpperCase();
-  if (DEFAULT_STATE_COLORS[upperState]) {
-    return DEFAULT_STATE_COLORS[upperState];
+  const kind = classifyState(state);
+  if (kind === 'warning' || kind === 'normal' || kind === 'neutral') {
+    return KIND_COLORS[kind];
   }
-
-  // Check cache
-  if (colorCache.has(state)) {
-    return colorCache.get(state)!;
-  }
-
-  // Generate and cache color
-  const color = hashColor(state);
-  colorCache.set(state, color);
+  const cached = assigned.get(state);
+  if (cached) return cached;
+  const palette = kind === 'abnormal' ? ABNORMAL_PALETTE : CATEGORY_PALETTE;
+  const color = palette[nextIndex[kind] % palette.length];
+  nextIndex[kind] += 1;
+  assigned.set(state, color);
   return color;
 }
+
+/** Abnormal segments are drawn at least this wide (CSS px), so a short, rare
+ * fault never disappears between pixels in a long window */
+const ABNORMAL_MIN_WIDTH = 4;
 
 /** Scale the px size in a CSS font shorthand (e.g. "11px sans-serif") by dpr */
 function scaleFontPx(font: string, dpr: number): string {
@@ -160,47 +207,50 @@ export function stateTimelinePlugin(opts: StateTimelinePluginOpts): uPlot.Plugin
           ctx.fillStyle = '#252526';
           ctx.fillRect(plotLeft, y0, plotWidth, rh);
 
-          // Draw each segment
-          for (const seg of row.segments) {
-            // Skip segments outside visible range
-            if (seg.end_ms < xMinMs || seg.start_ms > xMaxMs) continue;
+          // Draw each segment. Abnormal ones go in a second pass so their
+          // minimum width is not painted over by the following segment.
+          for (const abnormalPass of [false, true])
+            for (const seg of row.segments) {
+              if ((classifyState(seg.state) === 'abnormal') !== abnormalPass) continue;
+              // Skip segments outside visible range
+              if (seg.end_ms < xMinMs || seg.start_ms > xMaxMs) continue;
 
-            // Clamp segment to visible range
-            const visStart = Math.max(seg.start_ms, xMinMs);
-            const visEnd = Math.min(seg.end_ms, xMaxMs);
+              // Clamp segment to visible range
+              const visStart = Math.max(seg.start_ms, xMinMs);
+              const visEnd = Math.min(seg.end_ms, xMaxMs);
 
-            // Convert to pixel coordinates (using seconds)
-            const x0 = u.valToPos(visStart / 1000, 'x', true);
-            const x1 = u.valToPos(visEnd / 1000, 'x', true);
-            const barWidth = Math.max(1, x1 - x0);
+              // Convert to pixel coordinates (using seconds)
+              const x0 = u.valToPos(visStart / 1000, 'x', true);
+              const x1 = u.valToPos(visEnd / 1000, 'x', true);
+              const barWidth = Math.max(abnormalPass ? ABNORMAL_MIN_WIDTH * dpr : 1, x1 - x0);
 
-            // Draw state bar
-            const color = getStateColor(seg.state, opts.stateColors);
-            ctx.fillStyle = color;
-            ctx.fillRect(x0, y0, barWidth, rh);
+              // Draw state bar
+              const color = getStateColor(seg.state, opts.stateColors);
+              ctx.fillStyle = color;
+              ctx.fillRect(x0, y0, barWidth, rh);
 
-            // Draw label if bar is wide enough
-            if (showLabel && barWidth > 20 * dpr) {
-              ctx.fillStyle = '#fff';
-              ctx.font = scaleFontPx(labelFont, dpr);
-              ctx.textBaseline = 'middle';
-              ctx.textAlign = 'left';
+              // Draw label if bar is wide enough
+              if (showLabel && barWidth > 20 * dpr) {
+                ctx.fillStyle = '#fff';
+                ctx.font = scaleFontPx(labelFont, dpr);
+                ctx.textBaseline = 'middle';
+                ctx.textAlign = 'left';
 
-              // Truncate text if needed
-              const maxTextWidth = barWidth - 8 * dpr;
-              let text = seg.state;
-              const measured = ctx.measureText(text);
-              if (measured.width > maxTextWidth) {
-                // Truncate with ellipsis
-                while (text.length > 1 && ctx.measureText(text + '…').width > maxTextWidth) {
-                  text = text.slice(0, -1);
+                // Truncate text if needed
+                const maxTextWidth = barWidth - 8 * dpr;
+                let text = seg.state;
+                const measured = ctx.measureText(text);
+                if (measured.width > maxTextWidth) {
+                  // Truncate with ellipsis
+                  while (text.length > 1 && ctx.measureText(text + '…').width > maxTextWidth) {
+                    text = text.slice(0, -1);
+                  }
+                  text = text + '…';
                 }
-                text = text + '…';
-              }
 
-              ctx.fillText(text, x0 + 4 * dpr, y0 + rh / 2);
+                ctx.fillText(text, x0 + 4 * dpr, y0 + rh / 2);
+              }
             }
-          }
         }
 
         ctx.restore();

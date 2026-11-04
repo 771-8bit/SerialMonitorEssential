@@ -41,6 +41,11 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Fixed
 
+- Plotter: State Timeline colors now carry meaning (faults red/orange, running green, stopped and
+  idle gray, warnings amber) and never repeat for different states. Before, a fault could be
+  drawn in the same green as ON, and numbered states like E01/E02 got almost the same color.
+  Short fault segments stay visible in long windows.
+
 - Plotter: after Clear or a manual reconnect the time axis now starts again at 0, "Duration"
   shows the new session's length, and a window longer than the data no longer shows negative
   times. Disconnect, Clear, Connect no longer leaves the old session's channels in the plotter.
