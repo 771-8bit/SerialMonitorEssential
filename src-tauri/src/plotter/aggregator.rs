@@ -36,6 +36,12 @@ struct ViewCache {
     was_realtime: bool,
 }
 
+/// State changes kept in memory per channel; older ones live in the disk spill
+const MAX_STATE_CHANGES: usize = 10_000;
+
+/// Most spilled state segments returned for one request
+const MAX_SPILLED_STATES: usize = 50_000;
+
 /// Highest tier index. Tier 20 holds ~1 s cells covering ages of days; beyond
 /// that cells stay in tier 20 (memory then grows by A / 2 cells per tier span).
 const MAX_TIER: usize = 20;
@@ -609,6 +615,7 @@ impl PlotterAggregator {
             .unwrap_or(ChannelType::Auto);
 
         if channel_type == ChannelType::Auto || channel_type == ChannelType::State {
+            let mut dropped = Vec::new();
             if let Some(state_list) = inner.state_data.get_mut(channel) {
                 let state_changed = state_list
                     .last()
@@ -629,13 +636,24 @@ impl PlotterAggregator {
 
                     // Bound memory: drop the oldest changes once the list grows
                     // past the cap (long sessions with fast-toggling states
-                    // would otherwise grow without limit).
-                    const MAX_STATE_CHANGES: usize = 10_000;
+                    // would otherwise grow without limit). The dropped,
+                    // closed segments go to the disk spill so a zoom into
+                    // the past still shows them (SYS-F-712 / SYS-F-518).
                     if state_list.len() > MAX_STATE_CHANGES {
                         let overflow = state_list.len() - MAX_STATE_CHANGES;
-                        state_list.drain(..overflow);
+                        dropped = state_list
+                            .drain(..overflow)
+                            .map(|s| (s.start_ms, s.end_ms.unwrap_or(s.start_ms), s.state))
+                            .collect();
                     }
                 }
+            }
+            if let (false, Some(spill), Some(&index)) = (
+                dropped.is_empty(),
+                inner.spill.as_ref(),
+                inner.channels.get(channel),
+            ) {
+                spill.append_states(index, dropped);
             }
             inner
                 .channel_types
@@ -793,7 +811,8 @@ impl PlotterAggregator {
                 let line_data = cache.data.clone();
 
                 // Filter state data by time range
-                let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+                let state_data =
+                    Self::filter_state_data(&inner, time_min_ms, time_max_ms, req.is_realtime);
                 let channels = Self::build_channel_info(&inner);
 
                 Some(PlotterRangedPayload {
@@ -839,7 +858,8 @@ impl PlotterAggregator {
         if Self::is_cache_valid(&inner, time_min_ms, time_max_ms, req) {
             let cache = inner.view_cache.as_ref().unwrap();
             let line_data = cache.data.clone();
-            let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+            let state_data =
+                Self::filter_state_data(&inner, time_min_ms, time_max_ms, req.is_realtime);
             let channels = Self::build_channel_info(&inner);
 
             return PlotterRangedPayload {
@@ -967,7 +987,7 @@ impl PlotterAggregator {
         }
 
         // Filter state data by time range
-        let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms);
+        let state_data = Self::filter_state_data(&inner, time_min_ms, time_max_ms, req.is_realtime);
 
         // Build channel info
         let channels = Self::build_channel_info(&inner);
@@ -1016,10 +1036,14 @@ impl PlotterAggregator {
     }
 
     /// Filter state data by time range (helper for get_ranged_data)
+    ///
+    /// Static requests reaching back before the oldest change kept in memory
+    /// also get the spilled segments (SYS-F-712 / SYS-F-518).
     fn filter_state_data(
         inner: &PlotterAggregatorInner,
         time_min_ms: u64,
         time_max_ms: u64,
+        is_realtime: bool,
     ) -> HashMap<String, Vec<StateChange>> {
         inner
             .state_data
@@ -1032,14 +1056,34 @@ impl PlotterAggregator {
                     .unwrap_or(false)
             })
             .map(|(channel, states)| {
-                let filtered: Vec<StateChange> = states
-                    .iter()
-                    .filter(|s| {
-                        let end = s.end_ms.unwrap_or(time_max_ms);
-                        s.start_ms <= time_max_ms && end >= time_min_ms
-                    })
-                    .cloned()
-                    .collect();
+                let mut filtered: Vec<StateChange> = Vec::new();
+                let oldest_in_memory = states.first().map_or(u64::MAX, |s| s.start_ms);
+                if !is_realtime && time_min_ms < oldest_in_memory {
+                    if let (Some(spill), Some(&index)) =
+                        (inner.spill.as_ref(), inner.channels.get(channel))
+                    {
+                        spill.sync();
+                        filtered.extend(
+                            spill
+                                .read_states(index, time_min_ms, time_max_ms, MAX_SPILLED_STATES)
+                                .into_iter()
+                                .map(|(start, end, state)| StateChange {
+                                    start_ms: start,
+                                    end_ms: Some(end),
+                                    state,
+                                }),
+                        );
+                    }
+                }
+                filtered.extend(
+                    states
+                        .iter()
+                        .filter(|s| {
+                            let end = s.end_ms.unwrap_or(time_max_ms);
+                            s.start_ms <= time_max_ms && end >= time_min_ms
+                        })
+                        .cloned(),
+                );
                 (channel.clone(), filtered)
             })
             .collect()
@@ -2900,6 +2944,65 @@ mod tests {
             coarse.len() < expected.len() / 4,
             "memory alone was already fine: {}",
             coarse.len()
+        );
+    }
+
+    /// State changes beyond the in-memory cap are not lost: zooming into the
+    /// start of a long session shows them from the spill (SYS-F-712 / 518)
+    #[test]
+    fn test_state_changes_beyond_memory_cap_come_back_from_spill() {
+        let feed = |agg: &PlotterAggregator| {
+            for i in 0..25_000u64 {
+                let state = if i % 2 == 0 { "ON" } else { "OFF" };
+                agg.add_data_point("valve", i * 10, ChannelValue::State(state.to_string()));
+            }
+        };
+        let req = PlotterDataRequest {
+            time_min_ms: Some(0),
+            time_max_ms: Some(95),
+            pixel_width: 800,
+            is_realtime: false,
+        };
+
+        let with_spill = spill_aggregator(PlotterConfig::default().tier0_span_ms);
+        feed(&with_spill);
+        let states = with_spill
+            .get_ranged_data(&req)
+            .state_data
+            .remove("valve")
+            .unwrap();
+        let got: Vec<(u64, Option<u64>, String)> = states
+            .into_iter()
+            .map(|s| (s.start_ms, s.end_ms, s.state))
+            .collect();
+        let expected: Vec<(u64, Option<u64>, String)> = (0..10u64)
+            .map(|i| {
+                let state = if i % 2 == 0 { "ON" } else { "OFF" };
+                (i * 10, Some(i * 10 + 10), state.to_string())
+            })
+            .collect();
+        assert_eq!(got, expected);
+
+        // LIVE requests stay in memory
+        let live = PlotterDataRequest {
+            is_realtime: true,
+            ..req
+        };
+        with_spill.get_ranged_data(&live);
+
+        let memory_only = aggregator_with(
+            AggregationMode::Peak,
+            PlotterConfig::default().tier0_span_ms,
+        );
+        feed(&memory_only);
+        let lost = memory_only
+            .get_ranged_data(&req)
+            .state_data
+            .remove("valve")
+            .unwrap();
+        assert!(
+            lost.is_empty(),
+            "memory alone keeps only the last 10,000 changes"
         );
     }
 

@@ -110,16 +110,35 @@ struct LevelMeta {
     complete_until: u64,
 }
 
-/// Reader-visible state of one channel: per level metadata
+/// What readers may see of a state channel's file
+#[derive(Debug, Default)]
+struct StateMeta {
+    /// Records fully written and flushed
+    flushed_records: u64,
+    /// State names by id (the file stores ids)
+    names: Vec<String>,
+}
+
+/// Reader-visible state of one channel: per level metadata, state segments
 #[derive(Debug, Default)]
 struct ChannelMeta {
     levels: [Mutex<LevelMeta>; 3],
+    states: Mutex<StateMeta>,
 }
+
+/// One closed state segment: [start, end) in ms and its state
+pub(crate) type StateSegment = (u64, u64, String);
+
+const STATE_RECORD_BYTES: usize = 24;
 
 enum Msg {
     Cells {
         channel: usize,
         cells: Vec<SpillCell>,
+    },
+    States {
+        channel: usize,
+        segments: Vec<StateSegment>,
     },
     Sync(Sender<()>),
 }
@@ -184,6 +203,70 @@ impl SpillLog {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Msg::Cells { channel, cells });
         }
+    }
+
+    /// Hand closed state segments of one channel to the writer (time order).
+    /// Only segments the in-memory list drops are spilled (SYS-F-712).
+    pub(crate) fn append_states(&self, channel: usize, segments: Vec<StateSegment>) {
+        if segments.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Msg::States { channel, segments });
+        }
+    }
+
+    /// Spilled state segments of a channel overlapping [t0, t1], at most
+    /// `limit` of them (a sequential read; segments are sorted by start)
+    pub(crate) fn read_states(
+        &self,
+        channel: usize,
+        t0: u64,
+        t1: u64,
+        limit: usize,
+    ) -> Vec<StateSegment> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let meta = {
+            let channels = self.channels.lock().unwrap_or_else(|e| e.into_inner());
+            match channels.get(channel) {
+                Some(meta) => meta.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let (flushed, names) = {
+            let states = meta.states.lock().unwrap_or_else(|e| e.into_inner());
+            (states.flushed_records, states.names.clone())
+        };
+        let mut out = Vec::new();
+        if flushed == 0 {
+            return out;
+        }
+        let Ok(mut file) = File::open(state_path(&self.dir, channel)) else {
+            return out;
+        };
+        let mut remaining = flushed;
+        let mut buf = vec![0u8; STATE_RECORD_BYTES * 4096];
+        'outer: while remaining > 0 {
+            let n = remaining.min(4096) as usize;
+            if file.read_exact(&mut buf[..n * STATE_RECORD_BYTES]).is_err() {
+                break;
+            }
+            remaining -= n as u64;
+            for chunk in buf[..n * STATE_RECORD_BYTES].chunks_exact(STATE_RECORD_BYTES) {
+                let start = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                let end = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+                let id = u32::from_le_bytes(chunk[16..20].try_into().unwrap()) as usize;
+                if start > t1 || out.len() >= limit {
+                    break 'outer;
+                }
+                if end >= t0 {
+                    if let Some(name) = names.get(id) {
+                        out.push((start, end, name.clone()));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Wait until everything handed over so far is flushed and visible
@@ -304,6 +387,19 @@ fn level_path(dir: &Path, channel: usize, level: usize) -> PathBuf {
     dir.join(format!("ch{channel}-L{level}.bin"))
 }
 
+fn state_path(dir: &Path, channel: usize) -> PathBuf {
+    dir.join(format!("ch{channel}-states.bin"))
+}
+
+/// Writer-side state of a state channel's file
+struct StateWriter {
+    file: BufWriter<File>,
+    written: u64,
+    ids: std::collections::HashMap<String, u32>,
+    names: Vec<String>,
+    meta: Arc<ChannelMeta>,
+}
+
 /// Writer-side state of one level file
 struct LevelWriter {
     file: BufWriter<File>,
@@ -343,6 +439,7 @@ fn run_writer(
     max_bytes: u64,
 ) {
     let mut writers: Vec<Option<ChannelWriter>> = Vec::new();
+    let mut state_writers: Vec<Option<StateWriter>> = Vec::new();
     let mut bytes: u64 = 0;
     let mut last_flush = Instant::now();
     let mut dirty = false;
@@ -379,7 +476,26 @@ fn run_writer(
                 }
                 dirty = true;
             }
+            Some(Msg::States { channel, segments }) => {
+                if truncated.load(Ordering::Acquire) != u64::MAX || bytes >= max_bytes {
+                    continue;
+                }
+                match state_writer(&mut state_writers, channel, &dir, &channels) {
+                    Ok(writer) => {
+                        for (start, end, state) in &segments {
+                            if let Err(e) = write_state(writer, *start, *end, state) {
+                                log::warn!("[spill] State write failed: {e}");
+                                break;
+                            }
+                            bytes += STATE_RECORD_BYTES as u64;
+                        }
+                        dirty = true;
+                    }
+                    Err(e) => log::warn!("[spill] Cannot open state spill file: {e}"),
+                }
+            }
             Some(Msg::Sync(done)) => {
+                flush_states(&mut state_writers);
                 flush_all(&mut writers);
                 dirty = false;
                 last_flush = Instant::now();
@@ -389,12 +505,75 @@ fn run_writer(
             None => {}
         }
         if dirty && last_flush.elapsed() >= FLUSH_INTERVAL {
+            flush_states(&mut state_writers);
             flush_all(&mut writers);
             dirty = false;
             last_flush = Instant::now();
         }
     }
+    flush_states(&mut state_writers);
     flush_all(&mut writers);
+}
+
+/// Reader-visible metadata of a channel, created on first use
+fn meta_for(channels: &Mutex<Vec<Arc<ChannelMeta>>>, channel: usize) -> Arc<ChannelMeta> {
+    let mut shared = channels.lock().unwrap_or_else(|e| e.into_inner());
+    if shared.len() <= channel {
+        shared.resize_with(channel + 1, || Arc::new(ChannelMeta::default()));
+    }
+    shared[channel].clone()
+}
+
+fn state_writer<'a>(
+    writers: &'a mut Vec<Option<StateWriter>>,
+    channel: usize,
+    dir: &Path,
+    channels: &Mutex<Vec<Arc<ChannelMeta>>>,
+) -> std::io::Result<&'a mut StateWriter> {
+    if writers.len() <= channel {
+        writers.resize_with(channel + 1, || None);
+    }
+    if writers[channel].is_none() {
+        writers[channel] = Some(StateWriter {
+            file: BufWriter::with_capacity(64 * 1024, File::create(state_path(dir, channel))?),
+            written: 0,
+            ids: std::collections::HashMap::new(),
+            names: Vec::new(),
+            meta: meta_for(channels, channel),
+        });
+    }
+    Ok(writers[channel].as_mut().expect("just created"))
+}
+
+fn write_state(writer: &mut StateWriter, start: u64, end: u64, state: &str) -> std::io::Result<()> {
+    let id = match writer.ids.get(state) {
+        Some(&id) => id,
+        None => {
+            let id = writer.names.len() as u32;
+            writer.names.push(state.to_string());
+            writer.ids.insert(state.to_string(), id);
+            id
+        }
+    };
+    let mut record = [0u8; STATE_RECORD_BYTES];
+    record[0..8].copy_from_slice(&start.to_le_bytes());
+    record[8..16].copy_from_slice(&end.to_le_bytes());
+    record[16..20].copy_from_slice(&id.to_le_bytes());
+    writer.file.write_all(&record)?;
+    writer.written += 1;
+    Ok(())
+}
+
+fn flush_states(writers: &mut [Option<StateWriter>]) {
+    for writer in writers.iter_mut().flatten() {
+        if let Err(e) = writer.file.flush() {
+            log::warn!("[spill] State flush failed: {e}");
+            continue;
+        }
+        let mut meta = writer.meta.states.lock().unwrap_or_else(|e| e.into_inner());
+        meta.flushed_records = writer.written;
+        meta.names.clone_from(&writer.names);
+    }
 }
 
 fn channel_writer<'a>(
@@ -420,14 +599,7 @@ fn channel_writer<'a>(
                 last_end: 0,
             });
         }
-        let meta = Arc::new(ChannelMeta::default());
-        {
-            let mut shared = channels.lock().unwrap_or_else(|e| e.into_inner());
-            if shared.len() <= channel {
-                shared.resize_with(channel + 1, || Arc::new(ChannelMeta::default()));
-            }
-            shared[channel] = meta.clone();
-        }
+        let meta = meta_for(channels, channel);
         writers[channel] = Some(ChannelWriter { levels, meta });
     }
     Ok(writers[channel].as_mut().expect("just created"))
@@ -568,6 +740,28 @@ mod tests {
         assert!(dir.exists());
         drop(log);
         assert!(!dir.exists());
+    }
+
+    /// Spilled state segments come back with their names, filtered by range
+    #[test]
+    fn test_state_segments_round_trip() {
+        let log = test_log();
+        let segments: Vec<StateSegment> = (0..1000u64)
+            .map(|i| {
+                (
+                    i * 10,
+                    i * 10 + 10,
+                    if i % 2 == 0 { "ON" } else { "OFF" }.to_string(),
+                )
+            })
+            .collect();
+        log.append_states(2, segments.clone());
+        assert!(log.sync());
+        assert_eq!(log.read_states(2, 0, u64::MAX, usize::MAX), segments);
+        let window = log.read_states(2, 95, 120, usize::MAX);
+        let starts: Vec<u64> = window.iter().map(|s| s.0).collect();
+        assert_eq!(starts, vec![90, 100, 110, 120]);
+        assert_eq!(log.read_states(2, 0, u64::MAX, 3).len(), 3, "limit");
     }
 
     /// Past the byte cap nothing more is written and the cut is reported

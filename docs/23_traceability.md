@@ -209,7 +209,7 @@
 | SYS-F-709 | 不正行 / NaN の除外 | `plotter/parser.rs` | `UT`: `test_parse_error_skip`, `test_parse_nan_excluded`, `test_parse_negative_numbers` / `PROP`: `prop_parser_never_panics_on_arbitrary_bytes`, `prop_numeric_roundtrip` |
 | SYS-F-710 | バッチ内タイムスタンプ分散 (INV-9) | `plotter/thread.rs::run`（`prev = max(candidate, last_batch_ts)`） | `UT`: `test_batch_timestamps_are_spread` |
 | SYS-F-711 | 改行なしバッファの 64 KB 上限 | `plotter/parser.rs` | `INSP` / **GAP-24** |
-| SYS-F-712 | state_data の 10,000 件上限 | `plotter/aggregator.rs`（`MAX_STATE_CHANGES`） | `INSP` / **GAP-24** |
+| SYS-F-712 | state_data はメモリ 10,000 件、超過分はディスクへ | `plotter/aggregator.rs`（`MAX_STATE_CHANGES`、`process_state_value` の書き出し、`filter_state_data` の読み戻し）、`plotter/spill.rs`（`append_states` / `read_states`） | `UT`: `test_state_changes_beyond_memory_cap_come_back_from_spill`, `test_state_segments_round_trip` |
 
 ### 2.8 データ管理 (SYS-F-8xx)
 
