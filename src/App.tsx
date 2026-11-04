@@ -6,6 +6,8 @@ import SettingsPanel, { SerialConfig } from './components/SettingsPanel';
 import SendPanel from './components/SendPanel';
 import ReceivePanel, { OutputFormat } from './components/ReceivePanel';
 import { portPath } from './utils/portUtils';
+import { isSerialConfig } from './utils/serialConfig';
+import { usePersistentState, loadSetting, saveSetting, isBoolean, isString } from './utils/persist';
 import './App.css';
 
 interface DataUpdatePayload {
@@ -22,24 +24,40 @@ const PORT_POLL_INTERVAL_MS = 2000;
 // Auto reconnect (SYS-F-807). While waiting for a lost device, poll faster than the
 // hotplug poll: a board that resets is usually back within a second or two.
 const RECONNECT_POLL_MS = 500;
-const AUTO_RECONNECT_KEY = 'sme.autoReconnect';
+
+const DEFAULT_SERIAL_CONFIG: SerialConfig = {
+  baud_rate: 115200,
+  data_bits: 8,
+  flow_control: 'None',
+  parity: 'None',
+  stop_bits: 1,
+  dtr: true,
+  rts: true,
+};
+
+// The port the user last chose. Saved only on a user choice or Connect, never by the
+// automatic fallback, so starting without the device plugged in keeps the preference.
+const LAST_PORT_KEY = 'lastPort';
 
 function App() {
   const [ports, setPorts] = useState<string[]>([]);
   const [selectedPort, setSelectedPort] = useState<string>('');
   const [isConnected, setIsConnected] = useState(false);
   const [totalBytes, setTotalBytes] = useState<number>(0);
-  const [autoScroll, setAutoScroll] = useState(true);
 
-  const [config, setConfig] = useState<SerialConfig>({
-    baud_rate: 115200,
-    data_bits: 8,
-    flow_control: 'None',
-    parity: 'None',
-    stop_bits: 1,
-    dtr: true,
-    rts: true,
-  });
+  // Settings remembered across restarts (issue #7)
+  const [autoScroll, setAutoScroll] = usePersistentState('receive.autoScroll', true, isBoolean);
+  const [config, setConfig] = usePersistentState<SerialConfig>(
+    'serialConfig',
+    DEFAULT_SERIAL_CONFIG,
+    isSerialConfig
+  );
+  const preferredPortRef = useRef(loadSetting(LAST_PORT_KEY, '', isString));
+  const rememberPort = useCallback((port: string) => {
+    if (!port) return;
+    preferredPortRef.current = port;
+    saveSetting(LAST_PORT_KEY, port);
+  }, []);
 
   // Read in the poll callback without making it a dependency (the interval
   // must not be torn down and restarted on every connect/disconnect).
@@ -54,13 +72,10 @@ function App() {
   // which continues the SAME capture (offsets continue, nothing is cleared).
   // A user-initiated Disconnect never produces `serial-status connected:false`,
   // so every such event is an unexpected disconnect.
-  const [autoReconnect, setAutoReconnect] = useState(
-    () => localStorage.getItem(AUTO_RECONNECT_KEY) === 'true'
-  );
+  const [autoReconnect, setAutoReconnect] = usePersistentState('autoReconnect', false, isBoolean);
   const autoReconnectRef = useRef(autoReconnect);
   useEffect(() => {
     autoReconnectRef.current = autoReconnect;
-    localStorage.setItem(AUTO_RECONNECT_KEY, String(autoReconnect));
   }, [autoReconnect]);
 
   // Device path we are waiting for (null = not waiting). The ref is updated
@@ -112,11 +127,15 @@ function App() {
         // device is absent from the list by definition, and moving the selection
         // would point the wait (and the user) at a different device.
         if (isConnectedRef.current || waitingRef.current !== null) return current;
+        // Fallback when nothing valid is selected: the port the user last chose if
+        // it is present (issue #7), else the first one
+        const fallback = () =>
+          p.includes(preferredPortRef.current) ? preferredPortRef.current : (p[0] ?? '');
         if (current && !p.includes(current)) {
-          return p.length > 0 ? p[0] : '';
+          return fallback();
         }
         if (!current && p.length > 0) {
-          return p[0];
+          return fallback();
         }
         return current;
       });
@@ -281,6 +300,7 @@ function App() {
         // Manual Connect starts a new session (SYS-F-803); only this path resets the count
         await invoke('open_port', { portName: selectedPort, config: config });
         connectedPortRef.current = selectedPort;
+        rememberPort(selectedPort);
         setReconnectedAt(null);
         setIsConnected(true);
         setTotalBytes(0);
@@ -383,6 +403,7 @@ function App() {
             // Picking another device means the user is no longer waiting for the old one
             endWaiting();
             setSelectedPort(port);
+            rememberPort(port);
           }}
           onRefreshPorts={updatePorts}
           config={config}

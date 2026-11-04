@@ -146,6 +146,56 @@ describe('App', () => {
     expect(options).toContain('COM7');
   });
 
+  // ---------------- Settings survive a restart (issue #7) ----------------
+
+  describe('remembered settings', () => {
+    it('restores the serial settings and the last chosen port', async () => {
+      localStorage.setItem(
+        'sme.serialConfig',
+        JSON.stringify({
+          baud_rate: 921600,
+          data_bits: 8,
+          flow_control: 'None',
+          parity: 'Even',
+          stop_bits: 1,
+          dtr: true,
+          rts: false,
+        })
+      );
+      localStorage.setItem('sme.lastPort', JSON.stringify('COM7'));
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_ports') return Promise.resolve(['COM1', 'COM7']);
+        return Promise.resolve(undefined);
+      });
+
+      render(<App />);
+      await flush();
+
+      expect(screen.getByText('921600 bps')).toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Port' })).toHaveValue('COM7');
+      expect(screen.getByLabelText('RtsEnable')).not.toBeChecked();
+    });
+
+    it('keeps the preferred port when it is absent at startup', async () => {
+      localStorage.setItem('sme.lastPort', JSON.stringify('COM7'));
+      render(<App />);
+      await flush();
+
+      // Falls back to what is there, without forgetting the preference
+      expect(screen.getByRole('combobox', { name: 'Port' })).toHaveValue('COM1');
+      expect(localStorage.getItem('sme.lastPort')).toBe('"COM7"');
+    });
+
+    it('saves a changed setting', async () => {
+      render(<App />);
+      await flush();
+
+      fireEvent.click(screen.getByLabelText('Line Wrap'));
+
+      expect(localStorage.getItem('sme.receive.lineWrap')).toBe('false');
+    });
+  });
+
   // ---------------- Save / Copy with timestamps (issue #4) ----------------
 
   describe('save and copy with timestamps', () => {

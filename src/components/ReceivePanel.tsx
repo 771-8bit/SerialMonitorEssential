@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import HexViewer from './viewers/HexViewer';
 import AsciiViewer from './viewers/AsciiViewer';
+import { usePersistentState, isBoolean, isOneOf } from '../utils/persist';
 import './ReceivePanel.css';
 
 export type ViewMode = 'hex' | 'ascii';
@@ -45,12 +46,25 @@ export default function ReceivePanel({
   onAutoScrollChange,
 }: ReceivePanelProps) {
   // View mode: 'hex' (Binary checked) or 'ascii' (Binary unchecked)
-  const [viewMode, setViewMode] = useState<ViewMode>('ascii');
+  // (view options are remembered across restarts - issue #7)
+  const [viewMode, setViewMode] = usePersistentState<ViewMode>(
+    'receive.viewMode',
+    'ascii',
+    isOneOf<ViewMode>(['ascii', 'hex'])
+  );
 
   // Display options (ASCII mode only)
-  const [lineWrap, setLineWrap] = useState(true);
-  const [showTimestamp, setShowTimestamp] = useState(true);
-  const [timestampSeparator, setTimestampSeparator] = useState<TimestampSeparator>(' ');
+  const [lineWrap, setLineWrap] = usePersistentState('receive.lineWrap', true, isBoolean);
+  const [showTimestamp, setShowTimestamp] = usePersistentState(
+    'receive.showTimestamp',
+    true,
+    isBoolean
+  );
+  const [timestampSeparator, setTimestampSeparator] = usePersistentState<TimestampSeparator>(
+    'receive.timestampSeparator',
+    ' ',
+    isOneOf<TimestampSeparator>([' ', ',', '\t'])
+  );
 
   // Scroll position as byte offset (preserved across mode switches)
   const [scrollOffset, setScrollOffset] = useState(0);

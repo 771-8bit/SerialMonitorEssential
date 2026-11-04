@@ -1,4 +1,5 @@
 import { useState, useRef, KeyboardEvent } from 'react';
+import { usePersistentState, isBoolean, isOneOf } from '../utils/persist';
 import { invoke } from '@tauri-apps/api/core';
 import {
   parseHexString,
@@ -15,11 +16,21 @@ interface SendPanelProps {
 type InputMode = 'TEXT' | 'HEX';
 
 export default function SendPanel({ connected, onSend }: SendPanelProps) {
-  const [inputMode, setInputMode] = useState<InputMode>('TEXT');
+  // Options are remembered across restarts (issue #7); the history is not (it may
+  // hold passwords or keys typed into a device console)
+  const [inputMode, setInputMode] = usePersistentState<InputMode>(
+    'send.inputMode',
+    'TEXT',
+    isOneOf<InputMode>(['TEXT', 'HEX'])
+  );
   const [inputText, setInputText] = useState('');
-  const [lineEnding, setLineEnding] = useState<LineEnding>('LF');
-  const [sendOnEnter, setSendOnEnter] = useState(false);
-  const [sendBinary, setSendBinary] = useState(false);
+  const [lineEnding, setLineEnding] = usePersistentState<LineEnding>(
+    'send.lineEnding',
+    'LF',
+    isOneOf<LineEnding>(['NONE', 'CR', 'LF', 'CRLF'])
+  );
+  const [sendOnEnter, setSendOnEnter] = usePersistentState('send.sendOnEnter', false, isBoolean);
+  const [sendBinary, setSendBinary] = usePersistentState('send.sendBinary', false, isBoolean);
 
   // History
   const [history, setHistory] = useState<string[]>([]);
