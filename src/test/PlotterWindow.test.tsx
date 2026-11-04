@@ -127,6 +127,7 @@ const emptyWindowData: ChartPayloadLike = {
 let backendVersion = 0;
 let backendHasData = true;
 let backendPayload: ChartPayloadLike = mockChartData;
+let backendGeneration = 0;
 let dataRequests: DataRequest[] = [];
 
 const lastDataRequest = () => dataRequests[dataRequests.length - 1];
@@ -159,6 +160,7 @@ describe('PlotterWindow', () => {
     backendVersion = 0;
     backendHasData = true;
     backendPayload = mockChartData;
+    backendGeneration = 0;
     dataRequests = [];
 
     rafQueue = [];
@@ -178,11 +180,15 @@ describe('PlotterWindow', () => {
           return undefined;
         }
         if (cmd === 'check_plotter_version') {
-          return { version: backendVersion, has_data: backendHasData };
+          return {
+            version: backendVersion,
+            has_data: backendHasData,
+            generation: backendGeneration,
+          };
         }
         if (cmd === 'get_plotter_chart_data') {
           if (args?.request) dataRequests.push(args.request);
-          return backendPayload;
+          return { ...backendPayload, generation: backendGeneration };
         }
         if (cmd === 'set_aggregation_mode') {
           return undefined;
@@ -524,6 +530,54 @@ describe('PlotterWindow', () => {
 
     expect(screen.queryByText('No data yet.')).toBeNull();
     expect(screen.getByText('ch0:')).toBeDefined();
+  });
+
+  // A new session (Clear / manual Connect) restarts the backend's time axis at
+  // 0 (PF-5). Data may already be flowing again, so has_data never goes false:
+  // the generation change alone must make the next request a bootstrap.
+  it('re-anchors with a bootstrap request when the session generation changes', async () => {
+    await renderWithData();
+    backendVersion = 2;
+    await runFrames(1);
+    expect(lastDataRequest().time_min_ms).not.toBeNull();
+
+    backendGeneration = 1;
+    backendPayload = { ...mockChartData, end_ms: 1500 };
+    backendVersion = 3;
+    await runFrames(1);
+    expect(lastDataRequest().time_min_ms).toBeNull();
+    expect(lastDataRequest().time_max_ms).toBeNull();
+  });
+
+  it('returns to LIVE when a new session arrives while inspecting', async () => {
+    await renderWithData();
+    await act(async () => {
+      lastChartOptions().hooks.setSelect[0](lastChartInstance());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByRole('button', { name: /▶ LIVE/ })).toBeDefined();
+
+    // Any fetch (here: a mode change) brings the new generation
+    backendGeneration = 1;
+    const modeSelect = screen.getByRole('combobox', { name: 'Downsample mode' });
+    await act(async () => {
+      fireEvent.change(modeSelect, { target: { value: 'Average' } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.queryByRole('button', { name: /▶ LIVE/ })).toBeNull();
+  });
+
+  it('does not show negative times before a full window of data exists', async () => {
+    backendPayload = { ...mockChartData, end_ms: 2000 };
+    await renderWithData();
+    const chart = lastChartInstance();
+    chart.setScale.mockClear();
+    await runFrames(2);
+    const xCalls = chart.setScale.mock.calls.filter((c) => c[0] === 'x');
+    expect(xCalls.length).toBeGreaterThan(0);
+    const [, range] = xCalls[xCalls.length - 1] as [string, { min: number; max: number }];
+    expect(range.min).toBeGreaterThanOrEqual(0);
+    expect(range.max).toBeCloseTo(10, 1);
   });
 
   it('clears the chart when the backend reports no data (Clear)', async () => {

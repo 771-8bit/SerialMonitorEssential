@@ -193,6 +193,9 @@ pub struct PlotterChartPayload {
     /// `None` for Peak mode (no bands).
     pub band_data: Option<HashMap<String, BandSeriesData>>,
 
+    /// Session generation (changes on clear; the time origin restarts)
+    pub generation: u64,
+
     /// State timeline data (unchanged from current format)
     pub state_data: HashMap<String, Vec<StateChange>>,
 

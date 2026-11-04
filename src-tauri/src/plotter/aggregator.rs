@@ -457,6 +457,11 @@ struct PlotterAggregatorInner {
     /// Data version counter (incremented on every data change)
     data_version: u64,
 
+    /// Session generation (incremented by `clear`). The time origin restarts
+    /// with each generation, so the frontend must reset its view when it
+    /// changes, even if it never saw an empty payload in between (PF-5).
+    generation: u64,
+
     /// Timestamp of the most recently received data point (any channel,
     /// including unchanged-state repeats that don't append a StateChange)
     last_data_ts: u64,
@@ -467,6 +472,8 @@ struct PlotterAggregatorInner {
 pub struct PlotterVersionInfo {
     pub version: u64,
     pub has_data: bool,
+    /// Session generation (changes on clear; see `PlotterAggregatorInner`)
+    pub generation: u64,
 }
 
 /// Plotter aggregator - stores all parsed data with dynamic aggregation
@@ -511,6 +518,7 @@ impl PlotterAggregator {
                 enabled: false,
                 view_cache: None,
                 data_version: 0,
+                generation: 0,
                 last_data_ts: 0,
             })),
         }
@@ -553,11 +561,13 @@ impl PlotterAggregator {
             Ok(inner) => PlotterVersionInfo {
                 version: inner.data_version,
                 has_data: !inner.channel_names.is_empty(),
+                generation: inner.generation,
             },
             // Poisoned lock: report "no data" instead of panicking at 60Hz
             Err(_) => PlotterVersionInfo {
                 version: 0,
                 has_data: false,
+                generation: 0,
             },
         }
     }
@@ -1099,6 +1109,7 @@ impl PlotterAggregator {
     /// This eliminates per-frame data transformation in the frontend,
     /// fixing the memory leak caused by repeated object creation.
     pub fn get_chart_data(&self, req: &PlotterDataRequest) -> PlotterChartPayload {
+        let generation = self.inner.read().map(|i| i.generation).unwrap_or(0);
         // First, get the existing ranged data
         let ranged = self.get_ranged_data(req);
 
@@ -1138,6 +1149,7 @@ impl PlotterAggregator {
                 vec![vec![]] // Empty timestamps array
             };
             return PlotterChartPayload {
+                generation,
                 aligned_data,
                 channel_names: vec![],
                 band_data: None,
@@ -1164,6 +1176,7 @@ impl PlotterAggregator {
         // If no timestamps, return empty payload
         if timestamps.is_empty() {
             return PlotterChartPayload {
+                generation,
                 aligned_data: vec![vec![]],
                 channel_names: vec![],
                 band_data: None,
@@ -1255,6 +1268,7 @@ impl PlotterAggregator {
         }
 
         PlotterChartPayload {
+            generation,
             aligned_data,
             channel_names,
             band_data: if band_data_map.is_empty() {
@@ -1407,6 +1421,7 @@ impl PlotterAggregator {
             inner.last_data_ts = 0;
             // Increment version to notify frontend of data change
             inner.data_version = inner.data_version.wrapping_add(1);
+            inner.generation = inner.generation.wrapping_add(1);
         }
     }
 
@@ -2627,6 +2642,16 @@ mod tests {
 
         assert!(v2.version > v1.version, "Version should increment on clear");
         assert!(!v2.has_data, "has_data should be false after clear");
+        // A new session: the frontend must reset its view even if it never
+        // polls the empty state in between (PF-5)
+        assert_eq!(v2.generation, v1.generation + 1);
+        let payload = agg.get_chart_data(&PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        });
+        assert_eq!(payload.generation, v2.generation);
     }
 
     #[test]

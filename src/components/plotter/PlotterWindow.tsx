@@ -43,6 +43,9 @@ interface PlotterChartPayload {
   // Time range
   start_ms: number;
   end_ms: number;
+  // Session generation: changes on a new session (Clear / manual Connect),
+  // where the backend's time axis restarts at 0
+  generation?: number;
 }
 
 interface PlotterDataRequest {
@@ -56,6 +59,7 @@ interface PlotterDataRequest {
 interface PlotterVersionInfo {
   version: number;
   has_data: boolean;
+  generation?: number;
 }
 
 /** Selectable widths (seconds) of the sliding live window */
@@ -97,6 +101,8 @@ export default function PlotterWindow() {
   const lastEndMsRef = useRef(0);
   // Track last known version for smart polling
   const lastVersionRef = useRef(0);
+  // Last session generation seen (null before the first payload)
+  const lastGenerationRef = useRef<number | null>(null);
   // Right edge of the live window ("now"), in ms since plotter start.
   // null until the first payload tells us where the data ends.
   const rightEdgeRef = useRef<number | null>(null);
@@ -169,15 +175,30 @@ export default function PlotterWindow() {
     const hasPoints = (payload.aligned_data[0]?.length ?? 0) > 0;
     const hasStates = Object.values(payload.state_data).some((changes) => changes.length > 0);
 
-    // Backend clear(): has_data went false, or the data range moved backwards.
-    // (Only meaningful while following - in Inspect we request older ranges on
-    // purpose, so a lower end_ms is expected there.)
-    const isReset = !hasData || (followRef.current && payload.end_ms < lastEndMsRef.current);
+    // A new session: the generation changed (Clear / manual Connect restart the
+    // backend's time axis at 0, PF-5) - the data may already be flowing again,
+    // so has_data alone would miss it.
+    const generationChanged =
+      payload.generation !== undefined &&
+      lastGenerationRef.current !== null &&
+      payload.generation !== lastGenerationRef.current;
+    if (payload.generation !== undefined) lastGenerationRef.current = payload.generation;
+
+    // Backend clear(): has_data went false, the generation changed, or the data
+    // range moved backwards. (The last only while following - in Inspect we
+    // request older ranges on purpose, so a lower end_ms is expected there.)
+    const isReset =
+      !hasData || generationChanged || (followRef.current && payload.end_ms < lastEndMsRef.current);
     if (isReset) {
       lastEndMsRef.current = payload.end_ms;
       rightEdgeRef.current = null;
       inspectRangeRef.current = null;
       chartHandleRef.current?.resetView();
+      // The range being inspected belonged to the old session: follow the new one
+      if (!followRef.current) {
+        followRef.current = true;
+        setIsFollowing(true);
+      }
       hasDataRef.current = hasPoints || hasStates;
       setData(payload);
       return;
@@ -243,13 +264,26 @@ export default function PlotterWindow() {
       lastFrameMs = now;
       if (rightEdgeRef.current !== null) {
         rightEdgeRef.current += deltaMs;
-        const maxSec = rightEdgeRef.current / 1000;
+        // Until a full window of data exists, show [0, W] and fill it from the
+        // left instead of drawing negative times (PF-5)
+        const maxSec = Math.max(rightEdgeRef.current / 1000, windowSecRef.current);
         chartHandleRef.current?.setXWindow(maxSec - windowSecRef.current, maxSec);
       }
 
       // Step 2: Lightweight version check (8 bytes payload)
       try {
         const versionInfo = await invoke<PlotterVersionInfo>('check_plotter_version');
+
+        // New session: the old right edge belongs to the old time axis, so the
+        // next request must be a bootstrap (an explicit window in the old range
+        // would come back empty and the chart would freeze)
+        if (
+          versionInfo.generation !== undefined &&
+          lastGenerationRef.current !== null &&
+          versionInfo.generation !== lastGenerationRef.current
+        ) {
+          rightEdgeRef.current = null;
+        }
 
         // Fetch full data whenever the version changed.
         // Note: fetch even when has_data is false, so a backend clear()

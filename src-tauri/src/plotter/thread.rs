@@ -113,7 +113,14 @@ impl PlotterThread {
     ) {
         let mut parser = PlotterParser::new();
         let mut last_processed_offset: u64 = 0;
-        let start_time = Instant::now();
+        // Time origin of the plotter's timestamps: the moment the current
+        // session's store was attached (docs/27 PF-5). A new session (manual
+        // Connect / Clear) starts again at 0; an automatic reconnect keeps the
+        // same store and therefore the same clock.
+        let mut start_time = Instant::now();
+        // Whether this thread has ever been attached to a store: from then on a
+        // swap or a detach ends a session, so the plot must be cleared
+        let mut had_store = false;
         // The DataStore instance we are currently reading from. The serial side
         // swaps in a NEW instance on port reopen / clear, so track identity.
         let mut current_store: Option<Arc<DataStore>> = None;
@@ -144,25 +151,30 @@ impl PlotterThread {
                         last_processed_offset = 0;
                         parser.reset();
                         read_failures = 0;
-                        // On an actual swap (port reopen / clear), the underlying
-                        // capture was replaced: clear plotted data so the plot
-                        // matches the (now empty) main view instead of mixing
-                        // stale channels with the new session. Keep timestamps
-                        // monotonic. On the initial attach leave last_batch_ts
-                        // at 0 so a backlog replay can spread backwards
-                        // (~1ms per line) instead of collapsing onto a single
-                        // timestamp.
-                        if current_store.is_some() {
+                        // A new session (port reopen / Clear, also after a
+                        // detach while closed): clear the plot so it matches the
+                        // (now empty) main view instead of mixing stale channels
+                        // with the new session (SYS-F-802), and restart the time
+                        // axis at 0 (PF-5). The aggregator's generation changes,
+                        // so the frontend resets its view too. Timestamps are
+                        // monotonic within a generation (SYS-NF-602).
+                        if had_store {
                             aggregator.clear();
-                            last_batch_ts = start_time.elapsed().as_millis() as u64;
                         }
+                        had_store = true;
+                        start_time = Instant::now();
+                        last_batch_ts = 0;
                         current_store = Some(Arc::clone(&store));
                     }
                     store
                 }
                 None => {
-                    // Port not open yet (or cleared while closed) - wait for one
-                    current_store = None;
+                    // Port not open yet, or Clear while closed: the session is
+                    // over, so empty the plot now - together with the main view
+                    // (SYS-F-802, SYS-F-806) - not only at the next Connect
+                    if current_store.take().is_some() {
+                        aggregator.clear();
+                    }
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 }
@@ -811,6 +823,78 @@ mod tests {
         thread.stop();
     }
 
+    /// A new session (store swap) restarts the time axis at 0 (docs/27 PF-5)
+    #[test]
+    fn test_store_swap_resets_time_origin() {
+        let handle: SharedDataStore = Arc::new(Mutex::new(None));
+        let aggregator = PlotterAggregator::new();
+        aggregator.set_enabled(true);
+        let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
+
+        let store_a = Arc::new(DataStore::new().expect("create store A"));
+        store_a.push_test_data(b"1,2\n");
+        *handle.lock().unwrap() = Some(store_a);
+        wait_for(|| aggregator.total_points() >= 2, "store A");
+        thread::sleep(Duration::from_millis(500));
+
+        let store_b = Arc::new(DataStore::new().expect("create store B"));
+        *handle.lock().unwrap() = Some(store_b.clone());
+        thread::sleep(Duration::from_millis(50));
+        store_b.push_test_data(b"3,4\n");
+        wait_for(
+            || {
+                aggregator
+                    .get_channel_info()
+                    .iter()
+                    .any(|c| c.latest_value.as_deref() == Some("3.00"))
+            },
+            "store B",
+        );
+        thread.stop();
+
+        let payload = aggregator.get_chart_data(&PlotterDataRequest {
+            time_min_ms: None,
+            time_max_ms: None,
+            pixel_width: 800,
+            is_realtime: false,
+        });
+        assert_eq!(aggregator.total_points(), 2, "store A's data must be gone");
+        assert!(
+            payload.end_ms < 300,
+            "time origin not reset: {}",
+            payload.end_ms
+        );
+    }
+
+    /// Clear while the port is closed (the store goes away) empties the plot
+    /// at once, and the next session does not mix with the old one
+    /// (SYS-F-802 / SYS-F-806)
+    #[test]
+    fn test_detach_clears_the_plot() {
+        let handle: SharedDataStore = Arc::new(Mutex::new(None));
+        let aggregator = PlotterAggregator::new();
+        aggregator.set_enabled(true);
+        let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
+
+        let store_a = Arc::new(DataStore::new().expect("create store A"));
+        store_a.push_test_data(b"old:1\n");
+        *handle.lock().unwrap() = Some(store_a);
+        wait_for(|| aggregator.total_points() >= 1, "store A");
+
+        *handle.lock().unwrap() = None;
+        wait_for(
+            || aggregator.get_channels().is_empty(),
+            "plot cleared on detach",
+        );
+
+        let store_b = Arc::new(DataStore::new().expect("create store B"));
+        store_b.push_test_data(b"new:2\n");
+        *handle.lock().unwrap() = Some(store_b);
+        wait_for(|| aggregator.total_points() >= 1, "store B");
+        thread.stop();
+        assert_eq!(aggregator.get_channels(), vec!["new"]);
+    }
+
     #[test]
     fn test_batch_timestamps_are_spread() {
         // Lines read in one poll must not collapse onto a single timestamp
@@ -820,13 +904,13 @@ mod tests {
 
         let mut thread = PlotterThread::start(handle.clone(), aggregator.clone());
 
-        // Give the thread some elapsed time so the backlog can spread backwards
-        thread::sleep(Duration::from_millis(60));
-
-        // 8 lines, each kept as its own sample (1 ms cells of tier 0)
+        // As in the app: the session's store is attached (its clock starts at
+        // 0, PF-5), and lines arrive a little later, 8 of them in one poll
         let store = Arc::new(DataStore::new().expect("create store"));
+        *handle.lock().unwrap() = Some(store.clone());
+        thread::sleep(Duration::from_millis(60));
+        // 8 lines, each kept as its own sample (1 ms cells of tier 0)
         store.push_test_data(b"1\n2\n3\n4\n5\n6\n7\n8\n");
-        *handle.lock().unwrap() = Some(store);
 
         wait_for(|| aggregator.total_points() >= 8, "8 points");
         thread.stop();

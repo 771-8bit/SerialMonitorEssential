@@ -41,6 +41,10 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Fixed
 
+- Plotter: after Clear or a manual reconnect the time axis now starts again at 0, "Duration"
+  shows the new session's length, and a window longer than the data no longer shows negative
+  times. Disconnect, Clear, Connect no longer leaves the old session's channels in the plotter.
+
 - Plotter: connecting to a device that is already streaming no longer creates a phantom channel
   from the cut first line (e.g. a state channel named `cos` with the value `accel:0.049`). The same
   applies where reception resumes after an automatic reconnect.
