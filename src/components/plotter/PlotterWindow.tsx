@@ -189,11 +189,11 @@ export default function PlotterWindow() {
     if (!hasPoints && !hasStates && hasDataRef.current) return;
 
     lastEndMsRef.current = Math.max(lastEndMsRef.current, payload.end_ms);
-    if (
-      followRef.current &&
-      (rightEdgeRef.current === null || payload.end_ms > rightEdgeRef.current)
-    ) {
-      // Snap the right edge forward to the newest data
+    if (followRef.current && rightEdgeRef.current === null) {
+      // Bootstrap answer (open-ended request): place the right edge at the
+      // newest data. After that the edge advances by wall time only. Explicit
+      // requests echo time_max_ms (a ceil() of the edge) as end_ms, so snapping
+      // to it made the edge creep ahead of real time on every fetch.
       rightEdgeRef.current = payload.end_ms;
     }
     hasDataRef.current = hasPoints || hasStates;

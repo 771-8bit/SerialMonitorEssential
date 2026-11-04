@@ -37,6 +37,9 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Fixed
 
+- Plotter: the right edge of the LIVE window crept ahead of real time (about 3 s after 3 minutes),
+  so after roughly 10 minutes a 10 s window showed no data at all.
+
 - Sending no longer stops reception. Previously a send held the port lock for the
   whole write, so data arriving meanwhile overflowed the driver buffer: on a real
   12 Mbaud UART (FT232H) a 16 KiB send lost 60 % of the incoming data, and with

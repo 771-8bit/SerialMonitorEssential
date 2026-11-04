@@ -349,6 +349,42 @@ describe('PlotterWindow', () => {
     expect(span).toBeLessThanOrEqual(10002); // floor/ceil rounding only
   });
 
+  // The backend echoes the requested time_max_ms as end_ms. Snapping the right
+  // edge to that echo made it creep ahead of real time by the ceil() fraction on
+  // every fetch (~3 s after 3 minutes; after ~10 minutes a 10 s window showed
+  // no data at all). The edge must advance by wall time only.
+  it('does not let the live right edge creep ahead of wall time', async () => {
+    let clock = 1000;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cmd: string, args?: { request?: DataRequest }) => {
+        if (cmd === 'check_plotter_version') {
+          return { version: backendVersion, has_data: true };
+        }
+        if (cmd === 'get_plotter_chart_data') {
+          const request = args?.request;
+          if (request) dataRequests.push(request);
+          return { ...mockChartData, end_ms: request?.time_max_ms ?? mockChartData.end_ms };
+        }
+        return undefined;
+      }
+    );
+
+    await renderWithData();
+    const firstEdge = lastDataRequest().time_max_ms ?? 60000;
+    const frames = 200;
+    for (let i = 0; i < frames; i++) {
+      clock += 16.5; // fractional frame times, like a real 60 Hz display
+      backendVersion += 1; // new data every frame -> a fetch every frame
+      await runFrames(1);
+    }
+
+    const elapsed = frames * 16.5;
+    expect(lastDataRequest().time_max_ms!).toBeLessThanOrEqual(
+      Math.max(firstEdge, 60000) + elapsed + 2
+    );
+  });
+
   it('clamps the window start at zero near the beginning of the stream', async () => {
     backendPayload = { ...mockChartData, end_ms: 2000 };
     await renderWithData();
