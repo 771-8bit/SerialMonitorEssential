@@ -600,6 +600,47 @@ pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, St
     }
 }
 
+/// Separator between the timestamp and the data, as offered in the Receive panel
+fn validate_timestamp_separator(separator: &str) -> Result<(), String> {
+    match separator {
+        " " | "," | "\t" => Ok(()),
+        other => Err(format!("Unsupported timestamp separator: {:?}", other)),
+    }
+}
+
+/// Save the received data as text with a timestamp at the start of every line
+/// (issue #4: Save while Timestamp is ON). The data bytes are written unchanged;
+/// `export_log` remains the raw-bytes export.
+#[tauri::command]
+pub fn export_text_with_timestamps(
+    state: State<'_, SerialState>,
+    path: String,
+    separator: String,
+) -> Result<u64, String> {
+    use std::io::{BufWriter, Write};
+
+    validate_timestamp_separator(&separator)?;
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+    let Some(ref data_store) = *store_guard else {
+        return Err("No data available".to_string());
+    };
+    if data_store.total_bytes() == 0 {
+        return Err("No data to export".to_string());
+    }
+    let file = std::fs::File::create(&path)
+        .map_err(|e| format!("Failed to create file '{}': {:?}", path, e))?;
+    let mut out = BufWriter::new(file);
+    let total = data_store.write_timestamped(&mut out, &separator, format_line_timestamp)?;
+    out.flush()
+        .map_err(|e| format!("Failed to write data: {:?}", e))?;
+    log::info!(
+        "[export_text_with_timestamps] Exported {} bytes to {}",
+        total,
+        path
+    );
+    Ok(total)
+}
+
 #[tauri::command]
 pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), String> {
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
@@ -633,7 +674,11 @@ pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result<String, String> {
+pub fn get_clipboard_text(
+    state: State<'_, SerialState>,
+    mode: String,
+    timestamp_separator: Option<String>,
+) -> Result<String, String> {
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -650,6 +695,14 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
         let to_read = total.min(u32::MAX as u64) as u32;
         let data = data_store.get_data(0, to_read)?;
 
+        // Timestamp ON in the ASCII view (issue #4): the same text as Save
+        if let (Some(separator), false) = (timestamp_separator.as_deref(), mode == "hex") {
+            validate_timestamp_separator(separator)?;
+            let mut out = Vec::new();
+            data_store.write_timestamped(&mut out, separator, format_line_timestamp)?;
+            return Ok(String::from_utf8_lossy(&out).to_string());
+        }
+
         if mode == "hex" {
             // Hex mode: space-separated hex string
             Ok(bytes_to_hex(&data))
@@ -665,6 +718,27 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_start_line_serves_the_tail_for_requests_past_the_end() {
+        // In range: unchanged
+        assert_eq!(clamp_start_line(10, 50, 1000), 10);
+        assert_eq!(clamp_start_line(950, 50, 1000), 950);
+        // Past the end (a viewer asking for "the tail"): the last line_count lines
+        assert_eq!(clamp_start_line(u64::MAX, 50, 1000), 950);
+        assert_eq!(clamp_start_line(990, 50, 1000), 950);
+        // Fewer lines than requested: everything from line 0
+        assert_eq!(clamp_start_line(u64::MAX, 50, 20), 0);
+        assert_eq!(clamp_start_line(0, 50, 0), 0);
+    }
+
+    #[test]
+    fn line_timestamp_has_tenths_and_a_fallback() {
+        assert_eq!(format_line_timestamp(None), "--:--:--.0");
+        let s = format_line_timestamp(Some(1_700_000_000_987));
+        assert_eq!(s.len(), "HH:MM:SS.d".len());
+        assert!(s.ends_with(".9"), "{s}");
+    }
 
     #[test]
     fn test_extract_port_path() {
@@ -715,27 +789,6 @@ mod tests {
         assert_eq!(byte_to_ascii(0x7f), '␡'); // DEL -> U+2421
                                               // Non-ASCII should be '·'
         assert_eq!(byte_to_ascii(0xff), '·');
-    }
-
-    #[test]
-    fn clamp_start_line_serves_the_tail_for_requests_past_the_end() {
-        // In range: unchanged
-        assert_eq!(clamp_start_line(10, 50, 1000), 10);
-        assert_eq!(clamp_start_line(950, 50, 1000), 950);
-        // Past the end (a viewer asking for "the tail"): the last line_count lines
-        assert_eq!(clamp_start_line(u64::MAX, 50, 1000), 950);
-        assert_eq!(clamp_start_line(990, 50, 1000), 950);
-        // Fewer lines than requested: everything from line 0
-        assert_eq!(clamp_start_line(u64::MAX, 50, 20), 0);
-        assert_eq!(clamp_start_line(0, 50, 0), 0);
-    }
-
-    #[test]
-    fn line_timestamp_has_tenths_and_a_fallback() {
-        assert_eq!(format_line_timestamp(None), "--:--:--.0");
-        let s = format_line_timestamp(Some(1_700_000_000_987));
-        assert_eq!(s.len(), "HH:MM:SS.d".len());
-        assert!(s.ends_with(".9"), "{s}");
     }
 
     #[test]

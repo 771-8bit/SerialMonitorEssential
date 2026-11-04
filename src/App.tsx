@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { save, ask } from '@tauri-apps/plugin-dialog';
 import SettingsPanel, { SerialConfig } from './components/SettingsPanel';
 import SendPanel from './components/SendPanel';
-import ReceivePanel, { ViewMode } from './components/ReceivePanel';
+import ReceivePanel, { OutputFormat } from './components/ReceivePanel';
 import { portPath } from './utils/portUtils';
 import './App.css';
 
@@ -291,23 +291,41 @@ function App() {
     }
   }
 
-  async function handleExport() {
+  async function handleExport(format: OutputFormat) {
     if (totalBytes === 0) {
       alert('No data to export');
       return;
     }
 
+    // Timestamp ON (ASCII view): text with a timestamp on every line (issue #4).
+    // Otherwise the received bytes exactly as they arrived.
+    const withTimestamps = format.timestampSeparator !== null;
     try {
-      const filePath = await save({
-        filters: [
-          { name: 'Binary', extensions: ['bin'] },
-          { name: 'All Files', extensions: ['*'] },
-        ],
-        defaultPath: 'serial_log.bin',
-      });
+      const filePath = await save(
+        withTimestamps
+          ? {
+              filters: [
+                { name: 'Text', extensions: ['txt', 'log'] },
+                { name: 'All Files', extensions: ['*'] },
+              ],
+              defaultPath: 'serial_log.txt',
+            }
+          : {
+              filters: [
+                { name: 'Binary', extensions: ['bin'] },
+                { name: 'All Files', extensions: ['*'] },
+              ],
+              defaultPath: 'serial_log.bin',
+            }
+      );
 
       if (filePath) {
-        const bytesExported = await invoke<number>('export_log', { path: filePath });
+        const bytesExported = withTimestamps
+          ? await invoke<number>('export_text_with_timestamps', {
+              path: filePath,
+              separator: format.timestampSeparator,
+            })
+          : await invoke<number>('export_log', { path: filePath });
         console.log(`Exported ${bytesExported.toLocaleString()} bytes to ${filePath}`);
       }
     } catch (e) {
@@ -326,7 +344,7 @@ function App() {
     }
   }
 
-  async function handleCopy(mode: ViewMode) {
+  async function handleCopy(format: OutputFormat) {
     if (totalBytes === 0) return;
 
     if (totalBytes > 10 * 1024 * 1024) {
@@ -342,7 +360,10 @@ function App() {
     }
 
     try {
-      const text = await invoke<string>('get_clipboard_text', { mode });
+      const text = await invoke<string>('get_clipboard_text', {
+        mode: format.mode,
+        timestampSeparator: format.timestampSeparator,
+      });
       if (text) {
         await navigator.clipboard.writeText(text);
       }

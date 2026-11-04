@@ -146,6 +146,76 @@ describe('App', () => {
     expect(options).toContain('COM7');
   });
 
+  // ---------------- Save / Copy with timestamps (issue #4) ----------------
+
+  describe('save and copy with timestamps', () => {
+    async function renderWithData() {
+      render(<App />);
+      await flush();
+      emit('data-update', { total_bytes: 10 });
+    }
+
+    it('saves text with timestamps when Timestamp is ON', async () => {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      vi.mocked(save).mockResolvedValue('C:/tmp/log.txt');
+      await renderWithData();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+
+      expect(vi.mocked(save)).toHaveBeenCalledWith(
+        expect.objectContaining({ defaultPath: 'serial_log.txt' })
+      );
+      expect(mockInvoke).toHaveBeenCalledWith('export_text_with_timestamps', {
+        path: 'C:/tmp/log.txt',
+        separator: ' ',
+      });
+    });
+
+    it('saves the raw bytes when Timestamp is OFF', async () => {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      vi.mocked(save).mockResolvedValue('C:/tmp/log.bin');
+      await renderWithData();
+
+      fireEvent.click(screen.getByLabelText('Timestamp'));
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('export_log', { path: 'C:/tmp/log.bin' });
+      expect(mockInvoke).not.toHaveBeenCalledWith('export_text_with_timestamps', expect.anything());
+    });
+
+    it('copies with the chosen separator when Timestamp is ON', async () => {
+      await renderWithData();
+
+      fireEvent.change(screen.getByTitle('Separator between Timestamp and Data'), {
+        target: { value: ',' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
+        mode: 'ascii',
+        timestampSeparator: ',',
+      });
+    });
+
+    it('copies without timestamps in the Hex view', async () => {
+      await renderWithData();
+
+      fireEvent.click(
+        screen.getByTitle('Toggle between Hex and ASCII view').querySelector('input')!
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
+        mode: 'hex',
+        timestampSeparator: null,
+      });
+    });
+  });
+
   // ---------------- Auto reconnect (SYS-F-807) ----------------
 
   describe('auto reconnect', () => {

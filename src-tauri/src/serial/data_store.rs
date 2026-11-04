@@ -397,6 +397,71 @@ impl DataStore {
         self.push_test_data_at(self.total_bytes(), data);
     }
 
+    /// 受信データ全体を、各行の先頭にタイムスタンプと区切りを付けて書き出す（issue #4）
+    ///
+    /// データ本体は受信したバイトのまま（CR/LF も含め無加工）で、行頭（LF の直後）に
+    /// `format(行頭オフセットの時刻)` と `separator` を挿入するだけ。データは 1 MiB
+    /// ずつ順に読み、行頭は数千行ずつ索引から取るので、巨大な取り込みでもメモリは
+    /// 一定。呼び出し時点の総バイト数までを書き、その後に届いた分は含めない。
+    /// 戻り値は書き出したデータのバイト数（挿入した文字は含まない）。
+    pub fn write_timestamped<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        separator: &str,
+        format: impl Fn(Option<u64>) -> String,
+    ) -> Result<u64, String> {
+        const CHUNK: u64 = 1024 * 1024;
+        const LINE_BATCH: u32 = 4096;
+
+        let total = self.total_bytes();
+        let mut starts: VecDeque<u64> = VecDeque::new();
+        let mut next_line = 0u64;
+        let mut lines_done = false;
+        let mut offset = 0u64;
+
+        while offset < total {
+            let len = CHUNK.min(total - offset) as u32;
+            let data = self.get_data(offset, len)?;
+            if data.is_empty() {
+                return Err(format!("No data at offset {}", offset));
+            }
+            let end = offset + data.len() as u64;
+            let mut pos = offset;
+            loop {
+                if starts.is_empty() && !lines_done {
+                    let batch = self.get_line_offsets(next_line, LINE_BATCH);
+                    lines_done = batch.is_empty();
+                    next_line += batch.len() as u64;
+                    starts.extend(batch.into_iter().map(|(s, _)| s));
+                }
+                match starts.front().copied() {
+                    // 先頭の行が書き出し済みの位置より前になることはないが、念のため捨てる
+                    Some(ls) if ls < pos => {
+                        starts.pop_front();
+                    }
+                    Some(ls) if ls < end => {
+                        let a = (pos - offset) as usize;
+                        let b = (ls - offset) as usize;
+                        out.write_all(&data[a..b]).map_err(|e| e.to_string())?;
+                        let stamp = format(self.get_timestamp_for_offset(ls));
+                        out.write_all(stamp.as_bytes()).map_err(|e| e.to_string())?;
+                        out.write_all(separator.as_bytes())
+                            .map_err(|e| e.to_string())?;
+                        pos = ls;
+                        starts.pop_front();
+                    }
+                    _ => {
+                        let a = (pos - offset) as usize;
+                        out.write_all(&data[a..]).map_err(|e| e.to_string())?;
+                        break;
+                    }
+                }
+            }
+            offset = end;
+        }
+        Ok(total)
+    }
+
     /// 受信セグメントの開始オフセットのうち `[from, to)` に入るもの（昇順）
     pub fn segment_starts_in(&self, from: u64, to: u64) -> Vec<u64> {
         self.segment_starts
@@ -741,6 +806,48 @@ mod tests {
             ui_notifier_handle: Mutex::new(None),
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// タイムスタンプ付き書き出し（issue #4）: 各行頭に時刻と区切りが入り、データは無加工
+    #[test]
+    fn write_timestamped_prefixes_every_line_and_keeps_bytes() {
+        let store = create_test_data_store();
+        let data = b"ab\r\ncd\nlast";
+        store.push_test_data(data);
+        {
+            // 行頭: 0, 4 ("cd"), 7 ("last")
+            let mut idx = store.line_index.write().unwrap();
+            idx.extend([4, 7]);
+        }
+        let fmt = |ts: Option<u64>| format!("[{}]", ts.map_or("-".to_string(), |t| t.to_string()));
+        {
+            let mut ts = store.timestamp_index.write().unwrap();
+            ts.push(ByteTimestamp {
+                cumulative_bytes: 4,
+                timestamp: 1000,
+            });
+        }
+
+        let mut out = Vec::new();
+        let n = store.write_timestamped(&mut out, ",", fmt).unwrap();
+
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(out, b"[-],ab\r\n[1000],cd\n[1000],last");
+    }
+
+    /// 末尾が LF で終わるとき、まだ中身のない最終行に時刻だけが付くことはない
+    #[test]
+    fn write_timestamped_adds_nothing_after_a_trailing_newline() {
+        let store = create_test_data_store();
+        store.push_test_data(b"x\n");
+        store.line_index.write().unwrap().push(2);
+
+        let mut out = Vec::new();
+        store
+            .write_timestamped(&mut out, "\t", |_| "T".to_string())
+            .unwrap();
+
+        assert_eq!(out, b"T\tx\n");
     }
 
     /// archived_indexのみからデータを取得できることを確認

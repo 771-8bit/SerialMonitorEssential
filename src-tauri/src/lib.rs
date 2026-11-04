@@ -100,6 +100,7 @@ pub fn run() {
             serial::get_display_rows,
             serial::get_ascii_lines,
             serial::export_log,
+            serial::export_text_with_timestamps,
             serial::clear_data,
             serial::get_clipboard_text,
             serial::get_line_index,

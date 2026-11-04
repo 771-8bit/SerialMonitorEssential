@@ -16,11 +16,22 @@ export interface ReceiveOptions {
   searchQuery: string;
 }
 
+/**
+ * What Save / Copy produce (issue #4): with Timestamp ON in the ASCII view, the text
+ * with a timestamp and the chosen separator at the start of every line; otherwise
+ * the data as before (raw bytes for Save, plain or hex text for Copy).
+ */
+export interface OutputFormat {
+  mode: ViewMode;
+  /** Separator after each line's timestamp, or null for no timestamps */
+  timestampSeparator: TimestampSeparator | null;
+}
+
 interface ReceivePanelProps {
   totalBytes: number;
-  onExport: () => void;
+  onExport: (format: OutputFormat) => void;
   onClear: () => void;
-  onCopy: (mode: ViewMode) => void;
+  onCopy: (format: OutputFormat) => void;
   autoScroll: boolean;
   onAutoScrollChange: (enabled: boolean) => void;
 }
@@ -48,9 +59,13 @@ export default function ReceivePanel({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterEnabled, setFilterEnabled] = useState(false);
 
-  const handleCopy = useCallback(() => {
-    onCopy(viewMode);
-  }, [onCopy, viewMode]);
+  const outputFormat: OutputFormat = {
+    mode: viewMode,
+    timestampSeparator: viewMode === 'ascii' && showTimestamp ? timestampSeparator : null,
+  };
+
+  const handleCopy = () => onCopy(outputFormat);
+  const handleExport = () => onExport(outputFormat);
 
   const handlePlotter = useCallback(async () => {
     try {
@@ -192,10 +207,24 @@ export default function ReceivePanel({
           <button onClick={handlePlotter} className="plotter-button" title="Open Plotter (Phase 7)">
             Plotter
           </button>
-          <button onClick={onExport} title="Save to file">
+          <button
+            onClick={handleExport}
+            title={
+              outputFormat.timestampSeparator !== null
+                ? 'Save as text with timestamps'
+                : 'Save the received bytes to a file'
+            }
+          >
             Save
           </button>
-          <button onClick={handleCopy} title="Copy all data to clipboard">
+          <button
+            onClick={handleCopy}
+            title={
+              outputFormat.timestampSeparator !== null
+                ? 'Copy all data with timestamps to the clipboard'
+                : 'Copy all data to the clipboard'
+            }
+          >
             Copy
           </button>
           <button onClick={onClear} title="Clear all data (including disk)">
