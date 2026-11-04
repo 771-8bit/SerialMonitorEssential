@@ -41,31 +41,13 @@ pub enum AggregationMode {
     Peak,
 }
 
-impl AggregationMode {
-    /// Get default aggregation threshold for this mode
-    /// Threshold = data_count > target_points * threshold triggers aggregation.
-    /// Only the Average mode's static path uses it; Peak always draws the
-    /// envelope on the grid (which is lossless for sparse data).
-    pub fn default_threshold(&self) -> usize {
-        match self {
-            AggregationMode::Average => 2,
-            AggregationMode::Peak => 1,
-        }
-    }
-}
-
 /// Plotter configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlotterConfig {
-    /// Maximum points to store per channel (for pending buffer)
-    pub max_points: usize,
     /// Channel type overrides
     pub channel_types: HashMap<String, ChannelType>,
     /// Aggregation mode for downsampling
     pub aggregation_mode: AggregationMode,
-    /// Aggregation trigger threshold (None = use mode's default)
-    #[serde(default)]
-    pub aggregation_threshold: Option<usize>,
     /// Maximum target points for display aggregation (4K display cap)
     /// This limits how many points are sent to the frontend for rendering.
     #[serde(default = "default_max_target_points")]
@@ -74,10 +56,13 @@ pub struct PlotterConfig {
     /// Cache is invalidated when pixel width changes by more than this percentage.
     #[serde(default = "default_pixel_width_threshold")]
     pub pixel_width_threshold_percent: f32,
-    /// Raw points per stored bucket (see `default_bucket_size`). Kept
-    /// configurable for tests; level-up never changes it.
-    #[serde(default = "default_bucket_size")]
-    pub bucket_size: usize,
+    /// Age span A of tier 0 (1 ms cells) in the tiered storage (ADR-16). Tier
+    /// k >= 1 covers ages [A * 2^(k-1), A * 2^k) with 2^k-ms cells, so every
+    /// tier holds about A / 2 cells. For a LIVE window to be drawn from cells no
+    /// wider than its display cells, A must be at least `max_target_points`.
+    /// Tests use small values to exercise the tiers.
+    #[serde(default = "default_tier0_span_ms")]
+    pub tier0_span_ms: u64,
 }
 
 fn default_max_target_points() -> u32 {
@@ -88,24 +73,20 @@ fn default_pixel_width_threshold() -> f32 {
     0.2
 }
 
-/// Raw points per stored bucket. 1 = keep every sample until the per-channel
-/// cap (`max_points`) forces a level-up. Grouping by a fixed COUNT averaged slow
-/// streams too (1 Hz became 10 s buckets) and changed already-drawn points when
-/// the group filled (2026-11-04, docs/27 PF-1).
-fn default_bucket_size() -> usize {
-    1
+/// 2^12 ms: a power of two (tier boundaries fall on cell boundaries of every
+/// tier) and >= the 4000-point display cap.
+fn default_tier0_span_ms() -> u64 {
+    4096
 }
 
 impl Default for PlotterConfig {
     fn default() -> Self {
         Self {
-            max_points: 10000,
             channel_types: HashMap::new(),
             aggregation_mode: AggregationMode::Peak,
-            aggregation_threshold: None,
             max_target_points: default_max_target_points(),
             pixel_width_threshold_percent: default_pixel_width_threshold(),
-            bucket_size: default_bucket_size(),
+            tier0_span_ms: default_tier0_span_ms(),
         }
     }
 }

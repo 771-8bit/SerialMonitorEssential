@@ -189,21 +189,26 @@ flowchart TB
 
 #### P-6: 量子化の性質 （SYS-F-512）— **未実装（例示テストで代替中）**
 
-> `quantize_bucket_width_125(x) >= max(x, 1)` かつ、出力は必ず 1-2-5 系列であり、
-> `x <= y` ならば `q(x) <= q(y)`（単調性）。
+> `quantize_bucket_width_pow2(x) >= max(x, 1)` かつ、出力は必ず 2 の冪であり、
+> `x <= y` ならば `q(x) <= q(y)`（単調性）。2026-11-04 に 1-2-5 系列から 2 の冪へ変更（ADR-16、保存の段と入れ子にするため）。
 
-`test_quantize_bucket_width_125` が 22 の境界ケースを網羅しており、優先度は低い。
+`test_quantize_bucket_width_pow2` が境界ケースを網羅しており（実装は標準の `next_power_of_two`）、優先度は低い。
 
-#### P-7: バッチ等価性 （SYS-NF-604）— **実装済（弱化あり）: `prop_batch_equivalence`**
+#### P-7: バッチ等価性 （SYS-NF-604）— **実装済（2026-11-04 から全領域で強形）: `prop_batch_equivalence`**
 
 > N 点を 1 回のバッチで投入した結果と、1 点ずつ N 回投入した結果が一致する。
 
-- 実装で判明した本質的差異: `add_data_point` は毎点 `maybe_aggregate` を呼ぶが、
-  バッチは末尾で 1 回だけ呼ぶ。level-up が起きない領域では表示出力は完全一致
-  （プロパティは aligned_data / channel_names / band_data の完全等価を検査）。
-  level-up が起きる領域では刻みの違いからバケット境界が正当に異なるため、
-  「チャンネル集合・x レンジ・表現点数の保存・min/max 包絡の完全一致」という
-  最強の真である性質に弱化して検査する（テスト内コメントに機構を記載）。
+- `add_data_point` は毎点、バッチは末尾で 1 回だけ段の折り畳み（ADR-16）を行うが、
+  セルの所属は最新のデータ時刻だけで決まり、合わせ方は結合的なので、両経路は同じセルを持つ。
+  Peak は aligned_data・band_data が完全一致、Average は band が完全一致で中心線（sum / count）のみ
+  浮動小数の加算順序の誤差を許す。かつての level-up 領域の弱化（刻みの違いでバケット境界が
+  変わった）は ADR-16 で解消した。
+
+#### P-14: LIVE 窓は窓内の生サンプルだけで描かれる （SYS-F-511 / 517, UN-01）— **実装済: `prop_live_window_is_drawn_from_raw_samples`**
+
+> 既定の段の幅で、任意のストリームと LIVE 窓（1〜300 秒、50〜4000 px）について、Peak の描画が
+> 窓内の生サンプルから直接求めた包絡線と一致する（窓の左端で切れる表示セルだけ除く）。
+> 段の折り畳みのタイミングに依存しないことの直接の検査。段を早く畳みすぎる変異で落ちることを確認済。
 
 #### P-8: 読み出しの一貫性 （SYS-F-203）— **実装済: `prop_get_data_split_read_consistency`**
 
@@ -272,10 +277,11 @@ flowchart TB
 | P-1 チャンク分割不変性 | `prop_chunking_invariance`, `prop_parser_never_panics_on_arbitrary_bytes`, `prop_numeric_roundtrip` | **実装済** |
 | P-3 統計不変量 | `prop_invariant_min_le_avg_le_max`, `prop_minmax_envelope_preserved` | **実装済** |
 | P-5 整列バケットの安定性 | `prop_aligned_realtime_stability` | **実装済** |
-| P-7 バッチ等価性 | `prop_batch_equivalence` | **実装済**（level-up 領域は弱化、機構文書化） |
+| P-7 バッチ等価性 | `prop_batch_equivalence` | **実装済**（2026-11-04 から全領域で強形） |
+| P-14 LIVE 窓は生サンプルだけで決まる | `prop_live_window_is_drawn_from_raw_samples` | **実装済**（2026-11-04） |
 | P-8 読み出し一貫性 | `prop_get_data_split_read_consistency` | **実装済**（INV-13 を発見） |
 | P-9 バージョン単調性 | `prop_version_monotonic` | **実装済** |
-| P-4 点数保存 | `prop_count_conservation`, `test_count_conservation_across_level_ups` | **実装済** |
+| P-4 点数保存 | `prop_count_conservation`, `test_count_conservation_across_tier_folding` | **実装済** |
 | P-10 マスクの冪等性・有界性 | `prop_mask_is_idempotent`, `prop_slots_match_placeholders`, `prop_template_is_bounded` | **実装済** |
 | P-11 重大度の分割不変性 | `prop_severity_is_split_invariant` | **実装済** |
 | P-12 予算の非超過と省略の申告 | `prop_render_never_exceeds_budget`, `prop_withholding_is_always_reported` | **実装済** |

@@ -19,6 +19,11 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ### Changed
 
+- Plotter: samples are now stored in time-aligned tiers (fine for recent data, coarser for
+  older data, boundaries never move). Before, after about 10,000 samples per channel the whole
+  history was re-binned periodically, so even the default 10 s window became coarse every 50 s
+  at 100 Hz. A live window is now drawn from the samples in it alone, and memory per channel
+  stays bounded.
 - Plotter: the default downsampling mode **LTTB is replaced by Peak**, which draws the minimum and
   maximum sample of every pixel column at their real times. LTTB drew bucket averages, so a
   single-sample spike of 400 was drawn as about 41 in a 10 s window and smaller spikes vanished in
