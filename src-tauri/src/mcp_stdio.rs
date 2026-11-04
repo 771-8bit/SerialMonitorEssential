@@ -717,11 +717,10 @@ pub fn render_find(res: &Value, max_chars: usize) -> String {
 
     // カバレッジは常に出す（原則 5: 裸のゼロを禁じる）
     let requested = end.saturating_sub(start);
-    let coverage = if requested == 0 {
-        100
-    } else {
-        (scanned.saturating_mul(100) / requested).min(100)
-    };
+    let coverage = scanned
+        .saturating_mul(100)
+        .checked_div(requested)
+        .map_or(100, |pct| pct.min(100));
     let mut cov =
         format!("scanned {scanned} of {requested} bytes in offset {start}..{end} ({coverage}%)");
     if gap > 0 {

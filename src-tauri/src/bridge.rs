@@ -1506,11 +1506,10 @@ fn method_sample(ctx: &BridgeCtx, params: &Value) -> Result<Value, String> {
         // 裸の空応答を返さない: 何も出せなかった理由を必ず言う
         blocks.push(Block::new(
             Section::IndexHealth,
-            vec![format!(
-                "NOTE  no complete line in the window that was read \
+            vec!["NOTE  no complete line in the window that was read \
                  (partial lines at the edges are dropped on purpose). \
                  Try a larger n, or serial_read_range near the offset you care about."
-            )],
+                .to_string()],
         ));
     }
     blocks.push(Block::new(

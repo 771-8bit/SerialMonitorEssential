@@ -252,7 +252,10 @@ impl SpillLog {
                 break;
             }
             remaining -= n as u64;
-            for chunk in buf[..n * STATE_RECORD_BYTES].chunks_exact(STATE_RECORD_BYTES) {
+            for chunk in buf[..n * STATE_RECORD_BYTES]
+                .as_chunks::<STATE_RECORD_BYTES>()
+                .0
+            {
                 let start = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
                 let end = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
                 let id = u32::from_le_bytes(chunk[16..20].try_into().unwrap()) as usize;
@@ -338,7 +341,7 @@ impl SpillLog {
                 break;
             }
             remaining -= n as u64;
-            for chunk in buf[..n * RECORD_BYTES].chunks_exact(RECORD_BYTES) {
+            for chunk in buf[..n * RECORD_BYTES].as_chunks::<RECORD_BYTES>().0 {
                 let cell = SpillCell::decode(chunk);
                 if cell.ts >= end {
                     break 'outer;
