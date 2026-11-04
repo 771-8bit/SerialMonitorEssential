@@ -114,6 +114,11 @@
   font-size: 12px;
   color: var(--text-dim);
   white-space: nowrap;
+  /* In the MCP Server row, right-aligned before Theme; long device paths are cut */
+  margin-left: auto;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .reconnect-status.waiting {
@@ -128,4 +133,8 @@
   gap: 6px;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.reconnect-status + .theme-control {
+  margin-left: 16px;
 }

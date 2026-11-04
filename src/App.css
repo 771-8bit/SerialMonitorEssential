@@ -161,6 +161,18 @@ textarea {
   gap: 8px;
 }
 
+/* The port list takes whatever width the controls on its right leave; its width never
+   depends on the device names. The other controls keep their own fixed sizes. */
+.settings-row > * {
+  flex: none;
+}
+
+.settings-row > .port-select {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 120px;
+}
+
 .settings-advanced {
   display: flex;
   gap: 12px;
@@ -234,7 +246,8 @@ button:disabled {
 }
 
 .connect-button {
-  min-width: 80px;
+  /* Fixed: Connect / Disconnect / Cancel must not resize the port list */
+  width: 100px;
 }
 
 .connect-button.connected {

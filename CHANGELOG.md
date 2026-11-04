@@ -33,6 +33,9 @@ Windows build: NSIS installer only, as for beta.1.
   the window size/position are not stored ([#7]).
 - Opening the port dropdown re-enumerates the ports first, so a device plugged in a moment ago
   is listed ([#5]).
+- The port list fills the width left by the controls on its right, which are right-aligned; its
+  width no longer depends on the device names. The Auto Reconnect status moved to the MCP Server
+  row.
 - The window title bar follows the chosen theme.
 
 ### Fixed

@@ -351,17 +351,6 @@ export default function SettingsPanel({
           />
           Auto Reconnect
         </label>
-        {reconnectWaitingFor !== null ? (
-          <span className="reconnect-status waiting" role="status">
-            Waiting for {reconnectWaitingFor}…
-          </span>
-        ) : (
-          reconnectedAt !== null && (
-            <span className="reconnect-status" role="status">
-              Reconnected {new Date(reconnectedAt).toLocaleTimeString()}
-            </span>
-          )
-        )}
       </div>
 
       <div className="settings-advanced">
@@ -485,6 +474,24 @@ export default function SettingsPanel({
               )}
             </span>
           </>
+        )}
+
+        {/* Auto Reconnect status. Kept out of the first row: its text contains the
+            device path, and nothing there may change the width of the port list */}
+        {reconnectWaitingFor !== null ? (
+          <span
+            className="reconnect-status waiting"
+            role="status"
+            title={`Waiting for ${reconnectWaitingFor}…`}
+          >
+            Waiting for {reconnectWaitingFor}…
+          </span>
+        ) : (
+          reconnectedAt !== null && (
+            <span className="reconnect-status" role="status">
+              Reconnected {new Date(reconnectedAt).toLocaleTimeString()}
+            </span>
+          )
         )}
 
         <label className="theme-control" title="Color theme (System follows the OS setting)">
