@@ -221,6 +221,8 @@ pub struct DisplayRow {
     offset: u64,
     hex: String,
     ascii: String,
+    /// Reception time of the row's first byte (`HH:MM:SS.d`) when requested
+    timestamp: Option<String>,
 }
 
 /// Payload for get_display_rows command
@@ -257,6 +259,23 @@ fn bytes_to_hex(data: &[u8]) -> String {
         .join(" ")
 }
 
+/// Hex rows of `BYTES_PER_ROW` bytes as in the Hex view, each preceded by the
+/// reception time of its first byte (`data` starts at offset 0), one row per line
+fn hex_rows_with_timestamps(
+    data: &[u8],
+    separator: &str,
+    timestamp_at: impl Fn(u64) -> String,
+) -> String {
+    let mut out = String::with_capacity(data.len() / BYTES_PER_ROW * 72 + 72);
+    for (i, row) in data.chunks(BYTES_PER_ROW).enumerate() {
+        out.push_str(&timestamp_at((i * BYTES_PER_ROW) as u64));
+        out.push_str(separator);
+        out.push_str(&bytes_to_hex(row));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Convert bytes to ASCII string
 fn bytes_to_ascii(data: &[u8]) -> String {
     data.iter().map(|&b| byte_to_ascii(b)).collect()
@@ -267,7 +286,9 @@ pub fn get_display_rows(
     state: State<'_, SerialState>,
     start_row: u64,
     row_count: u32,
+    show_timestamp: Option<bool>,
 ) -> Result<DisplayRowsPayload, String> {
+    let show_timestamp = show_timestamp.unwrap_or(false);
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -332,6 +353,9 @@ pub fn get_display_rows(
                     offset: row_offset,
                     hex: bytes_to_hex(row_data),
                     ascii: bytes_to_ascii(row_data),
+                    timestamp: show_timestamp.then(|| {
+                        format_line_timestamp(data_store.get_timestamp_for_offset(row_offset))
+                    }),
                 });
             }
         }
@@ -706,8 +730,16 @@ pub fn get_clipboard_text(
         let to_read = total.min(u32::MAX as u64) as u32;
         let data = data_store.get_data(0, to_read)?;
 
+        // Timestamp ON in the Hex view: the rows as shown, each with its time
+        if let (Some(separator), true) = (timestamp_separator.as_deref(), mode == "hex") {
+            validate_timestamp_separator(separator)?;
+            return Ok(hex_rows_with_timestamps(&data, separator, |offset| {
+                format_line_timestamp(data_store.get_timestamp_for_offset(offset))
+            }));
+        }
+
         // Timestamp ON in the ASCII view (issue #4): the same text as Save
-        if let (Some(separator), false) = (timestamp_separator.as_deref(), mode == "hex") {
+        if let Some(separator) = timestamp_separator.as_deref() {
             validate_timestamp_separator(separator)?;
             let mut out = Vec::new();
             data_store.write_timestamped(&mut out, separator, format_line_timestamp)?;
@@ -770,6 +802,17 @@ mod tests {
         // Degenerate inputs fall back to the whole string
         assert_eq!(extract_port_path("weird ) ( order"), "weird ) ( order");
         assert_eq!(extract_port_path(""), "");
+    }
+
+    #[test]
+    fn hex_rows_with_timestamps_puts_each_row_on_its_own_line() {
+        let data: Vec<u8> = (0u8..20).collect();
+        let text = hex_rows_with_timestamps(&data, " > ", |offset| format!("t{offset}"));
+        assert_eq!(
+            text,
+            "t0 > 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\r\nt16 > 10 11 12 13\r\n"
+        );
+        assert_eq!(hex_rows_with_timestamps(&[], ",", |_| String::new()), "");
     }
 
     #[test]

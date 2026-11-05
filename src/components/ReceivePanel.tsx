@@ -18,9 +18,10 @@ export interface ReceiveOptions {
 }
 
 /**
- * What Save / Copy produce (issue #4): with Timestamp ON in the ASCII view, the text
- * with a timestamp and the chosen separator at the start of every line; otherwise
- * the data as before (raw bytes for Save, plain or hex text for Copy).
+ * What Save / Copy produce (issue #4). With Timestamp ON, Copy gives every line (Hex:
+ * every 16-byte row) with its timestamp and the chosen separator, and Save in the
+ * ASCII view writes the same text. Otherwise the data as before (raw bytes for Save,
+ * plain or hex text for Copy); Save in the Hex view always writes the raw bytes.
  */
 export interface OutputFormat {
   mode: ViewMode;
@@ -78,7 +79,7 @@ export default function ReceivePanel({
 
   const outputFormat: OutputFormat = {
     mode: viewMode,
-    timestampSeparator: viewMode === 'ascii' && showTimestamp ? timestampSeparator : null,
+    timestampSeparator: showTimestamp ? timestampSeparator : null,
   };
 
   const handleCopy = () => onCopy(outputFormat);
@@ -124,6 +125,7 @@ export default function ReceivePanel({
             autoScroll={autoScroll}
             initialOffset={scrollOffset}
             onScrollChange={setScrollOffset}
+            showTimestamp={showTimestamp}
           />
         ) : (
           <AsciiViewer
@@ -201,24 +203,24 @@ export default function ReceivePanel({
           </label>
 
           <label
-            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
-            title="Show timestamp (ASCII mode only)"
+            className="control-label"
+            title="Show the reception time of each line (Hex: of each row's first byte)"
           >
             <input
               type="checkbox"
               checked={showTimestamp}
               onChange={(e) => setShowTimestamp(e.target.checked)}
-              disabled={viewMode === 'hex'}
             />
             Timestamp
             <select
               value={timestampSeparator}
               onChange={(e) => setTimestampSeparator(e.target.value as TimestampSeparator)}
-              disabled={viewMode === 'hex' || !showTimestamp}
+              disabled={!showTimestamp}
               className="separator-select"
               title="Separator between Timestamp and Data"
-              style={{ opacity: !showTimestamp || viewMode === 'hex' ? 0.5 : 1 }}
+              style={{ opacity: !showTimestamp ? 0.5 : 1 }}
             >
+              <option value=" > ">&gt;</option>
               <option value=" ">Space</option>
               <option value=",">Comma</option>
               <option value="	">Tab</option>
@@ -244,7 +246,7 @@ export default function ReceivePanel({
           <button
             onClick={handleExport}
             title={
-              outputFormat.timestampSeparator !== null
+              outputFormat.timestampSeparator !== null && viewMode === 'ascii'
                 ? 'Save as text with timestamps'
                 : 'Save the received bytes to a file'
             }

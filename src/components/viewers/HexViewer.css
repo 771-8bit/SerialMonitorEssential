@@ -32,6 +32,14 @@
   background-color: var(--bg-hover);
 }
 
+.hex-timestamp {
+  width: 90px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  user-select: none;
+  cursor: default;
+}
+
 .hex-offset {
   width: 70px;
   color: var(--syntax-offset);

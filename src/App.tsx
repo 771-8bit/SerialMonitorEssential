@@ -320,8 +320,8 @@ function App() {
     }
 
     // Timestamp ON (ASCII view): text with a timestamp on every line (issue #4).
-    // Otherwise the received bytes exactly as they arrived.
-    const withTimestamps = format.timestampSeparator !== null;
+    // Otherwise, and always in the Hex view, the received bytes exactly as they arrived.
+    const withTimestamps = format.mode === 'ascii' && format.timestampSeparator !== null;
     try {
       const filePath = await save(
         withTimestamps

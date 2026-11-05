@@ -250,7 +250,7 @@ describe('App', () => {
       });
     });
 
-    it('copies without timestamps in the Hex view', async () => {
+    it('copies the hex rows with timestamps in the Hex view', async () => {
       await renderWithData();
 
       fireEvent.click(
@@ -261,8 +261,39 @@ describe('App', () => {
 
       expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
         mode: 'hex',
+        timestampSeparator: ' ',
+      });
+    });
+
+    it('copies the hex rows without timestamps when Timestamp is OFF', async () => {
+      await renderWithData();
+
+      fireEvent.click(
+        screen.getByTitle('Toggle between Hex and ASCII view').querySelector('input')!
+      );
+      fireEvent.click(screen.getByLabelText('Timestamp'));
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
+        mode: 'hex',
         timestampSeparator: null,
       });
+    });
+
+    it('saves the raw bytes in the Hex view even with Timestamp ON', async () => {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      vi.mocked(save).mockResolvedValue('C:/tmp/log.bin');
+      await renderWithData();
+
+      fireEvent.click(
+        screen.getByTitle('Toggle between Hex and ASCII view').querySelector('input')!
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('export_log', { path: 'C:/tmp/log.bin' });
+      expect(mockInvoke).not.toHaveBeenCalledWith('export_text_with_timestamps', expect.anything());
     });
   });
 
