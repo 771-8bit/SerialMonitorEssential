@@ -23,15 +23,23 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
 
 - Lossless receive at high line rates: data is kept in fixed-size chunks and spilled to disk,
   so long captures do not grow memory without bound
-- Hex / ASCII views with virtual scrolling, timestamps, line wrap and visible control characters
+- Hex / ASCII views with virtual scrolling, timestamps (in both views), line wrap, and CR / LF /
+  NUL shown as symbols when you want to see them. CR, LF and CRLF all end a line
 - Regex search and filter over the whole capture
-- Send text or hex, with a selectable line ending (none / CR / LF / CRLF) and input history
+- Send text or hex (`48 65 6C`, `0A-0B`, `1,2,3`), with a selectable line ending
+  (none / CR / LF / CRLF) and input history (↑ / ↓)
 - Any baud rate the driver accepts (including non-standard ones), DTR / RTS control, hardware
   or software flow control
-- **Auto Reconnect**: when the board resets or is unplugged and comes back on the same port, the
-  app reopens it and keeps adding to the same capture, so the output from before the reset is
-  not lost
-- Save the capture as a binary file, or copy it as hex or ASCII
+- **Auto Connect**: connects to the selected port whenever it is available — at startup, when
+  the board is plugged in, and when it comes back after a reset or unplug. The capture
+  continues, so the output from before the reset is not lost. Disconnect turns it off
+- Save the capture as a binary file or as text with timestamps, or copy it as hex or ASCII
+
+DTR and RTS are off by default, so connecting does not reset the board (an Arduino Uno resets
+when DTR turns on, as with the Arduino IDE; an ESP32 is held in reset by RTS without DTR).
+Boards with native USB (Leonardo, Raspberry Pi Pico, ESP32-S3 USB) may send nothing until DTR
+is on: tick **DtrEnable** for those. Hover the **?** next to the checkboxes for details. The
+other defaults match the earlier C# version: no line ending, Send with Enter on.
 
 ### Plotter
 
