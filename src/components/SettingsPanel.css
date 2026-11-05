@@ -8,12 +8,12 @@
 
 /* Baud rate trigger button (dropdown closed state) */
 .baud-trigger {
-  border: 1px solid #444;
+  border: 1px solid var(--border);
   border-radius: 3px;
   padding: 4px 8px;
   font-size: 13px;
-  background-color: #2a2a2a;
-  color: #eee;
+  background-color: var(--bg-input);
+  color: var(--text);
   cursor: pointer;
   height: 28px;
   box-sizing: border-box;
@@ -23,7 +23,7 @@
 }
 
 .baud-trigger.disabled {
-  color: #888;
+  color: var(--text-dim);
   cursor: not-allowed;
 }
 
@@ -48,8 +48,8 @@
   top: 100%;
   left: 0;
   width: 100%;
-  border: 1px solid #444;
-  background-color: #2a2a2a;
+  border: 1px solid var(--border);
+  background-color: var(--bg-input);
   list-style: none;
   padding: 0;
   margin: 0;
@@ -61,12 +61,12 @@
   padding: 4px 8px;
   cursor: pointer;
   font-size: 13px;
-  color: #eee;
-  border-bottom: 1px solid #333;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
 }
 
 .baud-dropdown-item:hover {
-  background-color: #3a3a3a;
+  background-color: var(--bg-hover);
 }
 
 .baud-dropdown-item:last-child {
@@ -77,12 +77,12 @@
 .bridge-endpoint {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 12px;
-  color: #8cf;
+  color: var(--info);
 }
 
 .bridge-hint {
   font-size: 12px;
-  color: #888;
+  color: var(--text-dim);
 }
 
 .bridge-guide-button {
@@ -93,7 +93,7 @@
 
 .bridge-preview {
   font-family: 'Consolas', 'Courier New', monospace;
-  color: #aaa;
+  color: var(--text-muted);
 }
 
 /* Edit option in dropdown */
@@ -101,21 +101,64 @@
   padding: 4px 8px;
   cursor: pointer;
   font-size: 13px;
-  color: #8cf;
+  color: var(--info);
   font-style: italic;
 }
 
 .baud-dropdown-edit:hover {
-  background-color: #3a3a3a;
+  background-color: var(--bg-hover);
 }
 
 /* Auto reconnect state, next to the checkbox */
 .reconnect-status {
   font-size: 12px;
-  color: #888;
+  color: var(--text-dim);
   white-space: nowrap;
+  /* In the MCP Server row, right-aligned before Theme; long device paths are cut */
+  margin-left: auto;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .reconnect-status.waiting {
-  color: #e0a040;
+  color: var(--warn-text);
+}
+
+/* Theme selector, at the right end of the MCP Server row (issue #6) */
+.theme-control {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.reconnect-status + .theme-control {
+  margin-left: 16px;
+}
+
+/* "?" next to DtrEnable / RtsEnable: the note appears on hover */
+.help-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: -4px;
+  border: 1px solid var(--text-dim);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+.help-mark:hover,
+.help-mark:focus-visible {
+  color: var(--text);
+  border-color: var(--text);
 }

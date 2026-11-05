@@ -4,6 +4,8 @@ import LineChart, { type LineChartHandle } from './LineChart';
 import { COLORS } from './chartColors';
 import { StateRow } from './stateTimelinePlugin';
 import './PlotterWindow.css';
+import { usePersistentState, isOneOf } from '../../utils/persist';
+import { useTheme } from '../../utils/theme';
 
 // Aggregation mode type matching Rust AggregationMode
 type AggregationMode = 'Average' | 'Peak';
@@ -67,6 +69,8 @@ export const WINDOW_OPTIONS = [1, 2, 5, 10, 30, 60, 120, 300] as const;
 const DEFAULT_WINDOW_SEC = 10;
 
 export default function PlotterWindow() {
+  // Follow the Theme setting (issue #6)
+  const [, , theme] = useTheme();
   const [data, setData] = useState<PlotterChartPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(true);
@@ -76,11 +80,20 @@ export default function PlotterWindow() {
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set());
 
   // Aggregation mode setting
-  const [aggregationMode, setAggregationMode] = useState<AggregationMode>('Peak');
+  // Remembered across restarts (issue #7); the backend is told on mount below
+  const [aggregationMode, setAggregationMode] = usePersistentState<AggregationMode>(
+    'plotter.aggregationMode',
+    'Peak',
+    isOneOf<AggregationMode>(['Peak', 'Average'])
+  );
 
   // Width of the sliding live window (seconds)
-  const [windowSec, setWindowSec] = useState<number>(DEFAULT_WINDOW_SEC);
-  const windowSecRef = useRef(DEFAULT_WINDOW_SEC);
+  const [windowSec, setWindowSec] = usePersistentState<number>(
+    'plotter.windowSec',
+    DEFAULT_WINDOW_SEC,
+    isOneOf<number>(WINDOW_OPTIONS)
+  );
+  const windowSecRef = useRef(windowSec);
 
   // View state: LIVE (following) vs Inspect (frozen on a chosen range).
   // Paused is a third state, driven by isRunning.
@@ -111,9 +124,14 @@ export default function PlotterWindow() {
   // Range currently inspected (seconds), used to re-request on pan/zoom
   const inspectRangeRef = useRef<{ minSec: number; maxSec: number } | null>(null);
 
+  const aggregationModeAtMount = useRef(aggregationMode);
+
   // Start plotter thread on mount
   useEffect(() => {
     const startThread = async () => {
+      // The mode lives in the backend for the whole process; send the remembered one
+      // so the selector and the drawing always agree (also after reopening this window)
+      invoke('set_aggregation_mode', { mode: aggregationModeAtMount.current }).catch(console.error);
       try {
         await invoke('start_plotter_thread');
         setThreadStarted(true);
@@ -399,7 +417,7 @@ export default function PlotterWindow() {
         void fetchData();
       }
     },
-    [fetchData]
+    [fetchData, setWindowSec]
   );
 
   // Format time duration
@@ -482,6 +500,7 @@ export default function PlotterWindow() {
             <div className="chart-area" ref={chartContainerRef}>
               <LineChart
                 ref={chartHandleRef}
+                theme={theme}
                 alignedData={data!.aligned_data}
                 channelNames={data!.channel_names}
                 bandData={data!.band_data}
@@ -547,6 +566,10 @@ export default function PlotterWindow() {
               </li>
               <li>
                 <strong>Labeled values:</strong> <code>temp:25.5,humidity:60,state:RUNNING</code>
+              </li>
+              <li>
+                <strong>Name=value pairs:</strong> <code>V=30.58 I=0.82 age=11ms</code> or{' '}
+                <code>temp 25.5 hum 60</code>
               </li>
             </ul>
           </div>

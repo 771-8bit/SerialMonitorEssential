@@ -1,10 +1,11 @@
 import { useState, useCallback } from 'react';
 import HexViewer from './viewers/HexViewer';
 import AsciiViewer from './viewers/AsciiViewer';
+import { usePersistentState, isBoolean, isOneOf } from '../utils/persist';
 import './ReceivePanel.css';
 
 export type ViewMode = 'hex' | 'ascii';
-export type TimestampSeparator = ' ' | ',' | '\t';
+export type TimestampSeparator = ' > ' | ' ' | ',' | '\t';
 
 export interface ReceiveOptions {
   viewMode: ViewMode;
@@ -16,11 +17,23 @@ export interface ReceiveOptions {
   searchQuery: string;
 }
 
+/**
+ * What Save / Copy produce (issue #4). With Timestamp ON, Copy gives every line (Hex:
+ * every 16-byte row) with its timestamp and the chosen separator, and Save in the
+ * ASCII view writes the same text. Otherwise the data as before (raw bytes for Save,
+ * plain or hex text for Copy); Save in the Hex view always writes the raw bytes.
+ */
+export interface OutputFormat {
+  mode: ViewMode;
+  /** Separator after each line's timestamp, or null for no timestamps */
+  timestampSeparator: TimestampSeparator | null;
+}
+
 interface ReceivePanelProps {
   totalBytes: number;
-  onExport: () => void;
+  onExport: (format: OutputFormat) => void;
   onClear: () => void;
-  onCopy: (mode: ViewMode) => void;
+  onCopy: (format: OutputFormat) => void;
   autoScroll: boolean;
   onAutoScrollChange: (enabled: boolean) => void;
 }
@@ -34,12 +47,28 @@ export default function ReceivePanel({
   onAutoScrollChange,
 }: ReceivePanelProps) {
   // View mode: 'hex' (Binary checked) or 'ascii' (Binary unchecked)
-  const [viewMode, setViewMode] = useState<ViewMode>('ascii');
+  // (view options are remembered across restarts - issue #7)
+  const [viewMode, setViewMode] = usePersistentState<ViewMode>(
+    'receive.viewMode',
+    'ascii',
+    isOneOf<ViewMode>(['ascii', 'hex'])
+  );
 
   // Display options (ASCII mode only)
-  const [lineWrap, setLineWrap] = useState(true);
-  const [showTimestamp, setShowTimestamp] = useState(true);
-  const [timestampSeparator, setTimestampSeparator] = useState<TimestampSeparator>(' ');
+  const [lineWrap, setLineWrap] = usePersistentState('receive.lineWrap', false, isBoolean);
+  // C# version: "Show [CRLF]" / "Show [NUL]", both off by default
+  const [showCrLf, setShowCrLf] = usePersistentState('receive.showCrLf', false, isBoolean);
+  const [showNul, setShowNul] = usePersistentState('receive.showNul', false, isBoolean);
+  const [showTimestamp, setShowTimestamp] = usePersistentState(
+    'receive.showTimestamp',
+    true,
+    isBoolean
+  );
+  const [timestampSeparator, setTimestampSeparator] = usePersistentState<TimestampSeparator>(
+    'receive.timestampSeparator',
+    ' > ',
+    isOneOf<TimestampSeparator>([' > ', ' ', ',', '\t'])
+  );
 
   // Scroll position as byte offset (preserved across mode switches)
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -48,9 +77,13 @@ export default function ReceivePanel({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterEnabled, setFilterEnabled] = useState(false);
 
-  const handleCopy = useCallback(() => {
-    onCopy(viewMode);
-  }, [onCopy, viewMode]);
+  const outputFormat: OutputFormat = {
+    mode: viewMode,
+    timestampSeparator: showTimestamp ? timestampSeparator : null,
+  };
+
+  const handleCopy = () => onCopy(outputFormat);
+  const handleExport = () => onExport(outputFormat);
 
   const handlePlotter = useCallback(async () => {
     try {
@@ -92,6 +125,7 @@ export default function ReceivePanel({
             autoScroll={autoScroll}
             initialOffset={scrollOffset}
             onScrollChange={setScrollOffset}
+            showTimestamp={showTimestamp}
           />
         ) : (
           <AsciiViewer
@@ -102,6 +136,8 @@ export default function ReceivePanel({
             initialOffset={scrollOffset}
             onScrollChange={setScrollOffset}
             timestampSeparator={timestampSeparator}
+            showCrLf={showCrLf}
+            showNul={showNul}
           />
         )}
       </div>
@@ -142,34 +178,49 @@ export default function ReceivePanel({
 
           <label
             className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
-            title="Show timestamp (ASCII mode only)"
+            title="Show CR, LF and TAB as symbols (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={showCrLf}
+              onChange={(e) => setShowCrLf(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Show CR/LF
+          </label>
+
+          <label
+            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
+            title="Show NUL bytes as symbols instead of hiding them (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={showNul}
+              onChange={(e) => setShowNul(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Show NUL
+          </label>
+
+          <label
+            className="control-label"
+            title="Show the reception time of each line (Hex: of each row's first byte)"
           >
             <input
               type="checkbox"
               checked={showTimestamp}
               onChange={(e) => setShowTimestamp(e.target.checked)}
-              disabled={viewMode === 'hex'}
             />
             Timestamp
             <select
               value={timestampSeparator}
               onChange={(e) => setTimestampSeparator(e.target.value as TimestampSeparator)}
-              disabled={viewMode === 'hex' || !showTimestamp}
+              disabled={!showTimestamp}
               className="separator-select"
               title="Separator between Timestamp and Data"
-              style={{
-                marginLeft: '8px',
-                background: '#3c3c3c',
-                color: '#d4d4d4',
-                border: '1px solid #555',
-                borderRadius: '3px',
-                padding: '1px 4px',
-                fontSize: '11px',
-                outline: 'none',
-                cursor: 'pointer',
-                opacity: !showTimestamp || viewMode === 'hex' ? 0.5 : 1,
-              }}
+              style={{ opacity: !showTimestamp ? 0.5 : 1 }}
             >
+              <option value=" > ">&gt;</option>
               <option value=" ">Space</option>
               <option value=",">Comma</option>
               <option value="	">Tab</option>
@@ -192,10 +243,24 @@ export default function ReceivePanel({
           <button onClick={handlePlotter} className="plotter-button" title="Open Plotter (Phase 7)">
             Plotter
           </button>
-          <button onClick={onExport} title="Save to file">
+          <button
+            onClick={handleExport}
+            title={
+              outputFormat.timestampSeparator !== null && viewMode === 'ascii'
+                ? 'Save as text with timestamps'
+                : 'Save the received bytes to a file'
+            }
+          >
             Save
           </button>
-          <button onClick={handleCopy} title="Copy all data to clipboard">
+          <button
+            onClick={handleCopy}
+            title={
+              outputFormat.timestampSeparator !== null
+                ? 'Copy all data with timestamps to the clipboard'
+                : 'Copy all data to the clipboard'
+            }
+          >
             Copy
           </button>
           <button onClick={onClear} title="Clear all data (including disk)">

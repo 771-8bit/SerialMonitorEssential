@@ -2,6 +2,7 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ROW_HEIGHT, BUFFER_ROWS, BYTES_PER_ROW } from './viewerConstants';
 import { useByteScroll } from './useByteScroll';
+import { rowAtScrollTop } from './scrollUtils';
 import { renderAsciiColumn } from '../../utils/hexUtils';
 import './HexViewer.css';
 
@@ -9,6 +10,7 @@ interface DisplayRow {
   offset: number;
   hex: string;
   ascii: string;
+  timestamp: string | null;
 }
 
 interface DisplayRowsPayload {
@@ -21,6 +23,8 @@ interface HexViewerProps {
   autoScroll: boolean;
   initialOffset?: number;
   onScrollChange?: (byteOffset: number) => void;
+  /** Show the reception time of each row's first byte */
+  showTimestamp?: boolean;
 }
 
 export default function HexViewer({
@@ -28,6 +32,7 @@ export default function HexViewer({
   autoScroll,
   initialOffset = 0,
   onScrollChange = () => {},
+  showTimestamp = false,
 }: HexViewerProps) {
   // Data state
   const [rows, setRows] = useState<DisplayRow[]>([]);
@@ -51,18 +56,27 @@ export default function HexViewer({
       : Math.max(1, Math.ceil(totalBytes / BYTES_PER_ROW));
 
   // Byte-based scroll
-  const { containerRef, scrollTop, scrollHeight, visibleRows, handleScroll, getByteOffset } =
-    useByteScroll({
-      totalBytes,
-      totalRows: effectiveTotalRows, // Use row-based anchoring like AsciiViewer
-      autoScroll,
-      initialOffset,
-      onScrollChange,
-    });
+  const {
+    containerRef,
+    scrollTop,
+    scrollHeight,
+    visibleRows,
+    viewportHeight,
+    handleScroll,
+    getByteOffset,
+  } = useByteScroll({
+    totalBytes,
+    totalRows: effectiveTotalRows, // Use row-based anchoring like AsciiViewer
+    autoScroll,
+    initialOffset,
+    onScrollChange,
+  });
 
   // Track visible-row count as of the last fetch, to detect viewport growth
   // (e.g. window resize) that should trigger a refetch of newly exposed rows.
   const prevVisibleRowsRef = useRef(visibleRows);
+  // Switching the timestamp column must refetch: the rows in hand lack (or carry) it
+  const prevShowTimestampRef = useRef(showTimestamp);
 
   // Fetch rows from backend
   const fetchRows = useCallback(
@@ -130,6 +144,7 @@ export default function HexViewer({
             const payload = await invoke<DisplayRowsPayload>('get_display_rows', {
               startRow: targetStartRow,
               rowCount: fetchCount,
+              showTimestamp,
             });
 
             // Only update state if this is still relevant?
@@ -150,7 +165,7 @@ export default function HexViewer({
         isFetchingRef.current = false;
       }
     },
-    [visibleRows]
+    [visibleRows, showTimestamp]
   );
 
   // Effect: fetch data when scroll position changes
@@ -162,10 +177,9 @@ export default function HexViewer({
       return;
     }
 
-    // Calculate start row from scroll ratio (works for both normal and scaled modes)
-    // Use effectiveTotalRows to stay in sync with scroll bar size
-    const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
-    const targetRow = Math.floor(scrollRatio * effectiveTotalRows);
+    // Start row for the scroll position (also reaches the last rows when the
+    // scroll height is capped for huge captures)
+    const targetRow = rowAtScrollTop(scrollTop, scrollHeight, viewportHeight, effectiveTotalRows);
     const startRow = Math.max(0, targetRow - BUFFER_ROWS);
 
     // Force refetch when totalBytes changes (new data arrived)
@@ -176,8 +190,20 @@ export default function HexViewer({
     const viewportGrew = visibleRows > prevVisibleRowsRef.current;
     prevVisibleRowsRef.current = visibleRows;
 
-    fetchRows(startRow, forceRefetch || viewportGrew);
-  }, [totalBytes, scrollTop, scrollHeight, fetchRows, effectiveTotalRows, visibleRows]);
+    const timestampToggled = showTimestamp !== prevShowTimestampRef.current;
+    prevShowTimestampRef.current = showTimestamp;
+
+    fetchRows(startRow, forceRefetch || viewportGrew || timestampToggled);
+  }, [
+    totalBytes,
+    scrollTop,
+    scrollHeight,
+    viewportHeight,
+    fetchRows,
+    effectiveTotalRows,
+    visibleRows,
+    showTimestamp,
+  ]);
 
   // Handle Ctrl+A to warn user about partial selection.
   // Skip when focus is in an editable element (Send textarea, search input,
@@ -207,9 +233,8 @@ export default function HexViewer({
   // We fetch rows starting at 'currentStartRow' (which is usually targetRow - BUFFER).
   // We need to shift the display top UP by the buffer amount so the target row aligns with scrollTop.
 
-  // Use scrollRatio to determine the "Visual Target Row" consistent with scroll position
-  const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
-  const targetRow = Math.floor(scrollRatio * effectiveTotalRows);
+  // The "Visual Target Row" for the scroll position (same mapping as the fetch)
+  const targetRow = rowAtScrollTop(scrollTop, scrollHeight, viewportHeight, effectiveTotalRows);
 
   // Calculate the theoretical offset between target and fetched data
   // If positive, it means Target (Screen) is ahead of Start (Data) -> Data is "above".
@@ -231,6 +256,7 @@ export default function HexViewer({
           <div style={{ position: 'absolute', top: displayTop, width: '100%' }}>
             {rows.map((row) => (
               <div key={row.offset} className="hex-row" style={{ height: ROW_HEIGHT }}>
+                {showTimestamp && <span className="hex-timestamp">{row.timestamp ?? ''}</span>}
                 <span className="hex-offset">
                   {row.offset.toString(16).padStart(8, '0').toUpperCase()}
                 </span>

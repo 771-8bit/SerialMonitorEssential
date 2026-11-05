@@ -23,15 +23,23 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
 
 - Lossless receive at high line rates: data is kept in fixed-size chunks and spilled to disk,
   so long captures do not grow memory without bound
-- Hex / ASCII views with virtual scrolling, timestamps, line wrap and visible control characters
+- Hex / ASCII views with virtual scrolling, timestamps (in both views), line wrap, and CR / LF /
+  NUL shown as symbols when you want to see them. CR, LF and CRLF all end a line
 - Regex search and filter over the whole capture
-- Send text or hex, with a selectable line ending (none / CR / LF / CRLF) and input history
+- Send text or hex (`48 65 6C`, `0A-0B`, `1,2,3`), with a selectable line ending
+  (none / CR / LF / CRLF) and input history (↑ / ↓)
 - Any baud rate the driver accepts (including non-standard ones), DTR / RTS control, hardware
   or software flow control
-- **Auto Reconnect**: when the board resets or is unplugged and comes back on the same port, the
-  app reopens it and keeps adding to the same capture, so the output from before the reset is
-  not lost
-- Save the capture as a binary file, or copy it as hex or ASCII
+- **Auto Connect**: connects to the selected port whenever it is available — at startup, when
+  the board is plugged in, and when it comes back after a reset or unplug. The capture
+  continues, so the output from before the reset is not lost. Disconnect turns it off
+- Save the capture as a binary file or as text with timestamps, or copy it as hex or ASCII
+
+DTR and RTS are off by default, so connecting does not reset the board (an Arduino Uno resets
+when DTR turns on, as with the Arduino IDE; an ESP32 is held in reset by RTS without DTR).
+Boards with native USB (Leonardo, Raspberry Pi Pico, ESP32-S3 USB) may send nothing until DTR
+is on: tick **DtrEnable** for those. Hover the **?** next to the checkboxes for details. The
+other defaults match the earlier C# version: no line ending, Send with Enter on.
 
 ### Plotter
 
@@ -188,15 +196,45 @@ tests run in CI, plus a smoke test under WSL2. Wayland and HiDPI have not been t
 
 ## Building from source
 
-Prerequisites: Node.js 20+, stable Rust, and the
-[Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
+### 1. Prerequisites
+
+- [Node.js](https://nodejs.org/) 20 or later
+- Stable Rust via [rustup](https://rustup.rs/) (`rustup update stable` if you already have it)
+- The [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS:
+  - **Windows:** Microsoft C++ Build Tools with the "Desktop development with C++" workload.
+    WebView2 is already part of Windows 10 (recent updates) and 11.
+  - **Ubuntu 22.04+:**
+
+    ```sh
+    sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+      librsvg2-dev libxdo-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libudev-dev \
+      build-essential pkg-config libssl-dev
+    sudo usermod -aG dialout $USER   # serial port access; log in again afterwards
+    ```
+
+### 2. Run from source
 
 ```sh
+git clone https://github.com/771-8bit/SerialMonitorEssential.git
+cd SerialMonitorEssential
 npm install
-npm run tauri dev       # run in development mode (set RUST_LOG=debug for verbose logs)
-npm run tauri build     # build installers into src-tauri/target/release/bundle
+npm run tauri dev
+```
 
-# the same checks CI runs
+`npm run tauri dev` starts the frontend dev server and builds and launches the app. The first run
+compiles all Rust dependencies and takes a few minutes; later runs are incremental. Changes to the
+frontend (`src/`) reload in place, changes to the backend (`src-tauri/`) rebuild and restart the app
+(add `-- --no-watch` to turn that off). Set `RUST_LOG=debug` for verbose backend logs.
+
+### 3. Build an installer
+
+```sh
+npm run tauri build     # installers in src-tauri/target/release/bundle (nsis/, msi/, deb/, appimage/)
+```
+
+### 4. Checks (the same as CI)
+
+```sh
 npm run type-check && npm run lint && npm run format:check && npm test
 cd src-tauri && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```

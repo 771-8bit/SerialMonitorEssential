@@ -2,8 +2,8 @@
   font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
   font-size: 13px;
   line-height: 20px;
-  background-color: #1e1e1e;
-  border: 1px solid #3c3c3c;
+  background-color: var(--bg-viewer);
+  border: 1px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
   height: 100%;
@@ -30,7 +30,7 @@
 }
 
 .ascii-row:hover {
-  background-color: #2a2d2e;
+  background-color: var(--bg-hover);
 }
 
 /* Sticky Timestamp - using span for inline copy behavior check */
@@ -39,11 +39,11 @@
   left: 0;
   width: 90px;
   flex-shrink: 0;
-  background-color: #1e1e1e;
+  background-color: var(--bg-viewer);
   /* Match bg to cover text scrolling under it */
-  border-right: 1px solid #3c3c3c;
+  border-right: 1px solid var(--border);
   padding: 0 8px 0 12px;
-  color: #6a9955;
+  color: var(--timestamp);
   z-index: 10;
   /* Ensure on top */
   height: 100%;
@@ -63,12 +63,19 @@
 /* Text Content */
 .ascii-text {
   padding: 0 12px;
-  color: #d4d4d4;
+  color: var(--text);
   white-space: pre;
   user-select: text;
   display: inline;
   /* True inline to flow naturally with timestamp */
   line-height: 20px;
+  tab-size: 8;
+}
+
+/* CR/LF while Show CR/LF is off: invisible and zero-width, but still part of a
+   selection so that copying keeps the line breaks (display:none would drop them) */
+.ascii-hidden-ctrl {
+  font-size: 0;
 }
 
 /* Line wrap mode */
@@ -92,7 +99,7 @@
   /* Flex item placement is sufficient, sticky not needed for wrap mode without horiz scroll */
   flex: 0 0 90px;
   height: auto;
-  border-right: 1px solid #3c3c3c;
+  border-right: 1px solid var(--border);
 }
 
 .ascii-viewer.line-wrap.with-timestamp .ascii-text {
@@ -113,9 +120,9 @@
   display: flex;
   justify-content: space-between;
   padding: 8px 12px;
-  background-color: #2d2d2d;
-  border-top: 1px solid #3c3c3c;
-  color: #6c6c6c;
+  background-color: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
   font-size: 12px;
 }
 
@@ -126,20 +133,20 @@
 }
 
 .ascii-viewer ::-webkit-scrollbar-track {
-  background: #1e1e1e;
+  background: var(--bg-viewer);
 }
 
 .ascii-viewer ::-webkit-scrollbar-thumb {
-  background: #424242;
+  background: var(--scrollbar-thumb);
   border-radius: 5px;
 }
 
 .ascii-viewer ::-webkit-scrollbar-thumb:hover {
-  background: #5c5c5c;
+  background: var(--scrollbar-thumb-hover);
 }
 
 .ascii-debug {
   font-size: 10px;
-  color: #808080;
+  color: var(--text-dim);
   font-family: 'Consolas', monospace;
 }

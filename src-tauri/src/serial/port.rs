@@ -76,14 +76,17 @@ impl SerialPort {
             .open()
             .map_err(|e| format!("Failed to open port {}: {:?}", port_name, e))?;
 
-        // Enable/Disable DTR
+        // Opening leaves DTR and RTS off (Windows DCB). DTR must be set BEFORE RTS:
+        // on ESP32-style auto-reset circuits the transient (RTS on, DTR off) pulls EN
+        // low and resets the board, while (DTR on, RTS off) only holds IO0 low.
+        // (serialport's dtr_on_open does the same write but ignores its error.)
         if let Err(e) = port.write_data_terminal_ready(config.dtr) {
             warn!("[SerialPort] Failed to set DTR: {:?}", e);
         } else {
             info!("[SerialPort] DTR set to {}", config.dtr);
         }
 
-        // Enable/Disable RTS
+        // Enable/Disable RTS (after DTR, see above)
         if let Err(e) = port.write_request_to_send(config.rts) {
             warn!("[SerialPort] Failed to set RTS: {:?}", e);
         } else {

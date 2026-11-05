@@ -221,6 +221,8 @@ pub struct DisplayRow {
     offset: u64,
     hex: String,
     ascii: String,
+    /// Reception time of the row's first byte (`HH:MM:SS.d`) when requested
+    timestamp: Option<String>,
 }
 
 /// Payload for get_display_rows command
@@ -257,6 +259,23 @@ fn bytes_to_hex(data: &[u8]) -> String {
         .join(" ")
 }
 
+/// Hex rows of `BYTES_PER_ROW` bytes as in the Hex view, each preceded by the
+/// reception time of its first byte (`data` starts at offset 0), one row per line
+fn hex_rows_with_timestamps(
+    data: &[u8],
+    separator: &str,
+    timestamp_at: impl Fn(u64) -> String,
+) -> String {
+    let mut out = String::with_capacity(data.len() / BYTES_PER_ROW * 72 + 72);
+    for (i, row) in data.chunks(BYTES_PER_ROW).enumerate() {
+        out.push_str(&timestamp_at((i * BYTES_PER_ROW) as u64));
+        out.push_str(separator);
+        out.push_str(&bytes_to_hex(row));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Convert bytes to ASCII string
 fn bytes_to_ascii(data: &[u8]) -> String {
     data.iter().map(|&b| byte_to_ascii(b)).collect()
@@ -267,7 +286,9 @@ pub fn get_display_rows(
     state: State<'_, SerialState>,
     start_row: u64,
     row_count: u32,
+    show_timestamp: Option<bool>,
 ) -> Result<DisplayRowsPayload, String> {
+    let show_timestamp = show_timestamp.unwrap_or(false);
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -332,6 +353,9 @@ pub fn get_display_rows(
                     offset: row_offset,
                     hex: bytes_to_hex(row_data),
                     ascii: bytes_to_ascii(row_data),
+                    timestamp: show_timestamp.then(|| {
+                        format_line_timestamp(data_store.get_timestamp_for_offset(row_offset))
+                    }),
                 });
             }
         }
@@ -357,6 +381,35 @@ pub struct AsciiLine {
 pub struct AsciiLinesPayload {
     lines: Vec<AsciiLine>,
     total_lines: u64,
+    /// Line index of `lines[0]` actually served. A request past the end is clamped to
+    /// the last `line_count` lines, so a viewer that asks for "the tail" gets it
+    /// atomically even while the line count grows (issue #3).
+    start_line: u64,
+    /// Whether the served range runs to the end of the data. Not derivable from
+    /// `lines.len()`: after a trailing LF the line index holds an empty last line,
+    /// which is not sent.
+    reaches_end: bool,
+}
+
+/// Clamp a requested start line so that a request past the end serves the last
+/// `line_count` lines instead of nothing.
+fn clamp_start_line(start_line: u64, line_count: u32, total_lines: u64) -> u64 {
+    start_line.min(total_lines.saturating_sub(line_count as u64))
+}
+
+/// Timestamp text for a line, the same everywhere (view, Copy, Save): local
+/// `HH:MM:SS.d`. Timestamps are recorded about every 100 ms, so tenths are the real
+/// precision; lines received before the first record show `--:--:--.0`.
+pub(crate) fn format_line_timestamp(ts_millis: Option<u64>) -> String {
+    ts_millis
+        .and_then(|ms| {
+            Local
+                .timestamp_millis_opt(ms as i64)
+                .single()
+                .map(|dt| (ms, dt))
+        })
+        .map(|(ms, dt)| format!("{}.{}", dt.format("%H:%M:%S"), (ms % 1000) / 100))
+        .unwrap_or_else(|| "--:--:--.0".to_string())
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -395,6 +448,8 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines: 0,
+                start_line: 0,
+                reaches_end: true,
             });
         }
 
@@ -407,16 +462,23 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines: 0,
+                start_line: 0,
+                reaches_end: true,
             });
         }
 
+        let start_line = clamp_start_line(start_line, line_count, total_lines);
+
         // Get line offsets for requested range
         let line_offsets = data_store.get_line_offsets(start_line, line_count);
+        let reaches_end = start_line + line_offsets.len() as u64 >= total_lines;
 
         if line_offsets.is_empty() {
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines,
+                start_line,
+                reaches_end,
             });
         }
 
@@ -431,6 +493,8 @@ pub fn get_ascii_lines(
             return Ok(AsciiLinesPayload {
                 lines: vec![],
                 total_lines,
+                start_line,
+                reaches_end,
             });
         }
 
@@ -442,6 +506,8 @@ pub fn get_ascii_lines(
                 return Ok(AsciiLinesPayload {
                     lines: vec![],
                     total_lines,
+                    start_line,
+                    reaches_end,
                 });
             }
         };
@@ -458,23 +524,9 @@ pub fn get_ascii_lines(
                 let text = bytes_to_ascii(line_data);
 
                 // Get timestamp from timestamp_index using binary search
-                let timestamp = if show_timestamp {
-                    if let Some(ts_millis) = data_store.get_timestamp_for_offset(line_start) {
-                        // Use chrono to convert UTC timestamp (millis) to Local time
-                        // timestamp_millis_opt handles the conversion safely
-                        if let Some(dt) = Local.timestamp_millis_opt(ts_millis as i64).single() {
-                            let time_str = dt.format("%H:%M:%S").to_string();
-                            let d = (ts_millis % 1000) / 100;
-                            Some(format!("{}.{}", time_str, d))
-                        } else {
-                            Some("--:--:--.0".to_string())
-                        }
-                    } else {
-                        Some("--:--:--.0".to_string())
-                    }
-                } else {
-                    None
-                };
+                let timestamp = show_timestamp.then(|| {
+                    format_line_timestamp(data_store.get_timestamp_for_offset(line_start))
+                });
 
                 lines.push(AsciiLine {
                     offset: line_start,
@@ -484,11 +536,18 @@ pub fn get_ascii_lines(
             }
         }
 
-        Ok(AsciiLinesPayload { lines, total_lines })
+        Ok(AsciiLinesPayload {
+            lines,
+            total_lines,
+            start_line,
+            reaches_end,
+        })
     } else {
         Ok(AsciiLinesPayload {
             lines: vec![],
             total_lines: 0,
+            start_line: 0,
+            reaches_end: true,
         })
     }
 }
@@ -496,6 +555,18 @@ pub fn get_ascii_lines(
 #[tauri::command]
 pub fn list_ports() -> Vec<String> {
     enumerate_ports()
+}
+
+/// List entry for a USB port: "Product (COM5)".
+///
+/// On Windows the product string is the device's friendly name, which already ends
+/// in " (COM5)"; that suffix is dropped so the entry does not read
+/// "USB Serial Port (COM5) (COM5)".
+fn usb_port_label(product: Option<&str>, port_name: &str) -> String {
+    let product = product.unwrap_or("Unknown Device");
+    let suffix = format!(" ({port_name})");
+    let product = product.strip_suffix(suffix.as_str()).unwrap_or(product);
+    format!("{product} ({port_name})")
 }
 
 /// 利用可能なポートの列挙（`list_ports` コマンドの実体）
@@ -510,8 +581,7 @@ pub(crate) fn enumerate_ports() -> Vec<String> {
                 // Include friendly name for USB devices, or just the port name
                 match &p.port_type {
                     serialport::SerialPortType::UsbPort(info) => {
-                        let product = info.product.as_deref().unwrap_or("Unknown Device");
-                        format!("{} ({})", product, p.port_name)
+                        usb_port_label(info.product.as_deref(), &p.port_name)
                     }
                     serialport::SerialPortType::PciPort => {
                         format!("PCI Device ({})", p.port_name)
@@ -565,6 +635,47 @@ pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, St
     }
 }
 
+/// Separator between the timestamp and the data, as offered in the Receive panel
+fn validate_timestamp_separator(separator: &str) -> Result<(), String> {
+    match separator {
+        " > " | " " | "," | "\t" => Ok(()),
+        other => Err(format!("Unsupported timestamp separator: {:?}", other)),
+    }
+}
+
+/// Save the received data as text with a timestamp at the start of every line
+/// (issue #4: Save while Timestamp is ON). The data bytes are written unchanged;
+/// `export_log` remains the raw-bytes export.
+#[tauri::command]
+pub fn export_text_with_timestamps(
+    state: State<'_, SerialState>,
+    path: String,
+    separator: String,
+) -> Result<u64, String> {
+    use std::io::{BufWriter, Write};
+
+    validate_timestamp_separator(&separator)?;
+    let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+    let Some(ref data_store) = *store_guard else {
+        return Err("No data available".to_string());
+    };
+    if data_store.total_bytes() == 0 {
+        return Err("No data to export".to_string());
+    }
+    let file = std::fs::File::create(&path)
+        .map_err(|e| format!("Failed to create file '{}': {:?}", path, e))?;
+    let mut out = BufWriter::new(file);
+    let total = data_store.write_timestamped(&mut out, &separator, format_line_timestamp)?;
+    out.flush()
+        .map_err(|e| format!("Failed to write data: {:?}", e))?;
+    log::info!(
+        "[export_text_with_timestamps] Exported {} bytes to {}",
+        total,
+        path
+    );
+    Ok(total)
+}
+
 #[tauri::command]
 pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), String> {
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
@@ -598,7 +709,11 @@ pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result<String, String> {
+pub fn get_clipboard_text(
+    state: State<'_, SerialState>,
+    mode: String,
+    timestamp_separator: Option<String>,
+) -> Result<String, String> {
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -615,6 +730,22 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
         let to_read = total.min(u32::MAX as u64) as u32;
         let data = data_store.get_data(0, to_read)?;
 
+        // Timestamp ON in the Hex view: the rows as shown, each with its time
+        if let (Some(separator), true) = (timestamp_separator.as_deref(), mode == "hex") {
+            validate_timestamp_separator(separator)?;
+            return Ok(hex_rows_with_timestamps(&data, separator, |offset| {
+                format_line_timestamp(data_store.get_timestamp_for_offset(offset))
+            }));
+        }
+
+        // Timestamp ON in the ASCII view (issue #4): the same text as Save
+        if let Some(separator) = timestamp_separator.as_deref() {
+            validate_timestamp_separator(separator)?;
+            let mut out = Vec::new();
+            data_store.write_timestamped(&mut out, separator, format_line_timestamp)?;
+            return Ok(String::from_utf8_lossy(&out).to_string());
+        }
+
         if mode == "hex" {
             // Hex mode: space-separated hex string
             Ok(bytes_to_hex(&data))
@@ -630,6 +761,27 @@ pub fn get_clipboard_text(state: State<'_, SerialState>, mode: String) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_start_line_serves_the_tail_for_requests_past_the_end() {
+        // In range: unchanged
+        assert_eq!(clamp_start_line(10, 50, 1000), 10);
+        assert_eq!(clamp_start_line(950, 50, 1000), 950);
+        // Past the end (a viewer asking for "the tail"): the last line_count lines
+        assert_eq!(clamp_start_line(u64::MAX, 50, 1000), 950);
+        assert_eq!(clamp_start_line(990, 50, 1000), 950);
+        // Fewer lines than requested: everything from line 0
+        assert_eq!(clamp_start_line(u64::MAX, 50, 20), 0);
+        assert_eq!(clamp_start_line(0, 50, 0), 0);
+    }
+
+    #[test]
+    fn line_timestamp_has_tenths_and_a_fallback() {
+        assert_eq!(format_line_timestamp(None), "--:--:--.0");
+        let s = format_line_timestamp(Some(1_700_000_000_987));
+        assert_eq!(s.len(), "HH:MM:SS.d".len());
+        assert!(s.ends_with(".9"), "{s}");
+    }
 
     #[test]
     fn test_extract_port_path() {
@@ -650,6 +802,39 @@ mod tests {
         // Degenerate inputs fall back to the whole string
         assert_eq!(extract_port_path("weird ) ( order"), "weird ) ( order");
         assert_eq!(extract_port_path(""), "");
+    }
+
+    #[test]
+    fn hex_rows_with_timestamps_puts_each_row_on_its_own_line() {
+        let data: Vec<u8> = (0u8..20).collect();
+        let text = hex_rows_with_timestamps(&data, " > ", |offset| format!("t{offset}"));
+        assert_eq!(
+            text,
+            "t0 > 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\r\nt16 > 10 11 12 13\r\n"
+        );
+        assert_eq!(hex_rows_with_timestamps(&[], ",", |_| String::new()), "");
+    }
+
+    #[test]
+    fn usb_port_label_drops_the_duplicated_port_suffix() {
+        assert_eq!(
+            usb_port_label(Some("USB Serial Port (COM5)"), "COM5"),
+            "USB Serial Port (COM5)"
+        );
+        assert_eq!(
+            usb_port_label(Some("CP2102 USB to UART"), "/dev/ttyUSB0"),
+            "CP2102 USB to UART (/dev/ttyUSB0)"
+        );
+        assert_eq!(usb_port_label(None, "COM7"), "Unknown Device (COM7)");
+        // Another port's number in the name is kept
+        assert_eq!(
+            usb_port_label(Some("Bridge (COM4)"), "COM5"),
+            "Bridge (COM4) (COM5)"
+        );
+        assert_eq!(
+            extract_port_path(&usb_port_label(Some("X (COM5)"), "COM5")),
+            "COM5"
+        );
     }
 
     #[test]

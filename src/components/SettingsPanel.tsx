@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { THEME_OPTIONS, type ThemeSetting } from '../utils/theme';
 import './SettingsPanel.css';
 
 /** バックエンド `BridgeActivity` に対応（直近の活動） */
@@ -58,24 +59,58 @@ interface SettingsPanelProps {
   ports: string[];
   selectedPort: string;
   onPortChange: (port: string) => void;
-  onRefreshPorts: () => void;
+  /** Re-enumerate the ports; resolves once the new list is in state */
+  onRefreshPorts: () => void | Promise<void>;
   config: SerialConfig;
   onConfigChange: (config: SerialConfig) => void;
   isConnected: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
-  /** Reopen the port when the lost device comes back (SYS-F-807) */
-  autoReconnect: boolean;
-  onAutoReconnectChange: (enabled: boolean) => void;
+  /** Connect to the selected port whenever it is available (SYS-F-807) */
+  autoConnect: boolean;
+  onAutoConnectChange: (enabled: boolean) => void;
   /** Device path being waited for, or null when not waiting */
   reconnectWaitingFor: string | null;
-  /** Time (ms) of the last automatic reconnect, shown until the next manual action */
+  /** Why the port being waited for could not be opened (e.g. in use elsewhere) */
+  reconnectError?: string | null;
+  /** Time (ms) of the last automatic connect, shown until the next manual action */
   reconnectedAt: number | null;
+  /** Color theme (issue #6) */
+  theme: ThemeSetting;
+  onThemeChange: (theme: ThemeSetting) => void;
 }
 
-const AUTO_RECONNECT_TOOLTIP =
-  'When the device goes away (unplugged or reset) and comes back, reopen it automatically. ' +
-  'The capture continues; nothing is cleared.';
+const DTR_HELP =
+  'DTR is off by default so that opening the port does not reset the board. ' +
+  'Arduino Uno, Nano and Mega (including CH340 clones) reset whenever DTR turns on, ' +
+  'as they do with the Arduino IDE. ' +
+  'Boards with native USB (Leonardo, Micro, Raspberry Pi Pico, ESP32-S2/S3/C3 USB) ' +
+  'may send nothing, or wait in while (!Serial), until DTR is on: tick DtrEnable for those.';
+
+const RTS_HELP =
+  'RTS is off by default. On ESP32 and ESP8266 boards with the usual auto-reset circuit, ' +
+  'RTS on while DTR is off holds the chip in reset. With both on, the board runs normally. ' +
+  'Arduino AVR boards ignore RTS.';
+
+/** "?" mark that shows a note on hover (and on keyboard focus) */
+function HelpMark({ text }: { text: string }) {
+  return (
+    <span className="help-mark" title={text} aria-label={text} tabIndex={0} role="img">
+      ?
+    </span>
+  );
+}
+
+const THEME_LABELS: Record<ThemeSetting, string> = {
+  dark: 'Dark',
+  light: 'Light',
+  system: 'System',
+};
+
+const AUTO_CONNECT_TOOLTIP =
+  'Connect to the selected port whenever it is available: at startup, when the device is ' +
+  'plugged in, and after a reset or unplug. The capture continues; nothing is cleared. ' +
+  'Disconnect turns this off.';
 
 export default function SettingsPanel({
   ports,
@@ -87,10 +122,13 @@ export default function SettingsPanel({
   isConnected,
   onConnect,
   onDisconnect,
-  autoReconnect,
-  onAutoReconnectChange,
+  autoConnect,
+  onAutoConnectChange,
   reconnectWaitingFor,
+  reconnectError = null,
   reconnectedAt,
+  theme,
+  onThemeChange,
 }: SettingsPanelProps) {
   const [baudRateEditing, setBaudRateEditing] = useState(false);
   const [baudDropdownOpen, setBaudDropdownOpen] = useState(false);
@@ -171,6 +209,54 @@ export default function SettingsPanel({
     };
   }, []);
 
+  // --- Port list freshness (issue #5) ------------------------------------------------
+  // The list is polled every 2 s, but a native <select> popup shows the options it
+  // had at the moment it opened, so a device plugged in just before the click was
+  // missing. Where the WebView supports showPicker() (Chromium/WebView2), the click
+  // re-enumerates first and then opens the popup with the current list. Elsewhere
+  // the popup opens as usual and the refresh still updates the list.
+  const portSelectRef = useRef<HTMLSelectElement>(null);
+  const openingRef = useRef(false);
+
+  const refreshThenOpen = async () => {
+    const el = portSelectRef.current;
+    if (!el || openingRef.current) return;
+    openingRef.current = true;
+    try {
+      await onRefreshPorts();
+      // Let React commit the new <option>s before the popup reads them
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      el.focus();
+      el.showPicker();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      openingRef.current = false;
+    }
+  };
+
+  const canShowPicker = () =>
+    typeof HTMLSelectElement !== 'undefined' &&
+    typeof HTMLSelectElement.prototype.showPicker === 'function';
+
+  const handlePortMouseDown = (e: React.MouseEvent<HTMLSelectElement>) => {
+    if (e.button !== 0) return;
+    if (canShowPicker()) {
+      e.preventDefault(); // open it ourselves, after the refresh
+      void refreshThenOpen();
+    } else {
+      void onRefreshPorts();
+    }
+  };
+
+  const handlePortKeyDown = (e: React.KeyboardEvent<HTMLSelectElement>) => {
+    const opens = e.key === 'F4' || (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp'));
+    if (opens && canShowPicker()) {
+      e.preventDefault();
+      void refreshThenOpen();
+    }
+  };
+
   const handleChange = <K extends keyof SerialConfig>(key: K, value: SerialConfig[K]) => {
     onConfigChange({ ...config, [key]: value });
   };
@@ -189,11 +275,14 @@ export default function SettingsPanel({
       <div className="panel-header">Settings</div>
       <div className="settings-row">
         <select
+          ref={portSelectRef}
           value={selectedPort}
           onChange={(e) => onPortChange(e.target.value)}
-          onClick={onRefreshPorts}
+          onMouseDown={handlePortMouseDown}
+          onKeyDown={handlePortKeyDown}
           disabled={isConnected}
           className="port-select"
+          aria-label="Port"
         >
           {/* The device being waited for has left the list; keep it selectable so the
               dropdown keeps showing what the app is waiting for */}
@@ -279,25 +368,14 @@ export default function SettingsPanel({
           {reconnectWaitingFor !== null ? 'Cancel' : isConnected ? 'Disconnect' : 'Connect'}
         </button>
 
-        <label className="checkbox-label" title={AUTO_RECONNECT_TOOLTIP}>
+        <label className="checkbox-label" title={AUTO_CONNECT_TOOLTIP}>
           <input
             type="checkbox"
-            checked={autoReconnect}
-            onChange={(e) => onAutoReconnectChange(e.target.checked)}
+            checked={autoConnect}
+            onChange={(e) => onAutoConnectChange(e.target.checked)}
           />
-          Auto Reconnect
+          Auto Connect
         </label>
-        {reconnectWaitingFor !== null ? (
-          <span className="reconnect-status waiting" role="status">
-            Waiting for {reconnectWaitingFor}…
-          </span>
-        ) : (
-          reconnectedAt !== null && (
-            <span className="reconnect-status" role="status">
-              Reconnected {new Date(reconnectedAt).toLocaleTimeString()}
-            </span>
-          )
-        )}
       </div>
 
       <div className="settings-advanced">
@@ -340,6 +418,7 @@ export default function SettingsPanel({
             />{' '}
             DtrEnable
           </label>
+          <HelpMark text={DTR_HELP} />
           <label>
             <input
               type="checkbox"
@@ -348,6 +427,7 @@ export default function SettingsPanel({
             />{' '}
             RtsEnable
           </label>
+          <HelpMark text={RTS_HELP} />
         </div>
 
         <div className="advanced-group">
@@ -422,6 +502,42 @@ export default function SettingsPanel({
             </span>
           </>
         )}
+
+        {/* Auto Connect status. Kept out of the first row: its text contains the
+            device path, and nothing there may change the width of the port list */}
+        {reconnectWaitingFor !== null ? (
+          <span
+            className="reconnect-status waiting"
+            role="status"
+            title={
+              `Waiting for ${reconnectWaitingFor}…` +
+              (reconnectError !== null ? ` (${reconnectError})` : '')
+            }
+          >
+            Waiting for {reconnectWaitingFor}…{reconnectError !== null && ' (cannot open the port)'}
+          </span>
+        ) : (
+          reconnectedAt !== null && (
+            <span className="reconnect-status" role="status">
+              Connected automatically {new Date(reconnectedAt).toLocaleTimeString()}
+            </span>
+          )
+        )}
+
+        <label className="theme-control" title="Color theme (System follows the OS setting)">
+          Theme
+          <select
+            value={theme}
+            onChange={(e) => onThemeChange(e.target.value as ThemeSetting)}
+            aria-label="Theme"
+          >
+            {THEME_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {THEME_LABELS[t]}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </div>
   );

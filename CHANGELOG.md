@@ -9,6 +9,78 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-11-04 (pre-release)
+
+Fixes for the first beta reports (issues #3 to #7) and a few problems found while fixing them,
+and behavior of the C# version (0.0.8 and earlier) that the rewrite had lost.
+Windows build: NSIS installer only, as for beta.1.
+
+### Added
+
+- **Theme** setting (Dark / Light / System) in the Settings panel; all windows follow it. Before,
+  the app was dark-only while native widgets followed the OS theme ([#6]).
+- Save and Copy include the timestamps when Timestamp is ON in the ASCII view: every line starts
+  with its time (`HH:MM:SS.d`, the same as on screen) and the chosen separator. With Timestamp
+  OFF, Save writes the received bytes unchanged as before ([#4]).
+- Plotter: names and values joined by `=`, `:` or a space are recognized, separated by commas,
+  tabs or spaces (`V=30.58 I=0.82`, `temp = 25, hum = 60`, `temp 25.5 hum 60`). A number followed
+  by a short unit (`11ms`, `3.3V`) is read as the number. Values that are neither a number nor a
+  word (`0.825/0.797`) and empty values (`key=`) no longer create channels.
+- **Show CR/LF** and **Show NUL** in the ASCII view, both off by default (C#: Show [CRLF] /
+  Show [NUL]). Off hides CR and LF, shows TAB as a real tab and hides NUL; copying a selection
+  still keeps the line breaks. Before, every line ended in visible CR LF symbols.
+- Timestamps in the Hex view: each 16-byte row shows the time of its first byte, and Copy
+  includes them. Save in the Hex view still writes the received bytes.
+- "Copied" / "Saved" / "Nothing to copy" confirmation that disappears by itself.
+
+### Changed
+
+- Settings are remembered across restarts: serial settings, the last chosen port, Send and Receive
+  options, the plotter's window width and downsampling mode, and the theme. The send history and
+  the window size/position are not stored ([#7]).
+- Opening the port dropdown re-enumerates the ports first, so a device plugged in a moment ago
+  is listed ([#5]).
+- The port list fills the width left by the controls on its right, which are right-aligned; its
+  width no longer depends on the device names. The Auto Connect status moved to the MCP Server
+  row.
+- The window title bar follows the chosen theme.
+- **Auto Reconnect is now Auto Connect**, as in the C# version: while it is on and no port is
+  open, the app connects to the selected port as soon as it can, also at startup and when the
+  device is plugged in for the first time. Disconnect (or Cancel while waiting) turns it off.
+  When the port is listed but cannot be opened (in use by another program), it says so and
+  retries every second. The setting starts off; an earlier Auto Reconnect setting is not
+  carried over. The retry interval is 200 ms (was 500 ms).
+- Defaults for new installs (saved settings are kept): **DTR and RTS off** (were on), so that
+  connecting resets neither an Arduino Uno (DTR) nor an ESP32 (RTS). Boards with native USB may
+  need DtrEnable ticked; a **?** next to DtrEnable / RtsEnable explains this on hover. The other
+  defaults match the C# version: no line ending (was LF), Send with Enter on (was off), Line
+  Wrap off (was on), timestamp separator `>` (new option).
+- The Send box uses a larger font than the receive view, as in the C# version.
+- Port names no longer repeat the port: `USB Serial Port (COM5)` instead of
+  `USB Serial Port (COM5) (COM5)`.
+
+### Fixed
+
+- Auto Scroll stopped short of the newest line when Line Wrap made lines span several rows, and
+  for very large captures ([#3]).
+- Reopening the plotter window could show "Peak" while the backend still used "Average".
+- The Hex view could not scroll to the newest rows of very large captures (more than about 8 MB).
+- A plotter line with `name=value` pairs was taken as the CSV header when it came first.
+- Opening the plotter after data had arrived drew all of that data as a single point at time 0;
+  it is now drawn at the times it was received.
+- A lone CR now ends a line, as in the C# version; devices that end lines with CR only were
+  shown as one long line.
+- Hex send accepts the C# separators and one-digit bytes (`0A-0B`, `1,2,3`, `0x41`). Before,
+  `0A-0B` was rejected and `12 3 4` was silently sent as `12 34`. An invalid byte is now named
+  under the input instead of in a blocking dialog.
+- Input that is only line breaks is no longer added to the send history.
+
+[#3]: https://github.com/771-8bit/SerialMonitorEssential/issues/3
+[#4]: https://github.com/771-8bit/SerialMonitorEssential/issues/4
+[#5]: https://github.com/771-8bit/SerialMonitorEssential/issues/5
+[#6]: https://github.com/771-8bit/SerialMonitorEssential/issues/6
+[#7]: https://github.com/771-8bit/SerialMonitorEssential/issues/7
+
 ## [0.1.0-beta.1] - 2026-11-04 (pre-release)
 
 First beta of the Tauri/Rust version, released to validate it in real use. It contains

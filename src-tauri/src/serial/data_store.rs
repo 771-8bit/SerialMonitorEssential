@@ -50,6 +50,11 @@ struct SerialStatusPayload {
 /// ObjectPool、FinishedQueue、ArchivedIndexを統合し、
 /// Worker/Logger/UiNotifier スレッドのライフサイクルを管理する。
 pub struct DataStore {
+    /// When this store (= the capture session) was created: the time origin for
+    /// readers that attach later, such as the plotter. `Instant` for elapsed time,
+    /// wall-clock ms to place `timestamp_index` entries on the same axis.
+    created: std::time::Instant,
+    created_wall_ms: u64,
     free_pool: Arc<SegQueue<Chunk>>,
     finished_list: Arc<RwLock<VecDeque<Arc<Chunk>>>>,
     archived_index: Arc<RwLock<Vec<PageMetadata>>>,
@@ -108,6 +113,8 @@ impl DataStore {
             timestamp_index: Arc::new(RwLock::new(Vec::new())),
             line_index: Arc::new(RwLock::new(vec![0])), // 最初の行はオフセット0から始まる
             segment_starts: RwLock::new(Vec::new()),
+            created: std::time::Instant::now(),
+            created_wall_ms: wall_clock_ms(),
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
@@ -397,6 +404,71 @@ impl DataStore {
         self.push_test_data_at(self.total_bytes(), data);
     }
 
+    /// 受信データ全体を、各行の先頭にタイムスタンプと区切りを付けて書き出す（issue #4）
+    ///
+    /// データ本体は受信したバイトのまま（CR/LF も含め無加工）で、行頭（LF の直後）に
+    /// `format(行頭オフセットの時刻)` と `separator` を挿入するだけ。データは 1 MiB
+    /// ずつ順に読み、行頭は数千行ずつ索引から取るので、巨大な取り込みでもメモリは
+    /// 一定。呼び出し時点の総バイト数までを書き、その後に届いた分は含めない。
+    /// 戻り値は書き出したデータのバイト数（挿入した文字は含まない）。
+    pub fn write_timestamped<W: std::io::Write>(
+        &self,
+        out: &mut W,
+        separator: &str,
+        format: impl Fn(Option<u64>) -> String,
+    ) -> Result<u64, String> {
+        const CHUNK: u64 = 1024 * 1024;
+        const LINE_BATCH: u32 = 4096;
+
+        let total = self.total_bytes();
+        let mut starts: VecDeque<u64> = VecDeque::new();
+        let mut next_line = 0u64;
+        let mut lines_done = false;
+        let mut offset = 0u64;
+
+        while offset < total {
+            let len = CHUNK.min(total - offset) as u32;
+            let data = self.get_data(offset, len)?;
+            if data.is_empty() {
+                return Err(format!("No data at offset {}", offset));
+            }
+            let end = offset + data.len() as u64;
+            let mut pos = offset;
+            loop {
+                if starts.is_empty() && !lines_done {
+                    let batch = self.get_line_offsets(next_line, LINE_BATCH);
+                    lines_done = batch.is_empty();
+                    next_line += batch.len() as u64;
+                    starts.extend(batch.into_iter().map(|(s, _)| s));
+                }
+                match starts.front().copied() {
+                    // 先頭の行が書き出し済みの位置より前になることはないが、念のため捨てる
+                    Some(ls) if ls < pos => {
+                        starts.pop_front();
+                    }
+                    Some(ls) if ls < end => {
+                        let a = (pos - offset) as usize;
+                        let b = (ls - offset) as usize;
+                        out.write_all(&data[a..b]).map_err(|e| e.to_string())?;
+                        let stamp = format(self.get_timestamp_for_offset(ls));
+                        out.write_all(stamp.as_bytes()).map_err(|e| e.to_string())?;
+                        out.write_all(separator.as_bytes())
+                            .map_err(|e| e.to_string())?;
+                        pos = ls;
+                        starts.pop_front();
+                    }
+                    _ => {
+                        let a = (pos - offset) as usize;
+                        out.write_all(&data[a..]).map_err(|e| e.to_string())?;
+                        break;
+                    }
+                }
+            }
+            offset = end;
+        }
+        Ok(total)
+    }
+
     /// 受信セグメントの開始オフセットのうち `[from, to)` に入るもの（昇順）
     pub fn segment_starts_in(&self, from: u64, to: u64) -> Vec<u64> {
         self.segment_starts
@@ -409,6 +481,57 @@ impl DataStore {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// このストア（取り込みセッション）を作った時刻（経過時間用）
+    pub fn created_instant(&self) -> std::time::Instant {
+        self.created
+    }
+
+    /// このストアを作った時刻（Unix ms、`timestamp_index` と同じ時計）
+    pub fn created_wall_ms(&self) -> u64 {
+        self.created_wall_ms
+    }
+
+    /// `timestamp_index` のうち累積バイト数が `(from, to]` に入る記録（昇順）。
+    /// 記録 (b, t) は「時刻 t までに b バイト届いていた」を意味する
+    pub fn timestamps_in(&self, from: u64, to: u64) -> Vec<ByteTimestamp> {
+        self.timestamp_index
+            .read()
+            .map(|index| {
+                let lo = index.partition_point(|e| e.cumulative_bytes <= from);
+                let hi = index.partition_point(|e| e.cumulative_bytes <= to);
+                index[lo..hi.max(lo)].to_vec()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 累積バイト数が `offset` 以上になった最初の記録（`offset` 番目までのバイトが
+    /// 届いていた最初の時刻）。まだ記録がなければ None
+    pub fn timestamp_at_or_after(&self, offset: u64) -> Option<ByteTimestamp> {
+        let index = self.timestamp_index.read().ok()?;
+        let i = index.partition_point(|e| e.cumulative_bytes < offset);
+        index.get(i).cloned()
+    }
+
+    /// テスト用: このストアを `by` だけ前に作ったことにする（過去の受信を、
+    /// 実際に過去の時刻として記録できるように）
+    #[cfg(test)]
+    pub fn backdate_for_test(&mut self, by: std::time::Duration) {
+        self.created = self.created.checked_sub(by).expect("backdate");
+        self.created_wall_ms -= by.as_millis() as u64;
+    }
+
+    /// テスト用: 「時刻 `wall_ms` に累積 `cumulative_bytes` バイト」を記録する
+    /// （`record_timestamp` は現在時刻しか記録できないため）
+    #[cfg(test)]
+    pub fn push_test_timestamp(&self, cumulative_bytes: u64, wall_ms: u64) {
+        if let Ok(mut index) = self.timestamp_index.write() {
+            index.push(ByteTimestamp {
+                timestamp: wall_ms,
+                cumulative_bytes,
+            });
+        }
     }
 
     /// テスト用: 受信の開始・再開位置を登録する（`start_reception` の代わり）
@@ -702,6 +825,15 @@ fn is_process_running(pid: u32) -> bool {
     }
 }
 
+/// Current wall-clock time in Unix ms (the clock of `timestamp_index`)
+fn wall_clock_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,12 +867,82 @@ mod tests {
             timestamp_index: Arc::new(RwLock::new(Vec::new())),
             line_index: Arc::new(RwLock::new(vec![0])),
             segment_starts: RwLock::new(Vec::new()),
+            created: std::time::Instant::now(),
+            created_wall_ms: wall_clock_ms(),
             temp_dir,
             worker_handle: Mutex::new(None),
             logger_handle: Mutex::new(None),
             ui_notifier_handle: Mutex::new(None),
             stop_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// `timestamps_in` は (from, to] の記録、`timestamp_at_or_after` は境界を含む次の記録
+    #[test]
+    fn timestamp_lookups_respect_their_bounds() {
+        let store = create_test_data_store();
+        assert!(store.timestamps_in(0, 100).is_empty());
+        assert!(store.timestamp_at_or_after(0).is_none());
+        store.push_test_timestamp(10, 1000);
+        store.push_test_timestamp(20, 2000);
+        store.push_test_timestamp(30, 3000);
+
+        let bytes =
+            |v: Vec<ByteTimestamp>| v.iter().map(|e| e.cumulative_bytes).collect::<Vec<_>>();
+        assert_eq!(bytes(store.timestamps_in(10, 30)), vec![20, 30]); // from excluded, to included
+        assert_eq!(bytes(store.timestamps_in(0, 9)), Vec::<u64>::new());
+        assert_eq!(bytes(store.timestamps_in(30, 10)), Vec::<u64>::new()); // from > to
+        assert_eq!(
+            store.timestamp_at_or_after(20).map(|e| e.timestamp),
+            Some(2000)
+        );
+        assert_eq!(
+            store.timestamp_at_or_after(21).map(|e| e.timestamp),
+            Some(3000)
+        );
+        assert!(store.timestamp_at_or_after(31).is_none());
+    }
+
+    /// タイムスタンプ付き書き出し（issue #4）: 各行頭に時刻と区切りが入り、データは無加工
+    #[test]
+    fn write_timestamped_prefixes_every_line_and_keeps_bytes() {
+        let store = create_test_data_store();
+        let data = b"ab\r\ncd\nlast";
+        store.push_test_data(data);
+        {
+            // 行頭: 0, 4 ("cd"), 7 ("last")
+            let mut idx = store.line_index.write().unwrap();
+            idx.extend([4, 7]);
+        }
+        let fmt = |ts: Option<u64>| format!("[{}]", ts.map_or("-".to_string(), |t| t.to_string()));
+        {
+            let mut ts = store.timestamp_index.write().unwrap();
+            ts.push(ByteTimestamp {
+                cumulative_bytes: 4,
+                timestamp: 1000,
+            });
+        }
+
+        let mut out = Vec::new();
+        let n = store.write_timestamped(&mut out, ",", fmt).unwrap();
+
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(out, b"[-],ab\r\n[1000],cd\n[1000],last");
+    }
+
+    /// 末尾が LF で終わるとき、まだ中身のない最終行に時刻だけが付くことはない
+    #[test]
+    fn write_timestamped_adds_nothing_after_a_trailing_newline() {
+        let store = create_test_data_store();
+        store.push_test_data(b"x\n");
+        store.line_index.write().unwrap().push(2);
+
+        let mut out = Vec::new();
+        store
+            .write_timestamped(&mut out, "\t", |_| "T".to_string())
+            .unwrap();
+
+        assert_eq!(out, b"T\tx\n");
     }
 
     /// archived_indexのみからデータを取得できることを確認

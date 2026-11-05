@@ -31,22 +31,24 @@ const defaultConfig: SerialConfig = {
   rts: true,
 };
 
-function renderPanel() {
+function renderPanel(onRefreshPorts = vi.fn()) {
   return render(
     <SettingsPanel
       ports={['COM1']}
       selectedPort="COM1"
       onPortChange={vi.fn()}
-      onRefreshPorts={vi.fn()}
+      onRefreshPorts={onRefreshPorts}
       config={defaultConfig}
       onConfigChange={vi.fn()}
       isConnected={false}
       onConnect={vi.fn()}
       onDisconnect={vi.fn()}
-      autoReconnect={false}
-      onAutoReconnectChange={vi.fn()}
+      autoConnect={false}
+      onAutoConnectChange={vi.fn()}
       reconnectWaitingFor={null}
       reconnectedAt={null}
+      theme="dark"
+      onThemeChange={vi.fn()}
     />
   );
 }
@@ -166,5 +168,46 @@ describe('SettingsPanel - MCP Server', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith('open_ai_guide_window');
     });
+  });
+});
+
+describe('SettingsPanel - port list (issue #5)', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(bridgeStatus());
+  });
+
+  afterEach(() => {
+    delete (HTMLSelectElement.prototype as Partial<HTMLSelectElement>).showPicker;
+  });
+
+  it('re-enumerates before opening the dropdown, then opens it', async () => {
+    const order: string[] = [];
+    const onRefreshPorts = vi.fn(async () => {
+      order.push('refresh');
+    });
+    HTMLSelectElement.prototype.showPicker = vi.fn(() => {
+      order.push('open');
+    });
+    renderPanel(onRefreshPorts);
+
+    const select = screen.getByRole('combobox', { name: 'Port' });
+    const notPrevented = fireEvent.mouseDown(select, { button: 0 });
+
+    // The native popup must not open with the stale list
+    expect(notPrevented).toBe(false);
+    await waitFor(() => expect(order).toEqual(['refresh', 'open']));
+  });
+
+  it('still refreshes on click where showPicker is unavailable', () => {
+    const onRefreshPorts = vi.fn();
+    renderPanel(onRefreshPorts);
+
+    const notPrevented = fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Port' }), {
+      button: 0,
+    });
+
+    expect(notPrevented).toBe(true);
+    expect(onRefreshPorts).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { ROW_HEIGHT, MAX_SCROLL_HEIGHT } from '../components/viewers/viewerConstants';
 import {
   calculateScrollHeight,
   calculateScale,
@@ -6,6 +7,7 @@ import {
   byteOffsetToScrollTop,
   calculateBottomByteOffset,
   clampByteOffset,
+  rowAtScrollTop,
 } from '../components/viewers/scrollUtils';
 
 describe('scrollUtils', () => {
@@ -103,6 +105,33 @@ describe('scrollUtils', () => {
       expect(clampByteOffset(-10, 1000)).toBe(0);
       expect(clampByteOffset(500, 1000)).toBe(500);
       expect(clampByteOffset(1500, 1000)).toBe(1000);
+    });
+  });
+
+  describe('rowAtScrollTop', () => {
+    const vh = 400; // 20 rows
+
+    it('is scrollTop / ROW_HEIGHT when the height is not capped', () => {
+      const total = 1000;
+      const h = total * ROW_HEIGHT;
+      expect(rowAtScrollTop(0, h, vh, total)).toBe(0);
+      expect(rowAtScrollTop(2000, h, vh, total)).toBe(100);
+      expect(rowAtScrollTop(h - vh, h, vh, total)).toBe(total - 20);
+    });
+
+    it('reaches the last page when the height is capped (huge captures)', () => {
+      const total = 2_000_000; // 32 MB of hex rows
+      const h = MAX_SCROLL_HEIGHT;
+      expect(rowAtScrollTop(0, h, vh, total)).toBe(0);
+      // The bottom of the scroll range shows the last 20 rows
+      expect(rowAtScrollTop(h - vh, h, vh, total)).toBe(total - 20);
+      // Halfway is about halfway
+      expect(rowAtScrollTop((h - vh) / 2, h, vh, total)).toBe((total - 20) / 2);
+    });
+
+    it('falls back to the plain ratio before the viewport is measured', () => {
+      expect(rowAtScrollTop(500, 1000, 0, 100)).toBe(50);
+      expect(rowAtScrollTop(0, 0, 0, 0)).toBe(0);
     });
   });
 });

@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
+import { themeColor } from '../../utils/theme';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { stateTimelinePlugin, calculateStateTimelineHeight, StateRow } from './stateTimelinePlugin';
@@ -34,6 +35,8 @@ interface LineChartProps {
   onUserInteraction?: () => void;
   // Fired on double click - parent returns to LIVE follow mode
   onLiveRequest?: () => void;
+  // Applied theme (issue #6): axis and grid colors follow it without a rebuild
+  theme?: 'dark' | 'light';
 }
 
 /** Imperative API used by PlotterWindow's rAF loop (no React state per frame) */
@@ -186,11 +189,23 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
     followMode = false,
     onUserInteraction,
     onLiveRequest,
+    theme = 'dark',
   },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<uPlot | null>(null);
+
+  // Axis/grid colors of the applied theme; refreshed (and redrawn) on theme change
+  const axisColorsRef = useRef({ axis: '#888', grid: '#333', tick: '#444' });
+  useEffect(() => {
+    axisColorsRef.current = {
+      axis: themeColor('--chart-axis', '#888'),
+      grid: themeColor('--chart-grid', '#333'),
+      tick: themeColor('--chart-tick', '#444'),
+    };
+    chartRef.current?.redraw(false);
+  }, [theme]);
   const channelsRef = useRef<string[]>([]);
   const stateRowsRef = useRef<StateRow[]>([]);
   const hiddenChannelsRef = useRef<Set<string>>(hiddenChannels);
@@ -503,8 +518,17 @@ const LineChart = forwardRef<LineChartHandle, LineChartProps>(function LineChart
           y: { auto: false },
         },
         axes: [
-          { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
-          { stroke: '#888', grid: { stroke: '#333' }, ticks: { stroke: '#444' } },
+          // Functions read the current theme colors on every draw (issue #6)
+          {
+            stroke: () => axisColorsRef.current.axis,
+            grid: { stroke: () => axisColorsRef.current.grid },
+            ticks: { stroke: () => axisColorsRef.current.tick },
+          },
+          {
+            stroke: () => axisColorsRef.current.axis,
+            grid: { stroke: () => axisColorsRef.current.grid },
+            ticks: { stroke: () => axisColorsRef.current.tick },
+          },
         ],
         // Built-in legend disabled: its interactive toggles bypass the
         // hiddenChannels state and desync from the custom legend panel

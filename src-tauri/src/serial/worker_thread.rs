@@ -62,38 +62,62 @@ impl Drop for TimerResolution {
     }
 }
 
-/// Record line offsets (LF positions) in the given data
-fn record_line_offsets(line_index: &RwLock<Vec<u64>>, data: &[u8], global_offset: u64) {
+/// Record the line starts in `data` (the bytes at `global_offset`).
+///
+/// LF, CR and CRLF each end a line, as in the C# version: CRLF is one break, LF CR
+/// and CR CR are two. Whether a CR is followed by LF is only known at the next byte,
+/// so a CR that ends `data` stays pending in `pending_cr` and is resolved by the
+/// next call (the index never has to shrink). Calls must be for contiguous data.
+fn record_line_offsets(
+    line_index: &RwLock<Vec<u64>>,
+    data: &[u8],
+    global_offset: u64,
+    pending_cr: &mut bool,
+) {
     if let Ok(mut index) = line_index.write() {
+        let mut push = |offset: u64| {
+            // 重複を避ける
+            if index.last().is_none_or(|&last| last < offset) {
+                index.push(offset);
+            }
+        };
         for (i, &byte) in data.iter().enumerate() {
-            // LF (\n) を改行として検出
+            let offset = global_offset + i as u64;
+            if *pending_cr && byte != b'\n' {
+                // A lone CR: the line ended before this byte
+                push(offset);
+            }
+            *pending_cr = byte == b'\r';
             if byte == b'\n' {
-                let next_line_offset = global_offset + i as u64 + 1;
-                // 重複を避ける
-                if index.last().is_none_or(|&last| last < next_line_offset) {
-                    index.push(next_line_offset);
-                }
+                push(offset + 1);
             }
         }
     }
 }
 
+/// 受信データの行位置を line_index に記録する（CR 単独の改行を判定するため、チャンクを
+/// またいで「直前が CR だったか」を持つ）。
+///
 /// 再接続で同じストアに追記を再開したとき、切断で途切れた行と再開後の最初の行が
-/// 1 行に繋がって見えないよう、再開位置を行頭として 1 度だけ記録する。
+/// 1 行に繋がって見えないよう、再開位置を行頭として 1 度だけ記録する。切断直前の
+/// バイトが CR で保留のままだった場合も、ここで行頭が入る。
 /// 受信バイトそのものは変えない（line_index は表示用の索引）。
-struct ResumeBoundary(Option<u64>);
+struct LineIndexer {
+    resume: Option<u64>,
+    pending_cr: bool,
+}
 
-impl ResumeBoundary {
+impl LineIndexer {
     fn new(line_index: &RwLock<Vec<u64>>, start_offset: u64) -> Self {
         // 直前のバイトが LF なら start_offset は既に行頭として記録されている
         let already_line_start = line_index
             .read()
             .map(|index| index.last().is_some_and(|&last| last >= start_offset))
             .unwrap_or(true);
-        if start_offset == 0 || already_line_start {
-            Self(None)
-        } else {
-            Self(Some(start_offset))
+        let resume = (start_offset != 0 && !already_line_start).then_some(start_offset);
+        Self {
+            resume,
+            pending_cr: false,
         }
     }
 
@@ -103,14 +127,19 @@ impl ResumeBoundary {
         if !chunk.has_data() {
             return;
         }
-        if let Some(boundary) = self.0.take() {
+        if let Some(boundary) = self.resume.take() {
             if let Ok(mut index) = line_index.write() {
                 if index.last().is_none_or(|&last| last < boundary) {
                     index.push(boundary);
                 }
             }
         }
-        record_line_offsets(line_index, chunk.data(), chunk.global_offset());
+        record_line_offsets(
+            line_index,
+            chunk.data(),
+            chunk.global_offset(),
+            &mut self.pending_cr,
+        );
     }
 }
 
@@ -149,7 +178,7 @@ pub fn spawn_worker_thread(
         // グローバルオフセット。新しいストアなら 0、自動再接続で同じストアに
         // 追記を再開したときは前回までの総バイト数から続ける
         let mut global_offset = start_offset;
-        let mut boundary = ResumeBoundary::new(&line_index, start_offset);
+        let mut boundary = LineIndexer::new(&line_index, start_offset);
         let mut loop_count = 0u64;
         let mut last_status_log = Instant::now();
         // 受信が止まる時間の診断（5 秒窓の最大値）。フロー制御の無い UART では
@@ -613,7 +642,7 @@ mod tests {
     #[test]
     fn test_resume_boundary_splits_cut_line() {
         let index = RwLock::new(vec![0, 4]); // "abc\nde" の後で切断（total 6）
-        let mut boundary = ResumeBoundary::new(&index, 6);
+        let mut boundary = LineIndexer::new(&index, 6);
         boundary.record(&index, &chunk_at(6, b"")); // 空チャンクでは入れない
         assert_eq!(*index.read().unwrap(), vec![0, 4]);
         boundary.record(&index, &chunk_at(6, b"xy\n"));
@@ -625,16 +654,28 @@ mod tests {
     #[test]
     fn test_resume_boundary_not_needed_after_newline() {
         let index = RwLock::new(vec![0, 4]); // "abc\n" の後で切断（total 4）
-        let mut boundary = ResumeBoundary::new(&index, 4);
+        let mut boundary = LineIndexer::new(&index, 4);
         boundary.record(&index, &chunk_at(4, b"x\n"));
         assert_eq!(*index.read().unwrap(), vec![0, 4, 6]);
+    }
+
+    /// 切断直前が CR（保留のまま）でも、再開位置が行頭として入る
+    #[test]
+    fn test_resume_after_pending_cr() {
+        let index = RwLock::new(vec![0]);
+        let mut first = LineIndexer::new(&index, 0);
+        first.record(&index, &chunk_at(0, b"ab\r")); // CR pending when the worker stops
+        assert_eq!(*index.read().unwrap(), vec![0]);
+        let mut resumed = LineIndexer::new(&index, 3);
+        resumed.record(&index, &chunk_at(3, b"cd\r\n"));
+        assert_eq!(*index.read().unwrap(), vec![0, 3, 7]);
     }
 
     /// 新しいストア（start_offset 0）では何もしない
     #[test]
     fn test_resume_boundary_noop_for_new_store() {
         let index = RwLock::new(vec![0]);
-        let mut boundary = ResumeBoundary::new(&index, 0);
+        let mut boundary = LineIndexer::new(&index, 0);
         boundary.record(&index, &chunk_at(0, b"a\nb"));
         assert_eq!(*index.read().unwrap(), vec![0, 2]);
     }
@@ -645,7 +686,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"Hello\nWorld\n";
 
-        record_line_offsets(&line_index, data, 0);
+        record_line_offsets(&line_index, data, 0, &mut false);
 
         let index = line_index.read().unwrap();
         // Initial [0] + 2 newlines: [0, 6, 12]
@@ -661,7 +702,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"Line\n";
 
-        record_line_offsets(&line_index, data, 100);
+        record_line_offsets(&line_index, data, 100, &mut false);
 
         let index = line_index.read().unwrap();
         assert_eq!(index.len(), 2);
@@ -675,8 +716,8 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"A\n";
 
-        record_line_offsets(&line_index, data, 0);
-        record_line_offsets(&line_index, data, 0); // Same data again
+        record_line_offsets(&line_index, data, 0, &mut false);
+        record_line_offsets(&line_index, data, 0, &mut false); // Same data again
 
         let index = line_index.read().unwrap();
         // Should not duplicate: [0, 2]
@@ -689,7 +730,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"";
 
-        record_line_offsets(&line_index, data, 0);
+        record_line_offsets(&line_index, data, 0, &mut false);
 
         let index = line_index.read().unwrap();
         // No change: [0]
@@ -702,7 +743,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"NoNewlineHere";
 
-        record_line_offsets(&line_index, data, 0);
+        record_line_offsets(&line_index, data, 0, &mut false);
 
         let index = line_index.read().unwrap();
         // No change: [0]
@@ -715,7 +756,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"\n\n\n";
 
-        record_line_offsets(&line_index, data, 0);
+        record_line_offsets(&line_index, data, 0, &mut false);
 
         let index = line_index.read().unwrap();
         // [0, 1, 2, 3]
@@ -726,17 +767,39 @@ mod tests {
         assert_eq!(index[3], 3);
     }
 
-    /// record_line_offsets should only detect LF, not CR
+    /// Line starts for `parts` fed as consecutive chunks
+    fn index_of(parts: &[&[u8]]) -> Vec<u64> {
+        let line_index = RwLock::new(vec![0u64]);
+        let mut pending = false;
+        let mut offset = 0;
+        for part in parts {
+            record_line_offsets(&line_index, part, offset, &mut pending);
+            offset += part.len() as u64;
+        }
+        line_index.into_inner().unwrap()
+    }
+
+    /// A lone CR ends a line (C# version), CRLF is one break, LF CR and CR CR are two
     #[test]
-    fn test_record_line_offsets_ignores_cr() {
-        let line_index = Arc::new(RwLock::new(vec![0u64]));
-        let data = b"Hello\rWorld"; // CR only, no LF
+    fn test_record_line_offsets_cr_rules() {
+        assert_eq!(index_of(&[b"Hello\rWorld"]), vec![0, 6]);
+        assert_eq!(index_of(&[b"a\r\nb"]), vec![0, 3]);
+        assert_eq!(index_of(&[b"a\n\rb"]), vec![0, 2, 3]);
+        assert_eq!(index_of(&[b"a\r\rb"]), vec![0, 2, 3]);
+        assert_eq!(index_of(&[b"a\rb\rc\r"]), vec![0, 2, 4]); // last CR still pending
+    }
 
-        record_line_offsets(&line_index, data, 0);
-
-        let index = line_index.read().unwrap();
-        // No change: [0] - CR is not treated as line boundary
-        assert_eq!(index.len(), 1);
+    /// A CR at the end of a chunk is decided by the next chunk's first byte
+    #[test]
+    fn test_record_line_offsets_cr_across_chunks() {
+        assert_eq!(index_of(&[b"a\r", b"\nb"]), vec![0, 3]);
+        assert_eq!(index_of(&[b"a\r", b"b"]), vec![0, 2]);
+        assert_eq!(index_of(&[b"a\r", b"", b"b"]), vec![0, 2]);
+        assert_eq!(index_of(&[b"a\r", b"\r", b"\n"]), vec![0, 2, 4]);
+        // Byte by byte gives the same index as one chunk
+        let data = b"x\ry\r\nz\n\r\rw";
+        let bytes: Vec<&[u8]> = data.chunks(1).collect();
+        assert_eq!(index_of(&bytes), index_of(&[data]));
     }
 
     /// record_line_offsets should detect LF in CRLF sequences
@@ -745,7 +808,7 @@ mod tests {
         let line_index = Arc::new(RwLock::new(vec![0u64]));
         let data = b"Hello\r\nWorld\r\n";
 
-        record_line_offsets(&line_index, data, 0);
+        record_line_offsets(&line_index, data, 0, &mut false);
 
         let index = line_index.read().unwrap();
         // [0, 7, 14] - LF at positions 6 and 13

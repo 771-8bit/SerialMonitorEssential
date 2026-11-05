@@ -100,7 +100,7 @@ function timeoutMessage(method, ms) {
 export function connectedLabel(res) {
   if (res.connected === true) return 'yes';
   if (res.reconnecting === true) {
-    return 'no (device went away; the app reconnects when it returns and the capture continues at the same offsets)';
+    return 'no (Auto Connect is waiting for the device; the app connects when it is available and the capture continues at the same offsets)';
   }
   return 'no';
 }

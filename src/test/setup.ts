@@ -14,3 +14,9 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   save: vi.fn(),
   ask: vi.fn(),
 }));
+
+// Settings persist in localStorage (issue #7); start every test from the defaults so
+// a value saved by one test cannot leak into the next.
+beforeEach(() => {
+  localStorage.clear();
+});
