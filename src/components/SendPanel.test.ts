@@ -111,7 +111,13 @@ describe('SendPanel - History Management', () => {
     expect(result[19]).toBe('item18'); // last item dropped
   });
 
-  it('handles empty string as valid item', () => {
-    expect(addToHistory(['a'], '')).toEqual(['', 'a']);
+  it('does not remember empty or line-break-only input (C# version rule)', () => {
+    expect(addToHistory(['a'], '')).toEqual(['a']);
+    expect(addToHistory(['a'], '\n')).toEqual(['a']);
+    expect(addToHistory(['a'], '\r\n\r\n')).toEqual(['a']);
+  });
+
+  it('remembers whitespace-only input that is not just line breaks', () => {
+    expect(addToHistory(['a'], ' ')).toEqual([' ', 'a']);
   });
 });

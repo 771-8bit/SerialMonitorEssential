@@ -72,7 +72,8 @@ export function appendLineEnding(data: number[], lineEnding: LineEnding): number
 }
 
 /**
- * Add an item to history, avoiding duplicates of the most recent item.
+ * Add an item to history, avoiding duplicates of the most recent item and
+ * line-break-only input.
  *
  * @param history - Current history array (most recent first)
  * @param newItem - Item to add
@@ -80,6 +81,11 @@ export function appendLineEnding(data: number[], lineEnding: LineEnding): number
  * @returns New history array
  */
 export function addToHistory(history: string[], newItem: string, maxSize: number = 20): string[] {
+  // Input that is empty once line breaks are removed is sent but not remembered
+  // (same rule as the C# version)
+  if (newItem.replace(/[\r\n]/g, '') === '') {
+    return history;
+  }
   // If same as the most recent one, don't add
   if (history.length > 0 && history[0] === newItem) {
     return history;
