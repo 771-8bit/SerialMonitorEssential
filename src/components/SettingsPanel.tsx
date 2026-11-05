@@ -66,16 +66,39 @@ interface SettingsPanelProps {
   isConnected: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
-  /** Reopen the port when the lost device comes back (SYS-F-807) */
-  autoReconnect: boolean;
-  onAutoReconnectChange: (enabled: boolean) => void;
+  /** Connect to the selected port whenever it is available (SYS-F-807) */
+  autoConnect: boolean;
+  onAutoConnectChange: (enabled: boolean) => void;
   /** Device path being waited for, or null when not waiting */
   reconnectWaitingFor: string | null;
-  /** Time (ms) of the last automatic reconnect, shown until the next manual action */
+  /** Why the port being waited for could not be opened (e.g. in use elsewhere) */
+  reconnectError?: string | null;
+  /** Time (ms) of the last automatic connect, shown until the next manual action */
   reconnectedAt: number | null;
   /** Color theme (issue #6) */
   theme: ThemeSetting;
   onThemeChange: (theme: ThemeSetting) => void;
+}
+
+const DTR_HELP =
+  'DTR is off by default so that opening the port does not reset the board. ' +
+  'Arduino Uno, Nano and Mega (including CH340 clones) reset whenever DTR turns on, ' +
+  'as they do with the Arduino IDE. ' +
+  'Boards with native USB (Leonardo, Micro, Raspberry Pi Pico, ESP32-S2/S3/C3 USB) ' +
+  'may send nothing, or wait in while (!Serial), until DTR is on: tick DtrEnable for those.';
+
+const RTS_HELP =
+  'RTS is off by default. On ESP32 and ESP8266 boards with the usual auto-reset circuit, ' +
+  'RTS on while DTR is off holds the chip in reset. With both on, the board runs normally. ' +
+  'Arduino AVR boards ignore RTS.';
+
+/** "?" mark that shows a note on hover (and on keyboard focus) */
+function HelpMark({ text }: { text: string }) {
+  return (
+    <span className="help-mark" title={text} aria-label={text} tabIndex={0} role="img">
+      ?
+    </span>
+  );
 }
 
 const THEME_LABELS: Record<ThemeSetting, string> = {
@@ -84,9 +107,10 @@ const THEME_LABELS: Record<ThemeSetting, string> = {
   system: 'System',
 };
 
-const AUTO_RECONNECT_TOOLTIP =
-  'When the device goes away (unplugged or reset) and comes back, reopen it automatically. ' +
-  'The capture continues; nothing is cleared.';
+const AUTO_CONNECT_TOOLTIP =
+  'Connect to the selected port whenever it is available: at startup, when the device is ' +
+  'plugged in, and after a reset or unplug. The capture continues; nothing is cleared. ' +
+  'Disconnect turns this off.';
 
 export default function SettingsPanel({
   ports,
@@ -98,9 +122,10 @@ export default function SettingsPanel({
   isConnected,
   onConnect,
   onDisconnect,
-  autoReconnect,
-  onAutoReconnectChange,
+  autoConnect,
+  onAutoConnectChange,
   reconnectWaitingFor,
+  reconnectError = null,
   reconnectedAt,
   theme,
   onThemeChange,
@@ -343,13 +368,13 @@ export default function SettingsPanel({
           {reconnectWaitingFor !== null ? 'Cancel' : isConnected ? 'Disconnect' : 'Connect'}
         </button>
 
-        <label className="checkbox-label" title={AUTO_RECONNECT_TOOLTIP}>
+        <label className="checkbox-label" title={AUTO_CONNECT_TOOLTIP}>
           <input
             type="checkbox"
-            checked={autoReconnect}
-            onChange={(e) => onAutoReconnectChange(e.target.checked)}
+            checked={autoConnect}
+            onChange={(e) => onAutoConnectChange(e.target.checked)}
           />
-          Auto Reconnect
+          Auto Connect
         </label>
       </div>
 
@@ -393,6 +418,7 @@ export default function SettingsPanel({
             />{' '}
             DtrEnable
           </label>
+          <HelpMark text={DTR_HELP} />
           <label>
             <input
               type="checkbox"
@@ -401,6 +427,7 @@ export default function SettingsPanel({
             />{' '}
             RtsEnable
           </label>
+          <HelpMark text={RTS_HELP} />
         </div>
 
         <div className="advanced-group">
@@ -476,20 +503,23 @@ export default function SettingsPanel({
           </>
         )}
 
-        {/* Auto Reconnect status. Kept out of the first row: its text contains the
+        {/* Auto Connect status. Kept out of the first row: its text contains the
             device path, and nothing there may change the width of the port list */}
         {reconnectWaitingFor !== null ? (
           <span
             className="reconnect-status waiting"
             role="status"
-            title={`Waiting for ${reconnectWaitingFor}…`}
+            title={
+              `Waiting for ${reconnectWaitingFor}…` +
+              (reconnectError !== null ? ` (${reconnectError})` : '')
+            }
           >
-            Waiting for {reconnectWaitingFor}…
+            Waiting for {reconnectWaitingFor}…{reconnectError !== null && ' (cannot open the port)'}
           </span>
         ) : (
           reconnectedAt !== null && (
             <span className="reconnect-status" role="status">
-              Reconnected {new Date(reconnectedAt).toLocaleTimeString()}
+              Connected automatically {new Date(reconnectedAt).toLocaleTimeString()}
             </span>
           )
         )}

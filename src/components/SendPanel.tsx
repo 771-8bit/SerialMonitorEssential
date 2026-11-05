@@ -1,12 +1,7 @@
 import { useState, useRef, KeyboardEvent } from 'react';
 import { usePersistentState, isBoolean, isOneOf } from '../utils/persist';
 import { invoke } from '@tauri-apps/api/core';
-import {
-  parseHexString,
-  appendLineEnding,
-  addToHistory,
-  type LineEnding,
-} from '../utils/sendUtils';
+import { parseHex, appendLineEnding, addToHistory, type LineEnding } from '../utils/sendUtils';
 
 interface SendPanelProps {
   connected: boolean;
@@ -26,10 +21,10 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
   const [inputText, setInputText] = useState('');
   const [lineEnding, setLineEnding] = usePersistentState<LineEnding>(
     'send.lineEnding',
-    'LF',
+    'NONE',
     isOneOf<LineEnding>(['NONE', 'CR', 'LF', 'CRLF'])
   );
-  const [sendOnEnter, setSendOnEnter] = usePersistentState('send.sendOnEnter', false, isBoolean);
+  const [sendOnEnter, setSendOnEnter] = usePersistentState('send.sendOnEnter', true, isBoolean);
   const [sendBinary, setSendBinary] = usePersistentState('send.sendBinary', false, isBoolean);
 
   // History
@@ -38,20 +33,20 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
   // Unsent draft, stashed when entering history navigation
   const draftRef = useRef('');
 
+  const hexMode = inputMode === 'HEX' || sendBinary;
+  // Checked while typing: the problem is shown under the input and Send stays disabled
+  const hexCheck = hexMode ? parseHex(inputText) : null;
+  const hexError =
+    hexCheck !== null && !hexCheck.ok ? `"${hexCheck.token}" is not a hex byte` : null;
+
   const handleSend = async () => {
-    if (!connected || !inputText) return;
+    if (!connected || !inputText || hexError !== null) return;
 
     let dataToSend: number[] = [];
 
     try {
-      if (inputMode === 'HEX' || sendBinary) {
-        // sendBinary flag or HEX mode
-        const parsed = parseHexString(inputText);
-        if (parsed === null) {
-          alert('Invalid Hex: Odd number of characters or invalid hex');
-          return;
-        }
-        dataToSend = parsed;
+      if (hexCheck !== null && hexCheck.ok) {
+        dataToSend = hexCheck.bytes;
       } else {
         // Convert string to bytes (UTF-8)
         const encoder = new TextEncoder();
@@ -115,16 +110,28 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
     <div className="send-panel">
       <div className="panel-header">Send</div>
       <div className="send-body">
-        <textarea
-          className="send-input"
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={!connected}
-          placeholder={inputMode === 'HEX' || sendBinary ? 'e.g. 48 65 6C 6C 6F' : ''}
-        />
+        <div className="send-input-column">
+          <textarea
+            className="send-input"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={!connected}
+            placeholder={hexMode ? 'e.g. 48 65 6C 6C 6F or 0A-0B' : ''}
+            aria-invalid={hexError !== null}
+          />
+          {hexError !== null && (
+            <div className="send-error" role="alert">
+              {hexError}. Use 1 or 2 hex digits per byte, separated by spaces, - , . / or :
+            </div>
+          )}
+        </div>
         <div className="send-controls">
-          <button onClick={handleSend} disabled={!connected || !inputText} className="send-button">
+          <button
+            onClick={handleSend}
+            disabled={!connected || !inputText || hexError !== null}
+            className="send-button"
+          >
             Send
           </button>
           <div className="send-options">

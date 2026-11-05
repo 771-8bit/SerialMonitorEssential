@@ -278,8 +278,20 @@ button:disabled {
   gap: 8px;
 }
 
-.send-input {
+.send-input-column {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.send-error {
+  color: var(--danger-text);
+  font-size: 12px;
+}
+
+.send-input {
   height: 80px;
   resize: none;
   border: 1px solid var(--border);
@@ -287,7 +299,9 @@ button:disabled {
   color: var(--text);
   border-radius: 3px;
   font-family: 'Consolas', monospace;
-  font-size: 13px;
+  /* Larger than the receive view (13px) so typos in commands are easy to spot,
+     as in the C# version (16pt send vs 12pt receive) */
+  font-size: 17px;
   padding: 6px;
 }
 
@@ -401,4 +415,21 @@ button:disabled {
   height: 24px;
   font-size: 12px;
   padding: 0 10px;
+}
+
+/* Copy / Save confirmation (non-blocking, disappears by itself) */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--bg-elevated);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  z-index: 1000;
 }

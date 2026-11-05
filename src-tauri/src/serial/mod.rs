@@ -221,6 +221,8 @@ pub struct DisplayRow {
     offset: u64,
     hex: String,
     ascii: String,
+    /// Reception time of the row's first byte (`HH:MM:SS.d`) when requested
+    timestamp: Option<String>,
 }
 
 /// Payload for get_display_rows command
@@ -257,6 +259,23 @@ fn bytes_to_hex(data: &[u8]) -> String {
         .join(" ")
 }
 
+/// Hex rows of `BYTES_PER_ROW` bytes as in the Hex view, each preceded by the
+/// reception time of its first byte (`data` starts at offset 0), one row per line
+fn hex_rows_with_timestamps(
+    data: &[u8],
+    separator: &str,
+    timestamp_at: impl Fn(u64) -> String,
+) -> String {
+    let mut out = String::with_capacity(data.len() / BYTES_PER_ROW * 72 + 72);
+    for (i, row) in data.chunks(BYTES_PER_ROW).enumerate() {
+        out.push_str(&timestamp_at((i * BYTES_PER_ROW) as u64));
+        out.push_str(separator);
+        out.push_str(&bytes_to_hex(row));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 /// Convert bytes to ASCII string
 fn bytes_to_ascii(data: &[u8]) -> String {
     data.iter().map(|&b| byte_to_ascii(b)).collect()
@@ -267,7 +286,9 @@ pub fn get_display_rows(
     state: State<'_, SerialState>,
     start_row: u64,
     row_count: u32,
+    show_timestamp: Option<bool>,
 ) -> Result<DisplayRowsPayload, String> {
+    let show_timestamp = show_timestamp.unwrap_or(false);
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
@@ -332,6 +353,9 @@ pub fn get_display_rows(
                     offset: row_offset,
                     hex: bytes_to_hex(row_data),
                     ascii: bytes_to_ascii(row_data),
+                    timestamp: show_timestamp.then(|| {
+                        format_line_timestamp(data_store.get_timestamp_for_offset(row_offset))
+                    }),
                 });
             }
         }
@@ -533,6 +557,18 @@ pub fn list_ports() -> Vec<String> {
     enumerate_ports()
 }
 
+/// List entry for a USB port: "Product (COM5)".
+///
+/// On Windows the product string is the device's friendly name, which already ends
+/// in " (COM5)"; that suffix is dropped so the entry does not read
+/// "USB Serial Port (COM5) (COM5)".
+fn usb_port_label(product: Option<&str>, port_name: &str) -> String {
+    let product = product.unwrap_or("Unknown Device");
+    let suffix = format!(" ({port_name})");
+    let product = product.strip_suffix(suffix.as_str()).unwrap_or(product);
+    format!("{product} ({port_name})")
+}
+
 /// 利用可能なポートの列挙（`list_ports` コマンドの実体）
 ///
 /// AI ブリッジの `ports` メソッドが GUI と同じ一覧を返せるよう、コマンド属性の
@@ -545,8 +581,7 @@ pub(crate) fn enumerate_ports() -> Vec<String> {
                 // Include friendly name for USB devices, or just the port name
                 match &p.port_type {
                     serialport::SerialPortType::UsbPort(info) => {
-                        let product = info.product.as_deref().unwrap_or("Unknown Device");
-                        format!("{} ({})", product, p.port_name)
+                        usb_port_label(info.product.as_deref(), &p.port_name)
                     }
                     serialport::SerialPortType::PciPort => {
                         format!("PCI Device ({})", p.port_name)
@@ -603,7 +638,7 @@ pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, St
 /// Separator between the timestamp and the data, as offered in the Receive panel
 fn validate_timestamp_separator(separator: &str) -> Result<(), String> {
     match separator {
-        " " | "," | "\t" => Ok(()),
+        " > " | " " | "," | "\t" => Ok(()),
         other => Err(format!("Unsupported timestamp separator: {:?}", other)),
     }
 }
@@ -695,8 +730,16 @@ pub fn get_clipboard_text(
         let to_read = total.min(u32::MAX as u64) as u32;
         let data = data_store.get_data(0, to_read)?;
 
+        // Timestamp ON in the Hex view: the rows as shown, each with its time
+        if let (Some(separator), true) = (timestamp_separator.as_deref(), mode == "hex") {
+            validate_timestamp_separator(separator)?;
+            return Ok(hex_rows_with_timestamps(&data, separator, |offset| {
+                format_line_timestamp(data_store.get_timestamp_for_offset(offset))
+            }));
+        }
+
         // Timestamp ON in the ASCII view (issue #4): the same text as Save
-        if let (Some(separator), false) = (timestamp_separator.as_deref(), mode == "hex") {
+        if let Some(separator) = timestamp_separator.as_deref() {
             validate_timestamp_separator(separator)?;
             let mut out = Vec::new();
             data_store.write_timestamped(&mut out, separator, format_line_timestamp)?;
@@ -759,6 +802,39 @@ mod tests {
         // Degenerate inputs fall back to the whole string
         assert_eq!(extract_port_path("weird ) ( order"), "weird ) ( order");
         assert_eq!(extract_port_path(""), "");
+    }
+
+    #[test]
+    fn hex_rows_with_timestamps_puts_each_row_on_its_own_line() {
+        let data: Vec<u8> = (0u8..20).collect();
+        let text = hex_rows_with_timestamps(&data, " > ", |offset| format!("t{offset}"));
+        assert_eq!(
+            text,
+            "t0 > 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F\r\nt16 > 10 11 12 13\r\n"
+        );
+        assert_eq!(hex_rows_with_timestamps(&[], ",", |_| String::new()), "");
+    }
+
+    #[test]
+    fn usb_port_label_drops_the_duplicated_port_suffix() {
+        assert_eq!(
+            usb_port_label(Some("USB Serial Port (COM5)"), "COM5"),
+            "USB Serial Port (COM5)"
+        );
+        assert_eq!(
+            usb_port_label(Some("CP2102 USB to UART"), "/dev/ttyUSB0"),
+            "CP2102 USB to UART (/dev/ttyUSB0)"
+        );
+        assert_eq!(usb_port_label(None, "COM7"), "Unknown Device (COM7)");
+        // Another port's number in the name is kept
+        assert_eq!(
+            usb_port_label(Some("Bridge (COM4)"), "COM5"),
+            "Bridge (COM4) (COM5)"
+        );
+        assert_eq!(
+            extract_port_path(&usb_port_label(Some("X (COM5)"), "COM5")),
+            "COM5"
+        );
     }
 
     #[test]

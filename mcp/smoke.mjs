@@ -574,7 +574,7 @@ function testConnectedLabel() {
     'status shows a pending reconnect so the agent knows to wait',
     connectedLabel({ connected: true }) === 'yes' &&
       connectedLabel({ connected: false }) === 'no' &&
-      connectedLabel({ connected: false, reconnecting: true }).startsWith('no (device went away;'),
+      connectedLabel({ connected: false, reconnecting: true }).startsWith('no (Auto Connect is waiting'),
     connectedLabel({ connected: false, reconnecting: true })
   );
 }

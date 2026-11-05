@@ -10,6 +10,7 @@ interface DisplayRow {
   offset: number;
   hex: string;
   ascii: string;
+  timestamp: string | null;
 }
 
 interface DisplayRowsPayload {
@@ -22,6 +23,8 @@ interface HexViewerProps {
   autoScroll: boolean;
   initialOffset?: number;
   onScrollChange?: (byteOffset: number) => void;
+  /** Show the reception time of each row's first byte */
+  showTimestamp?: boolean;
 }
 
 export default function HexViewer({
@@ -29,6 +32,7 @@ export default function HexViewer({
   autoScroll,
   initialOffset = 0,
   onScrollChange = () => {},
+  showTimestamp = false,
 }: HexViewerProps) {
   // Data state
   const [rows, setRows] = useState<DisplayRow[]>([]);
@@ -71,6 +75,8 @@ export default function HexViewer({
   // Track visible-row count as of the last fetch, to detect viewport growth
   // (e.g. window resize) that should trigger a refetch of newly exposed rows.
   const prevVisibleRowsRef = useRef(visibleRows);
+  // Switching the timestamp column must refetch: the rows in hand lack (or carry) it
+  const prevShowTimestampRef = useRef(showTimestamp);
 
   // Fetch rows from backend
   const fetchRows = useCallback(
@@ -138,6 +144,7 @@ export default function HexViewer({
             const payload = await invoke<DisplayRowsPayload>('get_display_rows', {
               startRow: targetStartRow,
               rowCount: fetchCount,
+              showTimestamp,
             });
 
             // Only update state if this is still relevant?
@@ -158,7 +165,7 @@ export default function HexViewer({
         isFetchingRef.current = false;
       }
     },
-    [visibleRows]
+    [visibleRows, showTimestamp]
   );
 
   // Effect: fetch data when scroll position changes
@@ -183,7 +190,10 @@ export default function HexViewer({
     const viewportGrew = visibleRows > prevVisibleRowsRef.current;
     prevVisibleRowsRef.current = visibleRows;
 
-    fetchRows(startRow, forceRefetch || viewportGrew);
+    const timestampToggled = showTimestamp !== prevShowTimestampRef.current;
+    prevShowTimestampRef.current = showTimestamp;
+
+    fetchRows(startRow, forceRefetch || viewportGrew || timestampToggled);
   }, [
     totalBytes,
     scrollTop,
@@ -192,6 +202,7 @@ export default function HexViewer({
     fetchRows,
     effectiveTotalRows,
     visibleRows,
+    showTimestamp,
   ]);
 
   // Handle Ctrl+A to warn user about partial selection.
@@ -245,6 +256,7 @@ export default function HexViewer({
           <div style={{ position: 'absolute', top: displayTop, width: '100%' }}>
             {rows.map((row) => (
               <div key={row.offset} className="hex-row" style={{ height: ROW_HEIGHT }}>
+                {showTimestamp && <span className="hex-timestamp">{row.timestamp ?? ''}</span>}
                 <span className="hex-offset">
                   {row.offset.toString(16).padStart(8, '0').toUpperCase()}
                 </span>

@@ -176,6 +176,30 @@ describe('App', () => {
       expect(screen.getByLabelText('RtsEnable')).not.toBeChecked();
     });
 
+    it('opens a fresh install with DTR and RTS off so no board is reset', async () => {
+      render(<App />);
+      await flush();
+      expect(screen.getByLabelText('DtrEnable')).not.toBeChecked();
+      expect(screen.getByLabelText('RtsEnable')).not.toBeChecked();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await flush();
+      expect(mockInvoke).toHaveBeenCalledWith('open_port', {
+        portName: 'COM1',
+        config: expect.objectContaining({ dtr: false, rts: false, baud_rate: 115200 }),
+      });
+    });
+
+    it('explains DTR and RTS for Arduino boards on hover', async () => {
+      render(<App />);
+      await flush();
+      const marks = screen.getAllByText('?');
+      expect(marks).toHaveLength(2);
+      expect(marks[0].getAttribute('title')).toMatch(/Arduino Uno.*reset/);
+      expect(marks[0].getAttribute('title')).toMatch(/native USB/);
+      expect(marks[1].getAttribute('title')).toMatch(/ESP32.*reset/);
+    });
+
     it('keeps the preferred port when it is absent at startup', async () => {
       localStorage.setItem('sme.lastPort', JSON.stringify('COM7'));
       render(<App />);
@@ -190,9 +214,9 @@ describe('App', () => {
       render(<App />);
       await flush();
 
-      fireEvent.click(screen.getByLabelText('Line Wrap'));
+      fireEvent.click(screen.getByLabelText('Line Wrap')); // default OFF (C# version)
 
-      expect(localStorage.getItem('sme.receive.lineWrap')).toBe('false');
+      expect(localStorage.getItem('sme.receive.lineWrap')).toBe('true');
     });
   });
 
@@ -218,7 +242,7 @@ describe('App', () => {
       );
       expect(mockInvoke).toHaveBeenCalledWith('export_text_with_timestamps', {
         path: 'C:/tmp/log.txt',
-        separator: ' ',
+        separator: ' > ', // default separator (C# version)
       });
     });
 
@@ -250,7 +274,7 @@ describe('App', () => {
       });
     });
 
-    it('copies without timestamps in the Hex view', async () => {
+    it('copies the hex rows with timestamps in the Hex view', async () => {
       await renderWithData();
 
       fireEvent.click(
@@ -261,14 +285,84 @@ describe('App', () => {
 
       expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
         mode: 'hex',
+        timestampSeparator: ' > ',
+      });
+    });
+
+    it('copies the hex rows without timestamps when Timestamp is OFF', async () => {
+      await renderWithData();
+
+      fireEvent.click(
+        screen.getByTitle('Toggle between Hex and ASCII view').querySelector('input')!
+      );
+      fireEvent.click(screen.getByLabelText('Timestamp'));
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
+        mode: 'hex',
         timestampSeparator: null,
       });
     });
+
+    it('confirms a copy with a toast that goes away by itself', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_ports') return Promise.resolve(['COM1']);
+        if (cmd === 'get_clipboard_text') return Promise.resolve('hello');
+        return Promise.resolve(undefined);
+      });
+      await renderWithData();
+
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(writeText).toHaveBeenCalledWith('hello');
+      expect(screen.getByText('Copied')).toHaveAttribute('role', 'status');
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(screen.queryByText('Copied')).toBeNull();
+    });
+
+    it('says there is nothing to copy or save when the capture is empty', async () => {
+      render(<App />);
+      await flush();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+      expect(screen.getByText('Nothing to copy')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+      expect(screen.getByText('Nothing to save')).toBeInTheDocument();
+      expect(window.alert).not.toHaveBeenCalled();
+    });
+
+    it('saves the raw bytes in the Hex view even with Timestamp ON', async () => {
+      const { save } = await import('@tauri-apps/plugin-dialog');
+      vi.mocked(save).mockResolvedValue('C:/tmp/log.bin');
+      await renderWithData();
+
+      fireEvent.click(
+        screen.getByTitle('Toggle between Hex and ASCII view').querySelector('input')!
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+
+      expect(mockInvoke).toHaveBeenCalledWith('export_log', { path: 'C:/tmp/log.bin' });
+      expect(mockInvoke).not.toHaveBeenCalledWith('export_text_with_timestamps', expect.anything());
+    });
   });
 
-  // ---------------- Auto reconnect (SYS-F-807) ----------------
+  // ---------------- Auto Connect (SYS-F-807) ----------------
 
-  describe('auto reconnect', () => {
+  describe('auto connect', () => {
     let available: string[];
     let reopenFails: boolean;
 
@@ -300,15 +394,16 @@ describe('App', () => {
       await flush();
     }
 
-    /** Render, turn Auto Reconnect on, connect, then lose the device */
+    /** Render, connect, turn Auto Connect on, then lose the device */
     async function connectAndLoseDevice() {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       render(<App />);
       await flush();
-      fireEvent.click(screen.getByLabelText('Auto Reconnect'));
       fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
       await flush();
       expect(invoked('open_port')).toHaveLength(1);
+      fireEvent.click(screen.getByLabelText('Auto Connect'));
+      await flush();
 
       available = [];
       emit('serial-status', { connected: false, error: 'Device removed' });
@@ -348,7 +443,7 @@ describe('App', () => {
       reopenFails = false;
       await tick(500);
       expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
-      expect(screen.getByRole('status')).toHaveTextContent('Reconnected');
+      expect(screen.getByRole('status')).toHaveTextContent('Connected automatically');
       expect(mockInvoke).toHaveBeenCalledWith('set_reconnecting', { waiting: false });
       expect(lastArgs('reopen_port')).toMatchObject({ portName: 'Pico (COM1)' });
       // Continuing the capture, never a new session
@@ -359,6 +454,21 @@ describe('App', () => {
       expect(invoked('reopen_port')).toHaveLength(attempts); // stopped polling
     });
 
+    it('slows down and says so when the port is listed but cannot be opened', async () => {
+      await connectAndLoseDevice();
+      available = ['Pico (COM1)'];
+      reopenFails = true; // e.g. another program holds the port
+
+      // 200 ms retries until the 5th failure (one tick per retry: each attempt awaits)
+      for (let i = 0; i < 6; i++) await tick(200);
+      const fast = invoked('reopen_port').length;
+      expect(fast).toBeGreaterThanOrEqual(5);
+      expect(screen.getByRole('status')).toHaveTextContent('(cannot open the port)');
+
+      for (let i = 0; i < 10; i++) await tick(200);
+      expect(invoked('reopen_port').length - fast).toBeLessThanOrEqual(2); // 1 s retries
+    });
+
     it('matches on the device path even if the friendly name changes', async () => {
       await connectAndLoseDevice();
       available = ['USB Serial Device (COM1)'];
@@ -366,35 +476,99 @@ describe('App', () => {
       expect(lastArgs('reopen_port')).toMatchObject({ portName: 'USB Serial Device (COM1)' });
     });
 
-    it('Cancel stops waiting and never reopens', async () => {
+    it('Cancel stops waiting, turns Auto Connect off and never reopens', async () => {
       await connectAndLoseDevice();
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
       await flush();
       expect(mockInvoke).toHaveBeenCalledWith('set_reconnecting', { waiting: false });
       expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Auto Connect')).not.toBeChecked();
 
       available = ['Pico (COM1)'];
       await tick(2000);
       expect(invoked('reopen_port')).toHaveLength(0);
+    });
+
+    it('Disconnect turns Auto Connect off so the port is not reopened (C# version)', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<App />);
+      await flush();
+      fireEvent.click(screen.getByLabelText('Auto Connect'));
+      await tick(200);
+      expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+      await flush();
+      expect(mockInvoke).toHaveBeenCalledWith('close_port');
+      expect(screen.getByLabelText('Auto Connect')).not.toBeChecked();
+      expect(localStorage.getItem('sme.autoConnect')).toBe('false');
+
+      const attempts = invoked('reopen_port').length;
+      await tick(2000);
+      expect(invoked('reopen_port')).toHaveLength(attempts);
     });
 
     it('turning the option off while waiting stops waiting', async () => {
       await connectAndLoseDevice();
-      fireEvent.click(screen.getByLabelText('Auto Reconnect'));
+      fireEvent.click(screen.getByLabelText('Auto Connect'));
       await flush();
 
       available = ['Pico (COM1)'];
       await tick(2000);
       expect(invoked('reopen_port')).toHaveLength(0);
-      expect(localStorage.getItem('sme.autoReconnect')).toBe('false');
+      expect(localStorage.getItem('sme.autoConnect')).toBe('false');
     });
 
-    it('remembers the option across restarts', async () => {
+    it('connects to the selected port when turned on while idle', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
       render(<App />);
       await flush();
-      fireEvent.click(screen.getByLabelText('Auto Reconnect'));
-      expect(localStorage.getItem('sme.autoReconnect')).toBe('true');
+      fireEvent.click(screen.getByLabelText('Auto Connect'));
+      await tick(200);
+
+      expect(lastArgs('reopen_port')).toMatchObject({ portName: 'Pico (COM1)' });
+      expect(invoked('open_port')).toHaveLength(0);
+      expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+      expect(localStorage.getItem('sme.autoConnect')).toBe('true');
+    });
+
+    it('connects to the remembered port at startup', async () => {
+      localStorage.setItem('sme.autoConnect', 'true');
+      localStorage.setItem('sme.lastPort', JSON.stringify('Uno (COM3)'));
+      available = ['Pico (COM1)', 'Uno (COM3)'];
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<App />);
+      await tick(200);
+
+      expect(lastArgs('reopen_port')).toMatchObject({ portName: 'Uno (COM3)' });
+      expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    });
+
+    it('waits at startup for a remembered port that is not plugged in', async () => {
+      localStorage.setItem('sme.autoConnect', 'true');
+      localStorage.setItem('sme.lastPort', JSON.stringify('Uno (COM3)'));
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<App />);
+      await tick(1000);
+
+      expect(invoked('reopen_port')).toHaveLength(0);
+      expect(screen.getByRole('status')).toHaveTextContent('Waiting for COM3…');
+      const portSelect = screen.getAllByRole('combobox')[0] as HTMLSelectElement;
+      expect(portSelect.selectedOptions[0].textContent).toBe('Uno (COM3) (not present)');
+
+      available = ['Pico (COM1)', 'Uno (COM3)'];
+      await tick(400);
+      expect(lastArgs('reopen_port')).toMatchObject({ portName: 'Uno (COM3)' });
+    });
+
+    it('does not carry over the old Auto Reconnect setting', async () => {
+      localStorage.setItem('sme.autoReconnect', 'true');
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<App />);
+      await tick(1000);
+      expect(screen.getByLabelText('Auto Connect')).not.toBeChecked();
+      expect(invoked('reopen_port')).toHaveLength(0);
     });
   });
 
