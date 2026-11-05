@@ -176,6 +176,30 @@ describe('App', () => {
       expect(screen.getByLabelText('RtsEnable')).not.toBeChecked();
     });
 
+    it('opens a fresh install with DTR and RTS off so no board is reset', async () => {
+      render(<App />);
+      await flush();
+      expect(screen.getByLabelText('DtrEnable')).not.toBeChecked();
+      expect(screen.getByLabelText('RtsEnable')).not.toBeChecked();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+      await flush();
+      expect(mockInvoke).toHaveBeenCalledWith('open_port', {
+        portName: 'COM1',
+        config: expect.objectContaining({ dtr: false, rts: false, baud_rate: 115200 }),
+      });
+    });
+
+    it('explains DTR and RTS for Arduino boards on hover', async () => {
+      render(<App />);
+      await flush();
+      const marks = screen.getAllByText('?');
+      expect(marks).toHaveLength(2);
+      expect(marks[0].getAttribute('title')).toMatch(/Arduino Uno.*reset/);
+      expect(marks[0].getAttribute('title')).toMatch(/native USB/);
+      expect(marks[1].getAttribute('title')).toMatch(/ESP32.*reset/);
+    });
+
     it('keeps the preferred port when it is absent at startup', async () => {
       localStorage.setItem('sme.lastPort', JSON.stringify('COM7'));
       render(<App />);
@@ -190,9 +214,9 @@ describe('App', () => {
       render(<App />);
       await flush();
 
-      fireEvent.click(screen.getByLabelText('Line Wrap'));
+      fireEvent.click(screen.getByLabelText('Line Wrap')); // default OFF (C# version)
 
-      expect(localStorage.getItem('sme.receive.lineWrap')).toBe('false');
+      expect(localStorage.getItem('sme.receive.lineWrap')).toBe('true');
     });
   });
 
@@ -218,7 +242,7 @@ describe('App', () => {
       );
       expect(mockInvoke).toHaveBeenCalledWith('export_text_with_timestamps', {
         path: 'C:/tmp/log.txt',
-        separator: ' ',
+        separator: ' > ', // default separator (C# version)
       });
     });
 
@@ -261,7 +285,7 @@ describe('App', () => {
 
       expect(mockInvoke).toHaveBeenCalledWith('get_clipboard_text', {
         mode: 'hex',
-        timestampSeparator: ' ',
+        timestampSeparator: ' > ',
       });
     });
 

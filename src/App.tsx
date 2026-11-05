@@ -37,8 +37,11 @@ const DEFAULT_SERIAL_CONFIG: SerialConfig = {
   flow_control: 'None',
   parity: 'None',
   stop_bits: 1,
-  dtr: true,
-  rts: true,
+  // Both off so that opening the port resets no board: DTR on resets Arduino Uno-type
+  // boards, RTS on (without DTR) holds ESP32-style boards in reset. Native-USB boards
+  // may need DTR on to send; the settings panel explains this next to the checkboxes.
+  dtr: false,
+  rts: false,
 };
 
 // The port the user last chose. Saved only on a user choice or Connect, never by the

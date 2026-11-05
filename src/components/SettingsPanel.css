@@ -138,3 +138,27 @@
 .reconnect-status + .theme-control {
   margin-left: 16px;
 }
+
+/* "?" next to DtrEnable / RtsEnable: the note appears on hover */
+.help-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: -4px;
+  border: 1px solid var(--text-dim);
+  border-radius: 50%;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+.help-mark:hover,
+.help-mark:focus-visible {
+  color: var(--text);
+  border-color: var(--text);
+}

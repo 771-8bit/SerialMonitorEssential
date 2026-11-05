@@ -21,10 +21,10 @@ export default function SendPanel({ connected, onSend }: SendPanelProps) {
   const [inputText, setInputText] = useState('');
   const [lineEnding, setLineEnding] = usePersistentState<LineEnding>(
     'send.lineEnding',
-    'LF',
+    'NONE',
     isOneOf<LineEnding>(['NONE', 'CR', 'LF', 'CRLF'])
   );
-  const [sendOnEnter, setSendOnEnter] = usePersistentState('send.sendOnEnter', false, isBoolean);
+  const [sendOnEnter, setSendOnEnter] = usePersistentState('send.sendOnEnter', true, isBoolean);
   const [sendBinary, setSendBinary] = usePersistentState('send.sendBinary', false, isBoolean);
 
   // History

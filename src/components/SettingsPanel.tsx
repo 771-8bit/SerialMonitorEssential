@@ -80,6 +80,27 @@ interface SettingsPanelProps {
   onThemeChange: (theme: ThemeSetting) => void;
 }
 
+const DTR_HELP =
+  'DTR is off by default so that opening the port does not reset the board. ' +
+  'Arduino Uno, Nano and Mega (including CH340 clones) reset whenever DTR turns on, ' +
+  'as they do with the Arduino IDE. ' +
+  'Boards with native USB (Leonardo, Micro, Raspberry Pi Pico, ESP32-S2/S3/C3 USB) ' +
+  'may send nothing, or wait in while (!Serial), until DTR is on: tick DtrEnable for those.';
+
+const RTS_HELP =
+  'RTS is off by default. On ESP32 and ESP8266 boards with the usual auto-reset circuit, ' +
+  'RTS on while DTR is off holds the chip in reset. With both on, the board runs normally. ' +
+  'Arduino AVR boards ignore RTS.';
+
+/** "?" mark that shows a note on hover (and on keyboard focus) */
+function HelpMark({ text }: { text: string }) {
+  return (
+    <span className="help-mark" title={text} aria-label={text} tabIndex={0} role="img">
+      ?
+    </span>
+  );
+}
+
 const THEME_LABELS: Record<ThemeSetting, string> = {
   dark: 'Dark',
   light: 'Light',
@@ -397,6 +418,7 @@ export default function SettingsPanel({
             />{' '}
             DtrEnable
           </label>
+          <HelpMark text={DTR_HELP} />
           <label>
             <input
               type="checkbox"
@@ -405,6 +427,7 @@ export default function SettingsPanel({
             />{' '}
             RtsEnable
           </label>
+          <HelpMark text={RTS_HELP} />
         </div>
 
         <div className="advanced-group">

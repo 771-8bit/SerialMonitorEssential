@@ -5,7 +5,7 @@ import { usePersistentState, isBoolean, isOneOf } from '../utils/persist';
 import './ReceivePanel.css';
 
 export type ViewMode = 'hex' | 'ascii';
-export type TimestampSeparator = ' ' | ',' | '\t';
+export type TimestampSeparator = ' > ' | ' ' | ',' | '\t';
 
 export interface ReceiveOptions {
   viewMode: ViewMode;
@@ -55,7 +55,7 @@ export default function ReceivePanel({
   );
 
   // Display options (ASCII mode only)
-  const [lineWrap, setLineWrap] = usePersistentState('receive.lineWrap', true, isBoolean);
+  const [lineWrap, setLineWrap] = usePersistentState('receive.lineWrap', false, isBoolean);
   // C# version: "Show [CRLF]" / "Show [NUL]", both off by default
   const [showCrLf, setShowCrLf] = usePersistentState('receive.showCrLf', false, isBoolean);
   const [showNul, setShowNul] = usePersistentState('receive.showNul', false, isBoolean);
@@ -66,8 +66,8 @@ export default function ReceivePanel({
   );
   const [timestampSeparator, setTimestampSeparator] = usePersistentState<TimestampSeparator>(
     'receive.timestampSeparator',
-    ' ',
-    isOneOf<TimestampSeparator>([' ', ',', '\t'])
+    ' > ',
+    isOneOf<TimestampSeparator>([' > ', ' ', ',', '\t'])
   );
 
   // Scroll position as byte offset (preserved across mode switches)

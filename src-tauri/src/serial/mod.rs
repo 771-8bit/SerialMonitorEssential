@@ -638,7 +638,7 @@ pub fn export_log(state: State<'_, SerialState>, path: String) -> Result<u64, St
 /// Separator between the timestamp and the data, as offered in the Receive panel
 fn validate_timestamp_separator(separator: &str) -> Result<(), String> {
     match separator {
-        " " | "," | "\t" => Ok(()),
+        " > " | " " | "," | "\t" => Ok(()),
         other => Err(format!("Unsupported timestamp separator: {:?}", other)),
     }
 }
