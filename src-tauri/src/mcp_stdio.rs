@@ -90,7 +90,7 @@ fn unreachable_message(host: &str, port: u16, detail: &str) -> String {
 fn connected_label(connected: bool, reconnecting: bool) -> &'static str {
     match (connected, reconnecting) {
         (true, _) => "yes",
-        (false, true) => "no (device went away; the app reconnects when it returns and the capture continues at the same offsets)",
+        (false, true) => "no (Auto Connect is waiting for the device; the app connects when it is available and the capture continues at the same offsets)",
         (false, false) => "no",
     }
 }
@@ -2414,7 +2414,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"serial_status"}}"#;
         let res = rpc(&mut bridge, call);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("connected: no (device went away;"), "{text}");
+        assert!(
+            text.contains("connected: no (Auto Connect is waiting"),
+            "{text}"
+        );
         let res = rpc(&mut bridge, call);
         let text = res["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("connected: no\n"), "{text}");

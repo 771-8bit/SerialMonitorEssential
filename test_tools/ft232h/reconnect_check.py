@@ -3,7 +3,7 @@
 自動再接続の実機確認（SYS-F-807 / docs/27 OV-1）。人が USB を抜き差しする。
 
 前提: アプリが FT232H（D0–D1 ループバック）のポートに接続済みで、
-      MCP Server と Auto Reconnect が ON（127.0.0.1:57320）。
+      MCP Server と Auto Connect が ON（127.0.0.1:57320）。
 
 やること:
   1. 200 ms ごとにブリッジの `send` で "tick N" を送る（ループバックで自分が受信する）
