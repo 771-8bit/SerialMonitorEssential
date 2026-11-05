@@ -299,7 +299,9 @@ button:disabled {
   color: var(--text);
   border-radius: 3px;
   font-family: 'Consolas', monospace;
-  font-size: 13px;
+  /* Larger than the receive view (13px) so typos in commands are easy to spot,
+     as in the C# version (16pt send vs 12pt receive) */
+  font-size: 17px;
   padding: 6px;
 }
 
