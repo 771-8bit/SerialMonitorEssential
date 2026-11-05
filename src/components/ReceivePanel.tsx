@@ -55,6 +55,9 @@ export default function ReceivePanel({
 
   // Display options (ASCII mode only)
   const [lineWrap, setLineWrap] = usePersistentState('receive.lineWrap', true, isBoolean);
+  // C# version: "Show [CRLF]" / "Show [NUL]", both off by default
+  const [showCrLf, setShowCrLf] = usePersistentState('receive.showCrLf', false, isBoolean);
+  const [showNul, setShowNul] = usePersistentState('receive.showNul', false, isBoolean);
   const [showTimestamp, setShowTimestamp] = usePersistentState(
     'receive.showTimestamp',
     true,
@@ -131,6 +134,8 @@ export default function ReceivePanel({
             initialOffset={scrollOffset}
             onScrollChange={setScrollOffset}
             timestampSeparator={timestampSeparator}
+            showCrLf={showCrLf}
+            showNul={showNul}
           />
         )}
       </div>
@@ -167,6 +172,32 @@ export default function ReceivePanel({
               disabled={viewMode === 'hex'}
             />
             Line Wrap
+          </label>
+
+          <label
+            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
+            title="Show CR, LF and TAB as symbols (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={showCrLf}
+              onChange={(e) => setShowCrLf(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Show CR/LF
+          </label>
+
+          <label
+            className={`control-label ${viewMode === 'hex' ? 'disabled' : ''}`}
+            title="Show NUL bytes as symbols instead of hiding them (ASCII mode only)"
+          >
+            <input
+              type="checkbox"
+              checked={showNul}
+              onChange={(e) => setShowNul(e.target.checked)}
+              disabled={viewMode === 'hex'}
+            />
+            Show NUL
           </label>
 
           <label

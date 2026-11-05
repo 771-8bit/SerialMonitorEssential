@@ -69,6 +69,13 @@
   display: inline;
   /* True inline to flow naturally with timestamp */
   line-height: 20px;
+  tab-size: 8;
+}
+
+/* CR/LF while Show CR/LF is off: invisible and zero-width, but still part of a
+   selection so that copying keeps the line breaks (display:none would drop them) */
+.ascii-hidden-ctrl {
+  font-size: 0;
 }
 
 /* Line wrap mode */

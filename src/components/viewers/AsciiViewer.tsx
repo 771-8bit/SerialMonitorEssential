@@ -4,6 +4,7 @@ import { ROW_HEIGHT, BUFFER_ROWS } from './viewerConstants';
 import { useByteScroll } from './useByteScroll';
 import { TAIL_START_LINE } from './scrollUtils';
 import './AsciiViewer.css';
+import { asciiDisplaySegments } from './asciiDisplay';
 
 interface AsciiLine {
   offset: number;
@@ -28,6 +29,10 @@ interface AsciiViewerProps {
   initialOffset?: number;
   onScrollChange?: (byteOffset: number) => void;
   timestampSeparator?: string;
+  /** Show CR/LF as symbols (otherwise hidden) and TAB as a symbol (otherwise a tab) */
+  showCrLf?: boolean;
+  /** Show NUL as a symbol (otherwise removed) */
+  showNul?: boolean;
 }
 
 export default function AsciiViewer({
@@ -38,6 +43,8 @@ export default function AsciiViewer({
   initialOffset = 0,
   onScrollChange = () => {},
   timestampSeparator = ' ',
+  showCrLf = false,
+  showNul = false,
 }: AsciiViewerProps) {
   // Data state
   const [lines, setLines] = useState<AsciiLine[]>([]);
@@ -373,7 +380,17 @@ export default function AsciiViewer({
                 style={{ height: lineWrap ? 'auto' : ROW_HEIGHT, minHeight: ROW_HEIGHT }}
               >
                 {showTimestamp && <span className="ascii-timestamp">{line.timestamp || ''}</span>}
-                <span className="ascii-text">{line.text}</span>
+                <span className="ascii-text">
+                  {asciiDisplaySegments(line.text, { showCrLf, showNul }).map((segment, i) =>
+                    segment.hidden ? (
+                      <span key={i} className="ascii-hidden-ctrl">
+                        {segment.text}
+                      </span>
+                    ) : (
+                      segment.text
+                    )
+                  )}
+                </span>
               </div>
             ))}
           </div>
