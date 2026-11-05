@@ -281,6 +281,45 @@ describe('App', () => {
       });
     });
 
+    it('confirms a copy with a toast that goes away by itself', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'list_ports') return Promise.resolve(['COM1']);
+        if (cmd === 'get_clipboard_text') return Promise.resolve('hello');
+        return Promise.resolve(undefined);
+      });
+      await renderWithData();
+
+      vi.useFakeTimers();
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(writeText).toHaveBeenCalledWith('hello');
+      expect(screen.getByText('Copied')).toHaveAttribute('role', 'status');
+      act(() => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(screen.queryByText('Copied')).toBeNull();
+    });
+
+    it('says there is nothing to copy or save when the capture is empty', async () => {
+      render(<App />);
+      await flush();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+      await flush();
+      expect(screen.getByText('Nothing to copy')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await flush();
+      expect(screen.getByText('Nothing to save')).toBeInTheDocument();
+      expect(window.alert).not.toHaveBeenCalled();
+    });
+
     it('saves the raw bytes in the Hex view even with Timestamp ON', async () => {
       const { save } = await import('@tauri-apps/plugin-dialog');
       vi.mocked(save).mockResolvedValue('C:/tmp/log.bin');

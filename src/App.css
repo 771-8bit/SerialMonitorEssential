@@ -416,3 +416,20 @@ button:disabled {
   font-size: 12px;
   padding: 0 10px;
 }
+
+/* Copy / Save confirmation (non-blocking, disappears by itself) */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--bg-elevated);
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  z-index: 1000;
+}

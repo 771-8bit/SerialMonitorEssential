@@ -8,6 +8,7 @@ import ReceivePanel, { OutputFormat } from './components/ReceivePanel';
 import { portPath } from './utils/portUtils';
 import { isSerialConfig } from './utils/serialConfig';
 import { useTheme } from './utils/theme';
+import { useToast } from './utils/useToast';
 import { usePersistentState, loadSetting, saveSetting, isBoolean, isString } from './utils/persist';
 import './App.css';
 
@@ -46,6 +47,8 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [totalBytes, setTotalBytes] = useState<number>(0);
   const [theme, setTheme] = useTheme();
+  // Confirms Copy / Save, as the C# version's auto-closing message box did
+  const [toast, showToast] = useToast();
 
   // Settings remembered across restarts (issue #7)
   const [autoScroll, setAutoScroll] = usePersistentState('receive.autoScroll', true, isBoolean);
@@ -315,7 +318,7 @@ function App() {
 
   async function handleExport(format: OutputFormat) {
     if (totalBytes === 0) {
-      alert('No data to export');
+      showToast('Nothing to save');
       return;
     }
 
@@ -349,6 +352,7 @@ function App() {
             })
           : await invoke<number>('export_log', { path: filePath });
         console.log(`Exported ${bytesExported.toLocaleString()} bytes to ${filePath}`);
+        showToast('Saved');
       }
     } catch (e) {
       console.error(e);
@@ -367,7 +371,10 @@ function App() {
   }
 
   async function handleCopy(format: OutputFormat) {
-    if (totalBytes === 0) return;
+    if (totalBytes === 0) {
+      showToast('Nothing to copy');
+      return;
+    }
 
     if (totalBytes > 10 * 1024 * 1024) {
       // 10MB
@@ -388,6 +395,9 @@ function App() {
       });
       if (text) {
         await navigator.clipboard.writeText(text);
+        showToast('Copied');
+      } else {
+        showToast('Nothing to copy');
       }
     } catch (e) {
       console.error(e);
@@ -439,6 +449,12 @@ function App() {
           onAutoScrollChange={setAutoScroll}
         />
       </div>
+
+      {toast !== null && (
+        <div className="toast" role="status" aria-live="polite">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
