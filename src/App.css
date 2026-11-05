@@ -278,8 +278,20 @@ button:disabled {
   gap: 8px;
 }
 
-.send-input {
+.send-input-column {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.send-error {
+  color: var(--danger-text);
+  font-size: 12px;
+}
+
+.send-input {
   height: 80px;
   resize: none;
   border: 1px solid var(--border);

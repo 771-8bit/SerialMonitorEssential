@@ -5,28 +5,47 @@
 
 export type LineEnding = 'NONE' | 'CR' | 'LF' | 'CRLF';
 
+export type HexParseResult = { ok: true; bytes: number[] } | { ok: false; token: string };
+
+/** Characters that separate bytes, as in the C# version (plus tab/newline and ':') */
+const HEX_SEPARATORS = /[\s,\-./:]+/;
+
 /**
- * Parse a hex string into an array of bytes.
- * Spaces are ignored. Returns null if invalid.
+ * Parse hex input into bytes, as the C# version did: the input is split at spaces,
+ * '-', ',', '.', '/' (and ':'), and every token is one byte of 1 or 2 hex digits, with
+ * an optional 0x prefix ("0A-0B", "1,2,3", "0x41 0x42"). A token with an even number
+ * of digits above 2 is read as consecutive bytes ("48656C6C6F").
  *
- * @param input - Hex string like "48 65 6C 6C 6F" or "48656C6C6F"
- * @returns Array of bytes or null if invalid
+ * Any other token is rejected and returned, so the caller can name it: "123" is
+ * ambiguous (0x12 0x03 or 0x01 0x23) and is never guessed.
+ */
+export function parseHex(input: string): HexParseResult {
+  const bytes: number[] = [];
+  for (const raw of input.split(HEX_SEPARATORS)) {
+    if (raw === '') continue;
+    const digits = /^0[xX]/.test(raw) ? raw.slice(2) : raw;
+    if (!/^[0-9a-fA-F]+$/.test(digits) || (digits.length > 2 && digits.length % 2 !== 0)) {
+      return { ok: false, token: raw };
+    }
+    if (digits.length <= 2) {
+      bytes.push(parseInt(digits, 16));
+    } else {
+      for (let i = 0; i < digits.length; i += 2) {
+        bytes.push(parseInt(digits.substring(i, i + 2), 16));
+      }
+    }
+  }
+  return { ok: true, bytes };
+}
+
+/**
+ * Parse hex input into bytes (see parseHex); null if any token is invalid.
+ *
+ * @param input - Hex string like "48 65 6C 6C 6F", "48656C6C6F" or "0A-0B"
  */
 export function parseHexString(input: string): number[] | null {
-  const cleanHex = input.replace(/\s+/g, '');
-  if (cleanHex.length % 2 !== 0) {
-    return null; // Invalid: odd number of characters
-  }
-  // Strict validation: parseInt('4G', 16) would silently parse the '4' and
-  // send the wrong byte, so reject any non-hex character up front.
-  if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
-    return null; // Invalid hex character
-  }
-  const result: number[] = [];
-  for (let i = 0; i < cleanHex.length; i += 2) {
-    result.push(parseInt(cleanHex.substring(i, i + 2), 16));
-  }
-  return result;
+  const result = parseHex(input);
+  return result.ok ? result.bytes : null;
 }
 
 /**

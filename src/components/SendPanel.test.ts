@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseHexString, appendLineEnding, addToHistory } from '../utils/sendUtils';
+import { parseHex, parseHexString, appendLineEnding, addToHistory } from '../utils/sendUtils';
 
 /**
  * SendPanel utility function tests
@@ -37,6 +37,30 @@ describe('SendPanel - Hex Parsing', () => {
 
   it('handles single byte', () => {
     expect(parseHexString('FF')).toEqual([0xff]);
+  });
+
+  // C# version: split at '-', ' ', ',', '.', '/', each token one byte
+  it('accepts the C# separators and one-digit bytes', () => {
+    expect(parseHexString('0A-0B')).toEqual([0x0a, 0x0b]);
+    expect(parseHexString('1,2,3')).toEqual([0x01, 0x02, 0x03]);
+    expect(parseHexString('a.b/c')).toEqual([0x0a, 0x0b, 0x0c]);
+    expect(parseHexString('01:02 03\t04\n05')).toEqual([1, 2, 3, 4, 5]);
+    expect(parseHexString('41-42-')).toEqual([0x41, 0x42]); // trailing separator
+  });
+
+  it('reads one-digit tokens as bytes instead of pairing digits across tokens', () => {
+    // Before, "12 3 4" was paired up as "1234" and sent 0x12 0x34
+    expect(parseHexString('12 3 4')).toEqual([0x12, 0x03, 0x04]);
+  });
+
+  it('accepts a 0x prefix', () => {
+    expect(parseHexString('0x41 0X42 0x4344')).toEqual([0x41, 0x42, 0x43, 0x44]);
+  });
+
+  it('names the token it cannot read', () => {
+    expect(parseHex('41 123 42')).toEqual({ ok: false, token: '123' });
+    expect(parseHex('41 G1')).toEqual({ ok: false, token: 'G1' });
+    expect(parseHex('0x')).toEqual({ ok: false, token: '0x' });
   });
 });
 
