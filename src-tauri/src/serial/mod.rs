@@ -533,6 +533,18 @@ pub fn list_ports() -> Vec<String> {
     enumerate_ports()
 }
 
+/// List entry for a USB port: "Product (COM5)".
+///
+/// On Windows the product string is the device's friendly name, which already ends
+/// in " (COM5)"; that suffix is dropped so the entry does not read
+/// "USB Serial Port (COM5) (COM5)".
+fn usb_port_label(product: Option<&str>, port_name: &str) -> String {
+    let product = product.unwrap_or("Unknown Device");
+    let suffix = format!(" ({port_name})");
+    let product = product.strip_suffix(suffix.as_str()).unwrap_or(product);
+    format!("{product} ({port_name})")
+}
+
 /// 利用可能なポートの列挙（`list_ports` コマンドの実体）
 ///
 /// AI ブリッジの `ports` メソッドが GUI と同じ一覧を返せるよう、コマンド属性の
@@ -545,8 +557,7 @@ pub(crate) fn enumerate_ports() -> Vec<String> {
                 // Include friendly name for USB devices, or just the port name
                 match &p.port_type {
                     serialport::SerialPortType::UsbPort(info) => {
-                        let product = info.product.as_deref().unwrap_or("Unknown Device");
-                        format!("{} ({})", product, p.port_name)
+                        usb_port_label(info.product.as_deref(), &p.port_name)
                     }
                     serialport::SerialPortType::PciPort => {
                         format!("PCI Device ({})", p.port_name)
@@ -759,6 +770,28 @@ mod tests {
         // Degenerate inputs fall back to the whole string
         assert_eq!(extract_port_path("weird ) ( order"), "weird ) ( order");
         assert_eq!(extract_port_path(""), "");
+    }
+
+    #[test]
+    fn usb_port_label_drops_the_duplicated_port_suffix() {
+        assert_eq!(
+            usb_port_label(Some("USB Serial Port (COM5)"), "COM5"),
+            "USB Serial Port (COM5)"
+        );
+        assert_eq!(
+            usb_port_label(Some("CP2102 USB to UART"), "/dev/ttyUSB0"),
+            "CP2102 USB to UART (/dev/ttyUSB0)"
+        );
+        assert_eq!(usb_port_label(None, "COM7"), "Unknown Device (COM7)");
+        // Another port's number in the name is kept
+        assert_eq!(
+            usb_port_label(Some("Bridge (COM4)"), "COM5"),
+            "Bridge (COM4) (COM5)"
+        );
+        assert_eq!(
+            extract_port_path(&usb_port_label(Some("X (COM5)"), "COM5")),
+            "COM5"
+        );
     }
 
     #[test]
