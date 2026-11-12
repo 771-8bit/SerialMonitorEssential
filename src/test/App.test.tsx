@@ -64,6 +64,9 @@ describe('App', () => {
     });
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'list_ports') return Promise.resolve(['COM1']);
+      if (cmd === 'open_port' || cmd === 'reopen_port') return Promise.resolve(1);
+      if (cmd === 'close_port') return Promise.resolve(true);
+      if (cmd === 'clear_data') return Promise.resolve(2);
       return Promise.resolve(undefined);
     });
   });
@@ -78,22 +81,38 @@ describe('App', () => {
   it('releases the backend port handle when a disconnect is detected', async () => {
     render(<App />);
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
     mockInvoke.mockClear();
 
-    emit('serial-status', { connected: false, error: 'Device removed' });
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: false,
+      error: 'Read failed',
+    });
+    await flush();
 
-    expect(mockInvoke).toHaveBeenCalledWith('close_port');
-    expect(window.alert).toHaveBeenCalledWith('Serial disconnected: Device removed');
+    expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
+    expect(window.alert).toHaveBeenCalledWith('Serial disconnected: Read failed');
   });
 
   it('still releases the handle when the disconnect carries no error text', async () => {
     render(<App />);
     await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
     mockInvoke.mockClear();
 
-    emit('serial-status', { connected: null, error: null });
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: false,
+      error: null,
+    });
+    await flush();
 
-    expect(mockInvoke).toHaveBeenCalledWith('close_port');
+    expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
     expect(window.alert).not.toHaveBeenCalled();
   });
 
@@ -105,6 +124,169 @@ describe('App', () => {
     emit('serial-status', { connected: true, error: null });
 
     expect(mockInvoke).not.toHaveBeenCalledWith('close_port');
+  });
+
+  it('reports a confirmed unplug without a blocking alert, retaining diagnostics', async () => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render(<App />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: true,
+      error: 'Failed to read from port: Os { code: 22 }',
+    });
+    await flush();
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
+    expect(window.alert).not.toHaveBeenCalled();
+    expect(diagnostic).toHaveBeenCalledWith(
+      'Serial disconnected:',
+      expect.stringContaining('code: 22')
+    );
+  });
+
+  it('ignores an old disconnect event after the same port is reopened', async () => {
+    render(<App />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await flush();
+    mockInvoke.mockResolvedValueOnce(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    mockInvoke.mockClear();
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: true,
+      error: 'old',
+    });
+    await flush();
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'close_port')).toHaveLength(0);
+    expect(window.alert).not.toHaveBeenCalled();
+  });
+
+  it('ignores a delayed cleanup reply once a new connection has opened', async () => {
+    render(<App />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    let finishClose!: (closed: boolean) => void;
+    mockInvoke.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishClose = resolve;
+        })
+    );
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: true,
+      error: 'old',
+    });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await flush();
+    mockInvoke.mockResolvedValueOnce(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    await act(async () => {
+      finishClose(true);
+    });
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+    expect(window.alert).not.toHaveBeenCalled();
+  });
+
+  it('handles an unplug that arrives before the open reply', async () => {
+    render(<App />);
+    await flush();
+    let finishOpen!: (id: number) => void;
+    mockInvoke.mockImplementationOnce(
+      () =>
+        new Promise<number>((resolve) => {
+          finishOpen = resolve;
+        })
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    emit('serial-status', {
+      connected: false,
+      connection_id: 1,
+      device_removed: true,
+      error: 'removed',
+    });
+    await act(async () => {
+      finishOpen(1);
+    });
+    await flush();
+    expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
+    expect(window.alert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the displayed byte count across disconnect, failed open and reconnect until Clear', async () => {
+    render(<App />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    emit('data-update', { capture_id: 1, total_bytes: 10 });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    await flush();
+    expect(screen.getByText(/Total: 10 bytes/)).toBeInTheDocument();
+    mockInvoke.mockRejectedValueOnce('busy');
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    expect(screen.getByText(/Total: 10 bytes/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    expect(screen.getByText(/Total: 10 bytes/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await flush();
+    expect(screen.getByText(/Total: 0 bytes/)).toBeInTheDocument();
+    emit('data-update', { capture_id: 1, total_bytes: 20 });
+    expect(screen.getByText(/Total: 0 bytes/)).toBeInTheDocument();
+  });
+
+  it('shows new data that arrives before the Clear reply even at the previous byte count', async () => {
+    let finishClear!: (captureId: number) => void;
+    let finishOldFetch!: (payload: unknown) => void;
+    let cleared = false;
+    const row = (text: string) => ({
+      lines: [{ offset: 0, text, timestamp: null }],
+      total_lines: 1,
+      start_line: 0,
+      reaches_end: true,
+    });
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return ['COM1'];
+      if (cmd === 'clear_data') return new Promise<number>((resolve) => (finishClear = resolve));
+      if (cmd === 'get_ascii_lines') {
+        if (cleared) return row('new capture');
+        return new Promise((resolve) => (finishOldFetch = resolve));
+      }
+      return undefined;
+    });
+
+    render(<App />);
+    await flush();
+    emit('data-update', { capture_id: 1, total_bytes: 10 });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    cleared = true;
+    emit('data-update', { capture_id: 2, total_bytes: 10 });
+    expect(await screen.findByText('new capture')).toBeInTheDocument();
+    await act(async () => {
+      finishClear(2);
+      finishOldFetch(row('old capture'));
+    });
+    expect(screen.getByText(/Total: 10 bytes/)).toBeInTheDocument();
+    expect(screen.getByText('new capture')).toBeInTheDocument();
+    expect(screen.queryByText('old capture')).not.toBeInTheDocument();
   });
 
   // ---------------- GAP-09 ----------------
@@ -226,7 +408,7 @@ describe('App', () => {
     async function renderWithData() {
       render(<App />);
       await flush();
-      emit('data-update', { total_bytes: 10 });
+      emit('data-update', { capture_id: 1, total_bytes: 10 });
     }
 
     it('saves text with timestamps when Timestamp is ON', async () => {
@@ -373,8 +555,10 @@ describe('App', () => {
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'list_ports') return Promise.resolve(available);
         if (cmd === 'reopen_port') {
-          return reopenFails ? Promise.reject('Access is denied.') : Promise.resolve(undefined);
+          return reopenFails ? Promise.reject('Access is denied.') : Promise.resolve(2);
         }
+        if (cmd === 'open_port') return Promise.resolve(1);
+        if (cmd === 'close_port') return Promise.resolve(true);
         return Promise.resolve(undefined);
       });
     });
@@ -406,14 +590,19 @@ describe('App', () => {
       await flush();
 
       available = [];
-      emit('serial-status', { connected: false, error: 'Device removed' });
+      emit('serial-status', {
+        connected: false,
+        connection_id: 1,
+        device_removed: true,
+        error: 'Device removed',
+      });
       await flush();
     }
 
     it('waits for the lost device without a blocking alert', async () => {
       await connectAndLoseDevice();
 
-      expect(mockInvoke).toHaveBeenCalledWith('close_port');
+      expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
       expect(window.alert).not.toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith('set_reconnecting', { waiting: true });
       expect(screen.getByRole('status')).toHaveTextContent('Waiting for COM1…');

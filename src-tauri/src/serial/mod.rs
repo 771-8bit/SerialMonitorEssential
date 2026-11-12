@@ -17,8 +17,8 @@ use tauri::{AppHandle, State};
 /// シリアル通信の状態を管理する構造体
 ///
 /// `data_store` は外側も `Arc` で包み、プロッタスレッドが「現在の」DataStore を
-/// 毎ポーリングで解決できるようハンドルを共有する（ポート再オープンや
-/// クリアで内側の `Arc<DataStore>` は差し替わるため）。
+/// 毎ポーリングで解決できるようハンドルを共有する（クリアで内側の
+/// `Arc<DataStore>` は差し替わるため）。
 ///
 /// `port` も同じ理由で外側を `Arc` にしてある。AI ブリッジ（`bridge.rs`）の
 /// サーバスレッドはコマンドのスコープより長生きするので Tauri の `State` を
@@ -49,15 +49,15 @@ fn extract_port_path(port_name: &str) -> &str {
     }
 }
 
-/// 手動の Connect。新しいセッションを始める（受信データは新しいストアへ。SYS-F-803）
+/// Manual Connect resumes the capture. Only Clear discards received data.
 #[tauri::command]
 pub fn open_port(
     state: State<'_, SerialState>,
     app: AppHandle,
     port_name: String,
     config: port::SerialConfig,
-) -> Result<(), String> {
-    open_port_impl(&state, app, &port_name, config, false)
+) -> Result<u64, String> {
+    open_port_impl(&state, app, &port_name, config)
 }
 
 /// 自動再接続。デバイスが消えて戻ってきたとき、**同じストアに追記を再開**する
@@ -73,8 +73,8 @@ pub fn reopen_port(
     app: AppHandle,
     port_name: String,
     config: port::SerialConfig,
-) -> Result<(), String> {
-    open_port_impl(&state, app, &port_name, config, true)
+) -> Result<u64, String> {
+    open_port_impl(&state, app, &port_name, config)
 }
 
 /// 自動再接続の待機に入った / 出たことを記録する（ブリッジの `status.reconnecting`）
@@ -88,12 +88,29 @@ fn open_port_impl(
     app: AppHandle,
     port_name: &str,
     config: port::SerialConfig,
-    keep_store: bool,
-) -> Result<(), String> {
+) -> Result<u64, String> {
+    let port_path = extract_port_path(port_name);
+    open_capture(
+        state,
+        || {
+            let port = port::SerialPort::new(port_path, config)?;
+            Ok(Arc::new(tx::OpenPort::new(port_path, Box::new(port))))
+        },
+        |store, port| store.start_reception(port, app, store.clone()),
+    )
+}
+
+/// Shared by manual and automatic opens. Keep the capture independently of the
+/// connection, including when opening the device or starting reception fails.
+fn open_capture(
+    state: &SerialState,
+    open: impl FnOnce() -> Result<Arc<tx::OpenPort>, String>,
+    start: impl FnOnce(&Arc<DataStore>, Arc<tx::OpenPort>) -> Result<(), String>,
+) -> Result<u64, String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
-    if keep_store && port_guard.as_ref().is_some_and(|p| p.is_connected()) {
+    if port_guard.as_ref().is_some_and(|p| p.is_connected()) {
         return Err("a port is already connected".to_string());
     }
 
@@ -110,44 +127,39 @@ fn open_port_impl(
         existing.close();
     }
 
-    // Parse the device path out of the friendly name
-    let port_path = extract_port_path(port_name);
-
-    // Try to open the new port BEFORE destroying the previous session's data.
-    // If the open fails (port busy, device absent, bad config), the previous
-    // capture stays intact and browsable/exportable.
-    let port = port::SerialPort::new(port_path, config)?;
-    let port_arc = Arc::new(tx::OpenPort::new(port_path, Box::new(port)));
-    *port_guard = Some(port_arc.clone());
+    let port = open()?;
+    let data_store = match store_guard.as_ref() {
+        Some(store) => store.clone(),
+        None => Arc::new(DataStore::new()?),
+    };
+    if let Err(error) = start(&data_store, port.clone()) {
+        data_store.stop_reception();
+        port.close();
+        return Err(error);
+    }
+    let connection_id = port.id();
+    *store_guard = Some(data_store);
+    *port_guard = Some(port);
     state.reconnecting.store(false, Ordering::Relaxed);
-
-    // 自動再接続: 同じストアで受信を再開する（start_reception が前回の総バイト数から続ける）
-    if keep_store {
-        if let Some(existing_store) = store_guard.as_ref() {
-            log::info!("[reopen_port] Resuming reception on the existing DataStore");
-            return existing_store.start_reception(port_arc, app, existing_store.clone());
-        }
-    }
-
-    // Now it is safe to drop the old DataStore (deletes its temp files)
-    if let Some(existing_store) = store_guard.take() {
-        log::info!("[open_port] Stopping and dropping existing DataStore");
-        existing_store.stop_reception();
-        // existing_store is dropped here, temp files deleted
-    }
-
-    // Create NEW DataStore and start reception with UI event notification
-    log::info!("[open_port] Creating new DataStore");
-    let data_store = Arc::new(DataStore::new()?);
-    data_store.start_reception(port_arc.clone(), app, data_store.clone())?;
-    *store_guard = Some(data_store.clone());
-
-    Ok(())
+    Ok(connection_id)
 }
 
 #[tauri::command]
-pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
+pub fn close_port(
+    state: State<'_, SerialState>,
+    connection_id: Option<u64>,
+) -> Result<bool, String> {
+    close_capture(&state, connection_id)
+}
+
+fn close_capture(state: &SerialState, connection_id: Option<u64>) -> Result<bool, String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    // A delayed disconnect event must never stop a subsequently opened port.
+    if let Some(id) = connection_id {
+        if port_guard.as_ref().is_none_or(|port| port.id() != id) {
+            return Ok(false);
+        }
+    }
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     // Stop data reception (but keep DataStore alive to preserve temp files)
@@ -160,7 +172,7 @@ pub fn close_port(state: State<'_, SerialState>) -> Result<(), String> {
         port.close();
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// 現在のポートを解決する（外側のロックはここで手放す）
@@ -677,35 +689,44 @@ pub fn export_text_with_timestamps(
 }
 
 #[tauri::command]
-pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<(), String> {
-    let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
-    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+pub fn clear_data(state: State<'_, SerialState>, app: AppHandle) -> Result<u64, String> {
+    clear_capture(&state, |store, port| {
+        store.start_reception(port, app, store.clone())
+    })
+}
 
-    if let Some(old_store) = store_guard.take() {
+fn clear_capture(
+    state: &SerialState,
+    start: impl FnOnce(&Arc<DataStore>, Arc<tx::OpenPort>) -> Result<(), String>,
+) -> Result<u64, String> {
+    let port_guard = state.port.lock().map_err(|e| e.to_string())?;
+    let mut store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
+
+    // Allocate before stopping reception so that a failed allocation leaves the
+    // previous capture and its reception intact.
+    let mut new_store = port_guard
+        .as_ref()
+        .filter(|port| port.is_connected())
+        .map(|_| DataStore::new().map(Arc::new))
+        .transpose()?;
+
+    if let Some(old_store) = store_guard.as_ref() {
         log::info!("[clear_data] Stopping old DataStore");
         old_store.stop_reception();
     }
 
-    // If port is open, restart DataStore. 切断で I/O が破棄済み（Disconnected）の
-    // ポートでは受信を再開できないので、閉じている場合と同じ扱いにする。
-    if let Some(port_arc) = port_guard.as_ref().filter(|p| p.is_parked()) {
-        log::info!("[clear_data] Creating new DataStore");
-        let new_store = Arc::new(DataStore::new()?);
-        // Reuse the existing port
-        new_store.start_reception(port_arc.clone(), app, new_store.clone())?;
-        *store_guard = Some(new_store);
-    } else {
-        // If port not open, we just leave store as None (cleared) or create an empty one?
-        // Actually SerialState currently holds DataStore only when open_port is called?
-        // Wait, open_port creates it. close_port keeps it alive?
-        // close_port stops reception but keeps DataStore handle.
-        // If we clear while closed, we probably just want to drop the old one and maybe create a fresh empty one?
-        // Or just None?
-        // If we set it to None, then `get_display_rows` returns empty. That's fine.
-        log::info!("[clear_data] Port closed, DataStore cleared (set to None)");
+    // A worker can lose the port before returning it to the parked state.
+    match (port_guard.as_ref().filter(|p| p.is_parked()), &new_store) {
+        (Some(port), Some(store)) => start(store, port.clone())?,
+        _ => new_store = None,
     }
 
-    Ok(())
+    // Clear while disconnected also invalidates already-queued notifications.
+    let capture_id = new_store
+        .as_ref()
+        .map_or_else(DataStore::next_capture_id, |store| store.capture_id());
+    *store_guard = new_store;
+    Ok(capture_id)
 }
 
 #[tauri::command]
@@ -761,6 +782,131 @@ pub fn get_clipboard_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture_state() -> SerialState {
+        SerialState {
+            port: Arc::new(Mutex::new(None)),
+            data_store: Arc::new(Mutex::new(None)),
+            reconnecting: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn fake_port() -> Arc<tx::OpenPort> {
+        Arc::new(tx::OpenPort::new(
+            "COM4",
+            Box::new(tx::fake::FakePort::new(115200, tx::fake::WriteMode::Accept)),
+        ))
+    }
+
+    #[test]
+    fn reconnect_keeps_capture_and_failed_opens_do_not_discard_it() {
+        let state = capture_state();
+        let first = fake_port();
+        let id = open_capture(
+            &state,
+            || Ok(first.clone()),
+            |store, _| {
+                store.push_test_data(b"before\r\n");
+                Ok(())
+            },
+        )
+        .unwrap();
+        let capture = state.data_store.lock().unwrap().as_ref().unwrap().clone();
+        assert!(close_capture(&state, Some(id)).unwrap());
+        assert!(!first.is_connected());
+        assert!(!first.is_parked());
+        assert!(open_capture(
+            &state,
+            || Err("device absent".into()),
+            |_, _| { panic!("failed opens must not start reception") }
+        )
+        .is_err());
+        assert_eq!(capture.get_data(0, 8).unwrap(), b"before\r\n");
+        let second = fake_port();
+        let resumed_id = open_capture(
+            &state,
+            || Ok(second.clone()),
+            |store, _| {
+                assert!(Arc::ptr_eq(store, &capture));
+                assert_eq!(store.total_bytes(), 8);
+                store.push_test_data(b"after\r\n");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_ne!(id, resumed_id);
+        assert_eq!(capture.get_data(0, 15).unwrap(), b"before\r\nafter\r\n");
+        // A stale event or an already queued cleanup cannot touch the new open.
+        assert!(!close_capture(&state, Some(id)).unwrap());
+        assert!(second.is_connected());
+        assert!(Arc::ptr_eq(
+            state.data_store.lock().unwrap().as_ref().unwrap(),
+            &capture
+        ));
+        assert!(close_capture(&state, Some(resumed_id)).unwrap());
+    }
+
+    #[test]
+    fn clear_keeps_connection_identity_but_never_restores_the_old_capture() {
+        let state = capture_state();
+        let port = fake_port();
+        let id = open_capture(
+            &state,
+            || Ok(port.clone()),
+            |store, _| {
+                store.push_test_data(b"old\n");
+                Ok(())
+            },
+        )
+        .unwrap();
+        let old = state.data_store.lock().unwrap().as_ref().unwrap().clone();
+        let capture_id = clear_capture(&state, |store, same_port| {
+            assert_eq!(same_port.id(), id);
+            assert_eq!(store.total_bytes(), 0);
+            Ok(())
+        })
+        .unwrap();
+        let cleared = state.data_store.lock().unwrap().as_ref().unwrap().clone();
+        assert!(!Arc::ptr_eq(&old, &cleared));
+        assert!(capture_id > old.capture_id());
+        assert_eq!(capture_id, cleared.capture_id());
+        close_capture(&state, Some(id)).unwrap();
+        open_capture(
+            &state,
+            || Ok(fake_port()),
+            |store, _| {
+                assert!(Arc::ptr_eq(store, &cleared));
+                store.push_test_data(b"new\n");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared.get_data(0, 4).unwrap(), b"new\n");
+        close_capture(&state, None).unwrap();
+        let disconnected_capture_id =
+            clear_capture(&state, |_, _| panic!("closed port must stay closed")).unwrap();
+        assert!(disconnected_capture_id > capture_id);
+        assert!(state.data_store.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn reception_start_failure_releases_port_and_retains_capture() {
+        let state = capture_state();
+        let capture = Arc::new(DataStore::new().unwrap());
+        capture.push_test_data(b"keep");
+        *state.data_store.lock().unwrap() = Some(capture.clone());
+        let port = fake_port();
+        assert!(open_capture(
+            &state,
+            || Ok(port.clone()),
+            |_, _| Err("cannot start".into())
+        )
+        .is_err());
+        assert!(state.port.lock().unwrap().is_none());
+        assert!(!port.is_parked());
+        assert!(!port.is_connected());
+        assert_eq!(capture.get_data(0, 4).unwrap(), b"keep");
+    }
 
     #[test]
     fn clamp_start_line_serves_the_tail_for_requests_past_the_end() {

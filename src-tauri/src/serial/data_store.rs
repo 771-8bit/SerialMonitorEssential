@@ -43,6 +43,8 @@ pub struct LogErrorPayload {
 struct SerialStatusPayload {
     connected: bool,
     error: Option<String>,
+    connection_id: u64,
+    device_removed: bool,
 }
 
 /// DataStore: データ管理の中核
@@ -50,6 +52,7 @@ struct SerialStatusPayload {
 /// ObjectPool、FinishedQueue、ArchivedIndexを統合し、
 /// Worker/Logger/UiNotifier スレッドのライフサイクルを管理する。
 pub struct DataStore {
+    capture_id: u64,
     /// When this store (= the capture session) was created: the time origin for
     /// readers that attach later, such as the plotter. `Instant` for elapsed time,
     /// wall-clock ms to place `timestamp_index` entries on the same axis.
@@ -74,13 +77,22 @@ pub struct DataStore {
 }
 
 impl DataStore {
+    pub(super) fn next_capture_id() -> u64 {
+        use std::sync::atomic::AtomicU64;
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(super) fn capture_id(&self) -> u64 {
+        self.capture_id
+    }
+
     /// 新しいDataStoreを作成
     ///
     /// PIDを使った一時ディレクトリを作成し、ObjectPoolを初期化する。
     /// 起動時に古い一時ディレクトリをクリーンアップする。
     pub fn new() -> Result<Self, String> {
-        use std::sync::atomic::AtomicU64;
-
         let pid = std::process::id();
         let base_dir = std::env::temp_dir().join("SerialMonitorEssential");
 
@@ -90,13 +102,12 @@ impl DataStore {
         // 一時ディレクトリ作成
         //
         // インスタンスごとに一意のサブディレクトリを使う。同一プロセス内で
-        // DataStore が作り直されるとき（clear / ポート再オープン）、古い
+        // DataStore が作り直されるとき（clear）、古い
         // インスタンスの Drop はプロッタスレッド等が Arc を離した後に遅延
         // 実行され得る。ディレクトリを共有していると、その Drop が新しい
         // インスタンスのライブなデータファイルまで削除してしまう。
-        static INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let instance = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir = base_dir.join(pid.to_string()).join(instance.to_string());
+        let capture_id = Self::next_capture_id();
+        let temp_dir = base_dir.join(pid.to_string()).join(capture_id.to_string());
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {:?}", e))?;
 
@@ -107,6 +118,7 @@ impl DataStore {
         }
 
         Ok(Self {
+            capture_id,
             free_pool,
             finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),
@@ -158,6 +170,8 @@ impl DataStore {
         // Worker Thread起動
         debug!("[DataStore] Spawning Worker Thread");
         let status_handle = app_handle.clone();
+        let connection_id = port.id();
+        let port_name = port.name().to_string();
         let worker_handle = worker_thread::spawn_worker_thread(
             port,
             parked,
@@ -171,6 +185,13 @@ impl DataStore {
                 let payload = SerialStatusPayload {
                     connected: false,
                     error: Some(error),
+                    connection_id,
+                    // A read error alone (including Windows error 22) is not
+                    // evidence of an unplug. Confirm that this port disappeared.
+                    device_removed: super::port::port_is_absent(
+                        &port_name,
+                        serialport::available_ports(),
+                    ),
                 };
                 if let Err(e) = status_handle.emit("serial-status", payload) {
                     error!("[DataStore] Failed to emit serial-status event: {}", e);
@@ -861,6 +882,7 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
 
         DataStore {
+            capture_id: DataStore::next_capture_id(),
             free_pool: Arc::new(SegQueue::new()),
             finished_list: Arc::new(RwLock::new(VecDeque::new())),
             archived_index: Arc::new(RwLock::new(Vec::new())),

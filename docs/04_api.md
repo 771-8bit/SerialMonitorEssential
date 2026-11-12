@@ -4,9 +4,9 @@
 
 | コマンド名 | 引数 | 説明 |
 | --- | --- | --- |
-| `open_port` | `port_name`, `config: SerialConfig` | 指定設定でポートを開く |
-| `close_port` | なし | ポートを閉じる |
-| `reopen_port` | `port_name`, `config: SerialConfig` | 自動再接続（SYS-F-807）。ポートを開き、**既存のデータストアに追記を再開**する（ストアが無ければ新規）。切断済みのハンドルが残っていても動くが、生きている接続があれば `Err` |
+| `open_port` | `port_name`, `config: SerialConfig` | 指定設定でポートを開き、既存のデータストアに追記を再開する（ストアが無ければ新規）。成功時は接続 ID (`u64`) を返す |
+| `close_port` | `connection_id: Option<u64>` | ポートを閉じる。ID を指定して現在の接続と一致しない場合は `false` を返す。処理を実行した場合は `true` を返す |
+| `reopen_port` | `port_name`, `config: SerialConfig` | 自動再接続（SYS-F-807）。`open_port` と同じ処理で接続 ID (`u64`) を返す |
 | `set_reconnecting` | `waiting: bool` | 自動再接続の待機に入った / 出たことを記録する。ブリッジの `status.reconnecting` に反映 |
 | `write_data` | `data: Vec<u8>` | データを送信する |
 | `write_dtr` | `level: bool` | DTR信号を設定する |
@@ -16,7 +16,7 @@
 | `get_ascii_lines` | `start_line`, `line_count`, `show_ctrl`, `show_timestamp` | ASCII表示用行データを取得 |
 | `list_ports` | なし | 利用可能なシリアルポート一覧を取得 |
 | `export_log` | `path: String` | 受信データをファイルにエクスポート |
-| `clear_data` | なし | 受信データをクリア |
+| `clear_data` | なし | 受信データをクリアし、新しいキャプチャ ID (`u64`) を返す |
 | `get_clipboard_text` | `mode: String` | クリップボード用テキストを取得（hex/ascii） |
 | `bridge_status` | なし | ブリッジ（設定画面の MCP Server）の状態を取得（`{ enabled, port, connections, last_activity }`）。失敗しない |
 | `bridge_set` | `enabled: bool`, `port: Option<u16>` | ブリッジの起動 / 停止。`enabled=true` で同じポートが稼働中なら no-op、ポートが変われば再起動。戻り値は `bridge_status` と同じ形 |
@@ -27,8 +27,8 @@
 
 | イベント名 | ペイロード | 説明 |
 | --- | --- | --- |
-| `serial-status` | `{ connected: bool, error: string \| null }` | 接続状態の変化。受信スレッドが致命的 I/O エラーを検知したときに `connected=false` で発火する。フロントエンドはこれを受けて `close_port` を呼び、バックエンド状態を再同期する（SYS-F-107） |
-| `data-update` | `{ total_bytes: u64 }` | 新規データ受信通知。フロントエンドは `get_display_rows` で表示データを取得。 |
+| `serial-status` | `{ connected: bool, error: string \| null, connection_id: u64, device_removed: bool }` | 受信スレッドが致命的 I/O エラーを検知したときに `connected=false` で発火する。ポート一覧から消失を確認できた場合は `device_removed=true`。フロントエンドは通知の接続 ID を指定して `close_port` を呼ぶ（SYS-F-107） |
+| `data-update` | `{ capture_id: u64, total_bytes: u64 }` | 新規データ受信通知。フロントエンドはキャプチャ ID で Clear 前の通知を識別し、現在の表示データを `get_display_rows` などで取得する |
 | `log-error` | `{ message: string }` | ディスクフルなどのエラー通知。Logger スレッドの `on_error` コールバック経由で発火し、**同種のエラーは 5 秒に 1 回まで**に抑制される（SYS-F-205） |
 | `bridge-activity` | `{ kind: string, bytes: usize, preview: string }` | ブリッジ経由の活動通知（現状 `kind: "send"` のみ）。`preview` は送信内容の先頭 64 文字。**AI の送信を人間が画面で確認できるようにするための必須経路**（SYS-F-1103） |
 
