@@ -152,6 +152,15 @@ pub fn close_port(
     close_capture(&state, connection_id)
 }
 
+#[tauri::command]
+pub async fn confirm_port_removed(port_name: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        port::confirm_port_removed(&port_name, serialport::available_ports, std::thread::sleep)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 fn close_capture(state: &SerialState, connection_id: Option<u64>) -> Result<bool, String> {
     let mut port_guard = state.port.lock().map_err(|e| e.to_string())?;
     // A delayed disconnect event must never stop a subsequently opened port.

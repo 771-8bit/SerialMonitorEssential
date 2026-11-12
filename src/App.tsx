@@ -118,6 +118,7 @@ function App() {
   const connectedPortRef = useRef('');
   const connectionIdRef = useRef<number | null>(null);
   const pendingOpenRef = useRef<Promise<number> | null>(null);
+  const openAttemptRef = useRef(0);
   // Reconnect uses the settings as they are when the device comes back
   const configRef = useRef(config);
   useEffect(() => {
@@ -126,6 +127,7 @@ function App() {
 
   const openConnection = useCallback(
     async (command: 'open_port' | 'reopen_port', entry: string) => {
+      openAttemptRef.current += 1;
       const opening = invoke<number>(command, { portName: entry, config: configRef.current });
       pendingOpenRef.current = opening;
       try {
@@ -208,7 +210,6 @@ function App() {
       connected: boolean;
       error: string | null;
       connection_id: number;
-      device_removed: boolean;
     }>('serial-status', async (event) => {
       if (event.payload.connected) return;
       // A device can fail before open_port's reply reaches JS. Let that reply
@@ -220,6 +221,7 @@ function App() {
       }
       const id = event.payload.connection_id;
       if (cancelled || id !== connectionIdRef.current) return;
+      const openAttempt = openAttemptRef.current;
       try {
         const closed = await invoke<boolean>('close_port', { connectionId: id });
         if (cancelled || !closed || id !== connectionIdRef.current) return;
@@ -231,8 +233,25 @@ function App() {
           // No alert: window.alert blocks the JS thread, so the reconnect would
           // stall until the user dismissed it. The settings row shows the state.
           beginWaiting(portPath(lost));
-        } else if (event.payload.error && !event.payload.device_removed) {
-          alert('Serial disconnected: ' + event.payload.error);
+        } else if (event.payload.error) {
+          // The OS port list can lag behind the I/O error. Check after closing
+          // so waiting for it cannot delay the disconnect or hold the port.
+          const removed =
+            lost &&
+            (await invoke<boolean>('confirm_port_removed', { portName: portPath(lost) }).catch(
+              (error) => {
+                console.error('Failed to confirm serial port removal:', error);
+                return false;
+              }
+            ));
+          if (
+            !removed &&
+            !cancelled &&
+            waitingRef.current === null &&
+            openAttempt === openAttemptRef.current
+          ) {
+            alert('Serial disconnected: ' + event.payload.error);
+          }
         }
       } catch (error) {
         console.error('Failed to close disconnected port:', error);

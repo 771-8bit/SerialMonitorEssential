@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `open_port` | `port_name`, `config: SerialConfig` | 指定設定でポートを開き、既存のデータストアに追記を再開する（ストアが無ければ新規）。成功時は接続 ID (`u64`) を返す |
 | `close_port` | `connection_id: Option<u64>` | ポートを閉じる。ID を指定して現在の接続と一致しない場合は `false` を返す。処理を実行した場合は `true` を返す |
+| `confirm_port_removed` | `port_name: String` | ポートを閉じた後で短時間、ポート一覧を再取得する。取得に成功し、指定ポートが一覧に含まれない場合に `true` を返す |
 | `reopen_port` | `port_name`, `config: SerialConfig` | 自動再接続（SYS-F-807）。`open_port` と同じ処理で接続 ID (`u64`) を返す |
 | `set_reconnecting` | `waiting: bool` | 自動再接続の待機に入った / 出たことを記録する。ブリッジの `status.reconnecting` に反映 |
 | `write_data` | `data: Vec<u8>` | データを送信する |
@@ -27,7 +28,7 @@
 
 | イベント名 | ペイロード | 説明 |
 | --- | --- | --- |
-| `serial-status` | `{ connected: bool, error: string \| null, connection_id: u64, device_removed: bool }` | 受信スレッドが致命的 I/O エラーを検知したときに `connected=false` で発火する。ポート一覧から消失を確認できた場合は `device_removed=true`。フロントエンドは通知の接続 ID を指定して `close_port` を呼ぶ（SYS-F-107） |
+| `serial-status` | `{ connected: bool, error: string \| null, connection_id: u64 }` | 受信スレッドが致命的 I/O エラーを検知したときに `connected=false` で発火する。フロントエンドは通知の接続 ID を指定して `close_port` を呼ぶ（SYS-F-107） |
 | `data-update` | `{ capture_id: u64, total_bytes: u64 }` | 新規データ受信通知。フロントエンドはキャプチャ ID で Clear 前の通知を識別し、現在の表示データを `get_display_rows` などで取得する |
 | `log-error` | `{ message: string }` | ディスクフルなどのエラー通知。Logger スレッドの `on_error` コールバック経由で発火し、**同種のエラーは 5 秒に 1 回まで**に抑制される（SYS-F-205） |
 | `bridge-activity` | `{ kind: string, bytes: usize, preview: string }` | ブリッジ経由の活動通知（現状 `kind: "send"` のみ）。`preview` は送信内容の先頭 64 文字。**AI の送信を人間が画面で確認できるようにするための必須経路**（SYS-F-1103） |

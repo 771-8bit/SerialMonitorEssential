@@ -44,7 +44,6 @@ struct SerialStatusPayload {
     connected: bool,
     error: Option<String>,
     connection_id: u64,
-    device_removed: bool,
 }
 
 /// DataStore: データ管理の中核
@@ -171,7 +170,6 @@ impl DataStore {
         debug!("[DataStore] Spawning Worker Thread");
         let status_handle = app_handle.clone();
         let connection_id = port.id();
-        let port_name = port.name().to_string();
         let worker_handle = worker_thread::spawn_worker_thread(
             port,
             parked,
@@ -186,12 +184,6 @@ impl DataStore {
                     connected: false,
                     error: Some(error),
                     connection_id,
-                    // A read error alone (including Windows error 22) is not
-                    // evidence of an unplug. Confirm that this port disappeared.
-                    device_removed: super::port::port_is_absent(
-                        &port_name,
-                        serialport::available_ports(),
-                    ),
                 };
                 if let Err(e) = status_handle.emit("serial-status", payload) {
                     error!("[DataStore] Failed to emit serial-status event: {}", e);

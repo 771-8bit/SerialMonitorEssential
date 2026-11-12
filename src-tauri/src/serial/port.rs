@@ -6,28 +6,41 @@ use std::time::Duration;
 
 use super::tx::{LineTiming, PortIo};
 
-/// Only a successful enumeration that no longer contains the failing port is
-/// evidence of device removal. Enumeration failures retain normal error reporting.
-pub(super) fn port_is_absent(
+/// Allow the OS port list to catch up after the failing handle has been closed.
+/// Only a successful enumeration that omits the port confirms removal.
+pub(super) fn confirm_port_removed(
     port_name: &str,
-    ports: serialport::Result<Vec<serialport::SerialPortInfo>>,
+    mut enumerate: impl FnMut() -> serialport::Result<Vec<serialport::SerialPortInfo>>,
+    mut wait: impl FnMut(Duration),
 ) -> bool {
-    match ports {
-        Ok(ports) => !ports.iter().any(|port| {
-            if cfg!(windows) {
-                port.port_name.eq_ignore_ascii_case(port_name)
-            } else {
-                port.port_name == port_name
+    const RETRIES: usize = 10;
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    for attempt in 0..=RETRIES {
+        match enumerate() {
+            Ok(ports) => {
+                let present = ports.iter().any(|port| {
+                    if cfg!(windows) {
+                        port.port_name.eq_ignore_ascii_case(port_name)
+                    } else {
+                        port.port_name == port_name
+                    }
+                });
+                if !present {
+                    return true;
+                }
             }
-        }),
-        Err(error) => {
-            warn!(
+            Err(error) if attempt == RETRIES => warn!(
                 "[SerialPort] Cannot confirm removal of {}: {}",
                 port_name, error
-            );
-            false
+            ),
+            Err(_) => {}
+        }
+        if attempt < RETRIES {
+            wait(INTERVAL);
         }
     }
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,21 +236,53 @@ impl PortIo for SerialPort {
 
 #[cfg(test)]
 mod tests {
-    use super::port_is_absent;
+    use super::confirm_port_removed;
     use serialport::{Error, ErrorKind, SerialPortInfo, SerialPortType};
+    use std::time::Duration;
 
-    #[test]
-    fn removal_requires_successful_enumeration_without_the_failing_port() {
-        let present = vec![SerialPortInfo {
+    fn present_port() -> Vec<SerialPortInfo> {
+        vec![SerialPortInfo {
             port_name: "COM4".into(),
             port_type: SerialPortType::Unknown,
-        }];
-        assert!(!port_is_absent("COM4", Ok(present)));
-        assert!(port_is_absent("COM4", Ok(Vec::new())));
-        // An unknown driver error (including OS code 22) is not itself an unplug.
-        assert!(!port_is_absent(
+        }]
+    }
+
+    #[test]
+    fn removal_is_confirmed_when_stale_enumeration_catches_up() {
+        let mut results = [
+            Ok(present_port()),
+            Err(Error::new(ErrorKind::Unknown, "enumeration failed")),
+            Ok(Vec::new()),
+        ]
+        .into_iter();
+        let mut waits = 0;
+        assert!(confirm_port_removed(
             "COM4",
-            Err(Error::new(ErrorKind::Unknown, "enumeration failed"))
+            || results.next().unwrap(),
+            |_| {
+                waits += 1;
+            }
         ));
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn persistent_presence_or_enumeration_errors_do_not_confirm_removal() {
+        let mut waited = Duration::ZERO;
+        let mut attempts = 0;
+        assert!(!confirm_port_removed(
+            "COM4",
+            || {
+                attempts += 1;
+                if attempts % 2 == 0 {
+                    Ok(present_port())
+                } else {
+                    Err(Error::new(ErrorKind::Unknown, "enumeration failed"))
+                }
+            },
+            |interval| waited += interval,
+        ));
+        assert_eq!(waited, Duration::from_secs(1));
+        assert_eq!(attempts, 11);
     }
 }

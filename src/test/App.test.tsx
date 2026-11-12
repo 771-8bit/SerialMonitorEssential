@@ -66,6 +66,7 @@ describe('App', () => {
       if (cmd === 'list_ports') return Promise.resolve(['COM1']);
       if (cmd === 'open_port' || cmd === 'reopen_port') return Promise.resolve(1);
       if (cmd === 'close_port') return Promise.resolve(true);
+      if (cmd === 'confirm_port_removed') return Promise.resolve(false);
       if (cmd === 'clear_data') return Promise.resolve(2);
       return Promise.resolve(undefined);
     });
@@ -88,12 +89,12 @@ describe('App', () => {
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: false,
       error: 'Read failed',
     });
     await flush();
 
     expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
+    expect(mockInvoke).toHaveBeenCalledWith('confirm_port_removed', { portName: 'COM1' });
     expect(window.alert).toHaveBeenCalledWith('Serial disconnected: Read failed');
   });
 
@@ -107,7 +108,6 @@ describe('App', () => {
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: false,
       error: null,
     });
     await flush();
@@ -126,8 +126,18 @@ describe('App', () => {
     expect(mockInvoke).not.toHaveBeenCalledWith('close_port');
   });
 
-  it('reports a confirmed unplug without a blocking alert, retaining diagnostics', async () => {
+  it('updates the UI before confirming a delayed unplug and retains diagnostics', async () => {
     const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let finishConfirmation!: (removed: boolean) => void;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return ['XIAO (COM4)'];
+      if (cmd === 'open_port') return 1;
+      if (cmd === 'close_port') return true;
+      if (cmd === 'confirm_port_removed') {
+        return new Promise<boolean>((resolve) => (finishConfirmation = resolve));
+      }
+      return undefined;
+    });
     render(<App />);
     await flush();
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
@@ -135,17 +145,55 @@ describe('App', () => {
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: true,
       error: 'Failed to read from port: Os { code: 22 }',
     });
     await flush();
     expect(screen.getByRole('button', { name: 'Connect' })).toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith('close_port', { connectionId: 1 });
+    expect(mockInvoke).toHaveBeenCalledWith('confirm_port_removed', { portName: 'COM4' });
+    expect(window.alert).not.toHaveBeenCalled();
+    await act(async () => {
+      finishConfirmation(true);
+    });
     expect(window.alert).not.toHaveBeenCalled();
     expect(diagnostic).toHaveBeenCalledWith(
       'Serial disconnected:',
       expect.stringContaining('code: 22')
     );
+  });
+
+  it('does not show an old read error once another open attempt has started', async () => {
+    let finishConfirmation!: (removed: boolean) => void;
+    let finishOpen!: (id: number) => void;
+    let openCount = 0;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return ['COM1'];
+      if (cmd === 'open_port') {
+        openCount += 1;
+        if (openCount === 1) return 1;
+        return new Promise<number>((resolve) => (finishOpen = resolve));
+      }
+      if (cmd === 'close_port') return true;
+      if (cmd === 'confirm_port_removed') {
+        return new Promise<boolean>((resolve) => (finishConfirmation = resolve));
+      }
+      return undefined;
+    });
+    render(<App />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    emit('serial-status', { connected: false, connection_id: 1, error: 'Read failed' });
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await act(async () => {
+      finishConfirmation(false);
+    });
+    expect(window.alert).not.toHaveBeenCalled();
+    await act(async () => {
+      finishOpen(2);
+    });
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
   });
 
   it('ignores an old disconnect event after the same port is reopened', async () => {
@@ -162,7 +210,6 @@ describe('App', () => {
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: true,
       error: 'old',
     });
     await flush();
@@ -186,7 +233,6 @@ describe('App', () => {
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: true,
       error: 'old',
     });
     await flush();
@@ -203,20 +249,19 @@ describe('App', () => {
   });
 
   it('handles an unplug that arrives before the open reply', async () => {
+    let finishOpen!: (id: number) => void;
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return ['COM1'];
+      if (cmd === 'open_port') return new Promise<number>((resolve) => (finishOpen = resolve));
+      if (cmd === 'close_port' || cmd === 'confirm_port_removed') return true;
+      return undefined;
+    });
     render(<App />);
     await flush();
-    let finishOpen!: (id: number) => void;
-    mockInvoke.mockImplementationOnce(
-      () =>
-        new Promise<number>((resolve) => {
-          finishOpen = resolve;
-        })
-    );
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
     emit('serial-status', {
       connected: false,
       connection_id: 1,
-      device_removed: true,
       error: 'removed',
     });
     await act(async () => {
@@ -593,7 +638,6 @@ describe('App', () => {
       emit('serial-status', {
         connected: false,
         connection_id: 1,
-        device_removed: true,
         error: 'Device removed',
       });
       await flush();
