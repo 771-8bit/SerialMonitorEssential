@@ -90,13 +90,6 @@ function App() {
     saveSetting(LAST_PORT_KEY, port);
   }, []);
 
-  // Read in the poll callback without making it a dependency (the interval
-  // must not be torn down and restarted on every connect/disconnect).
-  const isConnectedRef = useRef(isConnected);
-  useEffect(() => {
-    isConnectedRef.current = isConnected;
-  }, [isConnected]);
-
   // --- Auto Connect (SYS-F-807) ---------------------------------------------
   // While waiting, look for the device path and open it with `reopen_port`, which
   // continues the current capture at the same offsets. When the connected
@@ -156,38 +149,27 @@ function App() {
   }, []);
 
   // Shared by the manual refresh (SettingsPanel) and the hotplug poll below.
+  const portRefresh = useRef({ requested: 0, applied: 0 });
   const updatePorts = useCallback(async () => {
+    const request = ++portRefresh.current.requested;
     try {
       const p = await invoke<string[]>('list_ports');
+      // A slow poll may finish after a manual Reload has already refreshed the list.
+      if (request < portRefresh.current.applied) return;
+      portRefresh.current.applied = request;
       // Skip the state update when the list is unchanged: the poll runs every
       // PORT_POLL_INTERVAL_MS and a new array identity would re-render the
       // whole tree (and the settings dropdown) on every tick for nothing.
       setPorts((current) =>
         current.length === p.length && current.every((name, i) => name === p[i]) ? current : p
       );
-      // Use the functional form: this callback may run after the user changed
-      // the selection, so decide based on the CURRENT value, not a stale one.
       setSelectedPort((current) => {
-        // While connected the port <select> is disabled, so silently moving
-        // the selection off the connected device would be invisible and would
-        // make a later reconnect open the wrong port. A true unplug is handled
-        // within milliseconds by the read-error path (serial-status), which is
-        // what actually drops the connection - the poll only keeps the list
-        // fresh (GAP-07). The same holds while waiting to reconnect: the lost
-        // device is absent from the list by definition, and moving the selection
-        // would point the wait (and the user) at a different device.
-        if (isConnectedRef.current || waitingRef.current !== null) return current;
-        // Fallback when nothing valid is selected: the port the user last chose if
-        // it is present (issue #7), else the first one
-        const fallback = () =>
-          p.includes(preferredPortRef.current) ? preferredPortRef.current : (p[0] ?? '');
-        if (current && !p.includes(current)) {
-          return fallback();
-        }
-        if (!current && p.length > 0) {
-          return fallback();
-        }
-        return current;
+        // Keep the selected device path across unplug, even with Auto Connect off.
+        // If the same path returns under a different label, show the new label.
+        if (current && p.includes(current)) return current;
+        const path = portPath(current || preferredPortRef.current);
+        const entry = p.find((port) => portPath(port) === path);
+        return entry ?? (current || p[0] || '');
       });
     } catch (e) {
       console.error(e);
@@ -271,8 +253,6 @@ function App() {
 
   // Auto Connect: whenever it is on and nothing is open or awaited, wait for the
   // selected port (at startup, after turning it on, after picking another port).
-  // Started synchronously on purpose: waitingRef must be set before the first port
-  // poll resolves, or the poll would move the selection off an absent remembered port.
   useEffect(() => {
     if (autoConnect && !isConnected && waitingFor === null && selectedPort) {
       beginWaiting(portPath(selectedPort));

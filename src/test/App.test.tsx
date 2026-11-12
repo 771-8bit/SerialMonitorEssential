@@ -373,6 +373,83 @@ describe('App', () => {
     expect(options).toContain('COM7');
   });
 
+  it('keeps the selected port through unplug and reconnects before the next refresh', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const device = 'XIAO (COM4)';
+    let available = ['COM1', device];
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return available;
+      if (cmd === 'open_port') {
+        if (!available.includes(device)) throw new Error('COM4 not found');
+        return 1;
+      }
+      if (cmd === 'close_port' || cmd === 'confirm_port_removed') return true;
+      return undefined;
+    });
+
+    render(<App />);
+    await flush();
+    const port = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Port' });
+    fireEvent.change(port, { target: { value: device } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeDisabled();
+
+    available = ['COM1'];
+    emit('serial-status', { connected: false, connection_id: 1, error: 'USB unplugged' });
+    await flush();
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(port).toHaveValue(device);
+    expect(port.selectedOptions[0]).toHaveTextContent(`${device} (not present)`);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('COM4 not found'));
+    expect(port).toHaveValue(device);
+
+    available = ['COM1', device];
+    mockInvoke.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+    await flush();
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'open_port',
+      expect.objectContaining({ portName: device })
+    );
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
+  });
+
+  it('reloads immediately and keeps the selected COM number when its label changes', async () => {
+    vi.useFakeTimers();
+    let finishOldPoll!: (ports: string[]) => void;
+    mockInvoke.mockImplementationOnce(async () => ['COM1', 'XIAO (COM4)']);
+    render(<App />);
+    await flush();
+    const port = screen.getByRole('combobox', { name: 'Port' });
+    fireEvent.change(port, { target: { value: 'XIAO (COM4)' } });
+
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports')
+        return new Promise<string[]>((resolve) => (finishOldPoll = resolve));
+      return undefined;
+    });
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    mockInvoke.mockImplementation(async (cmd) => {
+      if (cmd === 'list_ports') return ['COM1', 'USB Serial Device (COM4)', 'COM7'];
+      return undefined;
+    });
+    mockInvoke.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
+    await flush();
+    expect(mockInvoke).toHaveBeenCalledWith('list_ports');
+    expect(port).toHaveValue('USB Serial Device (COM4)');
+    expect(screen.getByRole('option', { name: 'COM7' })).toBeInTheDocument();
+
+    await act(async () => finishOldPoll(['COM1']));
+    expect(port).toHaveValue('USB Serial Device (COM4)');
+    expect(screen.getByRole('option', { name: 'COM7' })).toBeInTheDocument();
+  });
+
   // ---------------- Settings survive a restart (issue #7) ----------------
 
   describe('remembered settings', () => {

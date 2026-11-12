@@ -274,6 +274,9 @@ export default function SettingsPanel({
     <div className="settings-panel">
       <div className="panel-header">Settings</div>
       <div className="settings-row">
+        <button type="button" onClick={() => void onRefreshPorts()} disabled={isConnected}>
+          Reload
+        </button>
         <select
           ref={portSelectRef}
           value={selectedPort}
@@ -284,9 +287,8 @@ export default function SettingsPanel({
           className="port-select"
           aria-label="Port"
         >
-          {/* The device being waited for has left the list; keep it selectable so the
-              dropdown keeps showing what the app is waiting for */}
-          {reconnectWaitingFor !== null && selectedPort && !ports.includes(selectedPort) && (
+          {/* Keep showing the selected port even when its device is unplugged. */}
+          {selectedPort && !ports.includes(selectedPort) && (
             <option value={selectedPort}>{selectedPort} (not present)</option>
           )}
           {ports.map((port) => (
@@ -294,9 +296,7 @@ export default function SettingsPanel({
               {port}
             </option>
           ))}
-          {ports.length === 0 && reconnectWaitingFor === null && (
-            <option value="">No ports found</option>
-          )}
+          {ports.length === 0 && !selectedPort && <option value="">No ports found</option>}
         </select>
 
         <div className="baud-custom-container">
