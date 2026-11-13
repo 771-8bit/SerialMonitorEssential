@@ -226,8 +226,7 @@ stateDiagram-v2
     Closed --> Open : open_port 成功
     Closed --> Closed : open_port 失敗 / エラー表示
     Open --> Closed : close_port
-    Open --> Open : open_port 成功 / 旧ポートを閉じてから開く
-    Open --> Closed : open_port 失敗 / 旧ポートは既に閉じている
+    Open --> Open : open_port を拒否 / 接続中
     Open --> Disconnected : Worker が致命的 read エラーを検知
     Disconnected --> Open : open_port 成功
     Disconnected --> Closed : close_port
@@ -237,18 +236,19 @@ stateDiagram-v2
 |------|------|
 | `Closed` | ポートハンドルなし。送信不可 |
 | `Open` | ハンドルあり。Worker が読み出し中 |
-| `Disconnected` | フロントエンドは切断表示だが、バックエンドはハンドルを保持している中間状態。**設計上の負債**（§5.9 参照） |
+| `Disconnected` | Worker が受信を停止し、切断通知に対応する `close_port` でハンドルを解放するまでの中間状態 |
 
-> `open_port` は旧ポートの停止 → 新ポートのオープンの順で行う。オープンに失敗した場合、
-> ポートは `Closed` になるが**旧セッションのデータストアは残る**（SYS-F-106）。
+> 切断通知は接続 ID を持つ。通知に応じて呼ぶ `close_port` は、その ID に一致するポートだけを閉じる。
+> `open_port` は停止済みの旧ポートを解放してから新しいポートを開く。オープンに失敗しても
+> 受信済みのデータストアは残る（SYS-F-106）。
 
 ### 5.2 SM-2: DataStore（世代）
 
 ```mermaid
 stateDiagram-v2
     [*] --> None
-    None --> Active : open_port 成功 / 世代 k=1 を生成
-    Active --> Active : open_port 成功 / 旧世代を停止し破棄、k を +1
+    None --> Active : open_port または reopen_port 成功 / 新世代を生成
+    Active --> Active : open_port または reopen_port 成功 / 同じ世代に追記
     Active --> Active : clear_data かつポートが開いている / k を +1
     Active --> None : clear_data かつポートが閉じている
     Active --> Active : close_port / 受信のみ停止、世代は不変
@@ -394,10 +394,10 @@ SM-2 との対応は SM-3（PlotterThread）と同じ形だが、**集約器と�
 
 | イベント | SM-1 ポート | SM-2 ストア | SM-3 Pスレッド | SM-4 Pウィンドウ | SM-5 ビュー | SM-6 ビューア |
 |----------|-------------|-------------|----------------|------------------|-------------|---------------|
-| **Connect** (`open_port` 成功) | →`Open` | →`Active(k+1)` | 次ポーリングで `Attached(k+1)`、集約器 clear | | LIVE を維持 | |
-| **Connect 失敗** | →`Closed` | 変化なし（旧世代維持） | 旧世代のまま `Attached(k)` | | | |
+| **Connect** (`open_port` 成功) | →`Open` | ストアがなければ生成。あれば `Active(k)` に追記 | 新規ストアを検知して `Attached`、または `Attached(k)` 維持 | | | |
+| **Connect 失敗** | 接続中は `Open`、それ以外は `Closed` | 変化なし | 変化なし | | | |
 | **Disconnect** (`close_port`) | →`Closed` | `Active(k)` 維持、受信停止 | `Attached(k)` 維持（新データが来ないだけ） | | LIVE のまま右端が空白へ | |
-| **Reopen**（同一/別ポート再接続） | `Open`→`Open` | →`Active(k+1)` | `Attached(k+1)`、集約器 clear | | | |
+| **Reopen** (`reopen_port` 成功) | →`Open` | Connect と同じ | Connect と同じ | | | |
 | **Clear**（ポート開） | | →`Active(k+1)` | `Attached(k+1)`、集約器 clear | | 表示が空へ | 先頭へ |
 | **Clear**（ポート閉） | | →`None` | →`Detached` | | 表示が空へ | 先頭へ |
 | **DataArrival** | | 内部データ増加 | 読み出し → パース → 集約、`data_version` 増加 | | LIVE: 右端更新 / Inspect: 変化なし | AutoScroll ON なら下端追従 |
@@ -418,7 +418,7 @@ SM-2 との対応は SM-3（PlotterThread）と同じ形だが、**集約器と�
 | ID | 不変条件 | 根拠 / 保証手段 |
 |----|----------|-----------------|
 | **INV-1** | PlotterThread は、DataStore の差し替えを**1 ポーリング周期（10 ms）以内**に検知し、現行世代へ追従する | 起動時の `Arc` を掴まず、毎ポーリングで共有ハンドルから再解決する。`Arc::ptr_eq` で世代を識別（ADR-03） |
-| **INV-2** | Clear / 再接続の後、プロッタには**新世代のデータのみ**が含まれる | 世代変化検知時に `aggregator.clear()` + `parser.reset()` + オフセット 0 リセット |
+| **INV-2** | Clear 後のプロッタには**新世代のデータのみ**が含まれる。再接続時は既存の世代と集約を保持する | 世代変化検知時に `aggregator.clear()` + `parser.reset()` + オフセット 0 リセット。再接続は既存ストアの受信位置から再開 |
 | **INV-3** | 受信済みのバイトは、常に `archived_index` と `finished_list` の**少なくとも一方に存在する** | Logger の順序を「書き込み → 索引公開 → pop」に固定（ADR-05）。逆順だと両方に存在しない瞬間ができる |
 | **INV-4** | `total_bytes` は同一世代内で単調非減少である | Worker は push のみ、Logger は index 公開後に pop する |
 | **INV-5** | プロッタウィンドウが `Closed` のとき、PlotterThread は `Stopped` かつ集約器は無効である | `WindowEvent::Destroyed` ハンドラで両方を実行（ADR-10） |
@@ -539,7 +539,10 @@ sequenceDiagram
 `version` が変化していれば `has_data` が false でも取得する。
 そうしないと Clear 後に古いグラフが残る（2026-09-03 修正）。
 
-### 6.3 Clear / 再接続でのストア差し替えとスレッド追従
+### 6.3 Clear でのストア差し替えとスレッド追従
+
+手動・自動の再接続は既存ストアに追記する。ストアが存在しなければ新規作成する。
+以下は接続中に Clear が成功し、新しいストアへ切り替わる場合の流れである。
 
 ```mermaid
 sequenceDiagram
@@ -553,13 +556,13 @@ sequenceDiagram
     participant AG as PlotterAggregator
 
     FE->>CMD: clear_data
-    CMD->>SH: lock して take
+    CMD->>SH: lock して現行ストアを参照
+    CMD->>S2: DataStore::new で新しい temp ディレクトリを作成
     CMD->>S1: stop_reception でスレッド join
     Note over S1: この時点では PlotterThread が Arc を保持している可能性があり<br/>Drop は遅延し得る
-    CMD->>S2: DataStore::new で新しい temp ディレクトリを作成
     CMD->>S2: start_reception 既存ポートを再利用
     CMD->>SH: 世代 k+1 を格納
-    CMD-->>FE: Ok
+    CMD-->>FE: 新しいキャプチャ ID
 
     loop 次のポーリング 10ms 以内
         PT->>SH: lock して clone
@@ -641,11 +644,11 @@ sequenceDiagram
 | **採用理由** | レベルアップ方式なら、メモリは上限内に収まりつつ、解像度の低下が時間に対して均一になる。統計量を全部持つことで、モード切替がデータ再構築なしの表示時変換（`to_point(mode)`）で済む |
 | **帰結** | 再集約は加重平均で行う必要がある（単純平均では精度が落ちる）。`min ≤ avg ≤ max` と count 保存が不変条件になる（INV-8）。古いデータほど時間解像度が粗い |
 
-### ADR-03: Clear / 再接続はストアの差し替えとし、プロッタは動的に解決する
+### ADR-03: Clear はストアを切り替え、プロッタは動的に解決する
 
 | 項目 | 内容 |
 |------|------|
-| **決定** | `clear_data` / `open_port` は `DataStore` を**新しいインスタンスに差し替える**。`SerialState.data_store` は `Arc<Mutex<Option<Arc<DataStore>>>>` として共有し、PlotterThread は毎ポーリングでこのハンドルから現在のストアを解決する。`Arc::ptr_eq` で世代変化を検知する |
+| **決定** | `clear_data` は、接続中は `DataStore` を新しいインスタンスに差し替え、切断中は共有スロットを空にする。`open_port` / `reopen_port` は既存のストアを再利用し、スロットが空なら作成する。`SerialState.data_store` は `Arc<Mutex<Option<Arc<DataStore>>>>` として共有し、PlotterThread は毎ポーリングで現在のストアを解決する。`Arc::ptr_eq` で世代変化を検知する |
 | **背景** | 「データを消す」を要素削除として実装すると、`archived_index` / `timestamp_index` / `line_index` / ディスク上のオフセットをすべて整合的に巻き戻す必要があり、状態が増える。一方、PlotterThread が起動時の `Arc<DataStore>` を掴んだままだと、差し替え後に永久に古いストアをポーリングし続ける（実際に「Clear 後にプロットが永久フリーズ」した） |
 | **検討した代替案** | (a) DataStore に `clear()` メソッドを持たせ、内部を空にする。(b) 差し替え時にプロッタスレッドを停止・再起動する。(c) 差し替えをイベントでプロッタへ通知する |
 | **採用理由** | インスタンス差し替えなら「空の状態」はコンストラクタが 1 か所で保証する。ポーリングでの動的解決は、(b) のような停止/再起動の順序問題（誰が誰を先に止めるか）や、(c) のイベント取りこぼしの問題を持たない。副次的に、**ポートを開く前にプロッタウィンドウを開いても動く**（`Detached` 状態が自然に存在する） |

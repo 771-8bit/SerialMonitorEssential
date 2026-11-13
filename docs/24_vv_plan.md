@@ -344,10 +344,10 @@ flowchart TB
 | S-1 | `PlotterOpen` → `Connect` | スレッドが `Detached` から `Attached(1)` になり、集約器は clear されない |
 | S-2 | `Connect` → `PlotterOpen` | `Attached(1)`。既存データが取り込まれる |
 | S-3 | `Connect` → `Clear` | `Attached(2)`、集約器 clear、10 ms 以内に追従（INV-1, INV-2） |
-| S-4 | `Connect` → `Reopen` | `Attached(2)`、集約器 clear |
+| S-4 | `Connect` → 切断検知 → `Reopen` | 同じストアの `Attached(1)` を維持し、集約を保持して追記する |
 | S-5 | `Clear` → `Clear` | `Attached(3)`。連続 clear で停止しない |
 | S-6 | `Disconnect` → `Clear` | `Detached`。ストアが `None` になっても停止しない |
-| S-7 | `Disconnect` → `Connect` | `Attached(k+1)` |
+| S-7 | `Disconnect` → `Connect` | `Attached(k)` を維持し、切断前の受信データに追記する |
 | S-8 | `Clear` → `Connect` | `Attached(k+1)` |
 | S-9 | `Connect` → `PlotterClose` | `Stopped`、収集無効（INV-5） |
 | S-10 | `PlotterClose` → `PlotterOpen` | 再度 `Attached`。ウィンドウ再オープンで復帰 |
@@ -363,6 +363,9 @@ flowchart TB
   データ注入に使う `DataStore::push_test_data` が `#[cfg(test)]` でクレート外からは見えないため。
 - **vitest**: SM-5 / SM-6 を、コンポーネントの状態遷移として検査する。
 - **E2E**: SM-4 と、実 OS が絡む S-9〜S-12。
+- **再接続時のストア保持**: `serial::tests::reconnect_keeps_capture_and_failed_opens_do_not_discard_it`
+  で、手動・自動の接続が共通で使う `open_capture` のデータ保持を検証する。
+  `state_transition_tests.rs` の `SwapStore` は Clear などによるストアの差し替えを検証する。
 
 ### 4.5 合否基準
 
@@ -503,6 +506,7 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 ### 6.2 実施済みのシナリオ（2026-09-03）
 
 [07_plotter_spec.md 検証節](07_plotter_spec.md#検証)より。**これらは今後の回帰の基準線**である。
+E-4 の当時の結果を以下に残す。現在は再接続時にプロットと受信ログを保持し、新しいデータを追記する（S-7）。
 
 | # | シナリオ | 確認内容 |
 |---|----------|----------|

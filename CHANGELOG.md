@@ -9,6 +9,20 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+### Added
+
+- Restored the **Reload** button next to the port dropdown in Settings to refresh the port list.
+
+### Fixed
+
+- Unplugging a serial device keeps its port selected. When it returns on the same port,
+  **Connect** resumes receiving without having to select the port again.
+- On Windows, the app allows time for the port list to reflect an unplug before showing an
+  error dialog. When the OS confirms the port is gone, the disconnect is logged without a dialog.
+- Disconnecting, a failed connection attempt, and manual reconnects preserve the capture.
+  **Clear** starts a new capture and prevents pending display updates from restoring old data.
+- The ASCII view keeps short captures aligned at the top and avoids jumping while new lines arrive.
+
 ## [0.1.0-beta.2] - 2026-11-04 (pre-release)
 
 Fixes for the first beta reports (issues #3 to #7) and a few problems found while fixing them,
