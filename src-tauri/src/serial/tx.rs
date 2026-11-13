@@ -28,7 +28,7 @@
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 use log::{info, warn};
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -160,6 +160,7 @@ pub struct Parked {
 /// どちらかにしか存在しない。`Mutex<SerialPort>` を誰かが lock して I/O する
 /// 経路は型として存在しない（INV-14）。
 pub struct OpenPort {
+    id: u64,
     name: String,
     cmd_tx: Sender<PortCommand>,
     parked: Mutex<Option<Parked>>,
@@ -169,8 +170,10 @@ pub struct OpenPort {
 
 impl OpenPort {
     pub fn new(name: &str, io: Box<dyn PortIo>) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let (cmd_tx, rx) = channel::unbounded();
         Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             name: name.to_string(),
             cmd_tx,
             parked: Mutex::new(Some(Parked {
@@ -180,6 +183,11 @@ impl OpenPort {
             })),
             connected: AtomicBool::new(true),
         }
+    }
+
+    /// Identifies this open, including after Clear restarts its receive worker.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// デバイスパス（例: "COM7", "/dev/ttyUSB0"）
@@ -924,7 +932,14 @@ mod tests {
         assert!(port.is_parked() && port.is_connected());
         let p = port.clone();
         let waiter = thread::spawn(move || p.send(b"hello".to_vec()));
-        thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while port.cmd_tx.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "sender did not queue its request"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         let started = Instant::now();
         port.close();
         assert_eq!(waiter.join().unwrap(), Err("port closed".to_string()));

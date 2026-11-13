@@ -344,10 +344,10 @@ flowchart TB
 | S-1 | `PlotterOpen` → `Connect` | スレッドが `Detached` から `Attached(1)` になり、集約器は clear されない |
 | S-2 | `Connect` → `PlotterOpen` | `Attached(1)`。既存データが取り込まれる |
 | S-3 | `Connect` → `Clear` | `Attached(2)`、集約器 clear、10 ms 以内に追従（INV-1, INV-2） |
-| S-4 | `Connect` → `Reopen` | `Attached(2)`、集約器 clear |
+| S-4 | `Connect` → 切断検知 → `Reopen` | 同じストアの `Attached(1)` を維持し、集約を保持して追記する |
 | S-5 | `Clear` → `Clear` | `Attached(3)`。連続 clear で停止しない |
 | S-6 | `Disconnect` → `Clear` | `Detached`。ストアが `None` になっても停止しない |
-| S-7 | `Disconnect` → `Connect` | `Attached(k+1)` |
+| S-7 | `Disconnect` → `Connect` | `Attached(k)` を維持し、切断前の受信データに追記する |
 | S-8 | `Clear` → `Connect` | `Attached(k+1)` |
 | S-9 | `Connect` → `PlotterClose` | `Stopped`、収集無効（INV-5） |
 | S-10 | `PlotterClose` → `PlotterOpen` | 再度 `Attached`。ウィンドウ再オープンで復帰 |
@@ -363,6 +363,9 @@ flowchart TB
   データ注入に使う `DataStore::push_test_data` が `#[cfg(test)]` でクレート外からは見えないため。
 - **vitest**: SM-5 / SM-6 を、コンポーネントの状態遷移として検査する。
 - **E2E**: SM-4 と、実 OS が絡む S-9〜S-12。
+- **再接続時のストア保持**: `serial::tests::reconnect_keeps_capture_and_failed_opens_do_not_discard_it`
+  で、手動・自動の接続が共通で使う `open_capture` のデータ保持を検証する。
+  `state_transition_tests.rs` の `SwapStore` は Clear などによるストアの差し替えを検証する。
 
 ### 4.5 合否基準
 
@@ -503,6 +506,7 @@ hashlib(OpenSSL) は別実装の SHA-256 であり、一致はクロス実装の
 ### 6.2 実施済みのシナリオ（2026-09-03）
 
 [07_plotter_spec.md 検証節](07_plotter_spec.md#検証)より。**これらは今後の回帰の基準線**である。
+E-4 の当時の結果を以下に残す。現在は再接続時にプロットと受信ログを保持し、新しいデータを追記する（S-7）。
 
 | # | シナリオ | 確認内容 |
 |---|----------|----------|
@@ -809,7 +813,7 @@ thread.rs を対象に含めた。
 | シナリオ | 確認する問い |
 |----------|--------------|
 | US-01 接続してセンサ値を眺める | 波形の形で「想定どおりか」を判断できたか。表示の揺れが気になったか |
-| US-02 再書き込みを挟んで再接続 | セッションが切り替わったことが自明だったか |
+| US-02 再書き込みを挟んで再接続 | 再接続前のログを参照できたか。`Clear` で新しい出力だけを確認できたか |
 | US-03 異常スパイクの調査 | スパイクを見逃さなかったか。止めて拡大するまでの操作が滞りなかったか |
 | US-04 Hex 確認 | バイト位置を見失わずに Hex/ASCII を往復できたか |
 | US-05 コマンド送信 | 履歴の呼び戻しが編集の邪魔をしなかったか |
@@ -817,7 +821,7 @@ thread.rs を対象に含めた。
 | US-07 AI と一緒にデバッグ | Setup Guide だけで MCP 登録できたか。エージェントの要約・待機が実際の調査で役立ったか。AI の送信を画面で追えたか（2026-11-04 追加。表から漏れていた） |
 
 **未実施の一覧と記録は [27_open_verification.md §2](27_open_verification.md)**（VA-1〜9。プロッタの VA-1〜3 が最優先）。
-Auto Connect（SYS-F-807）は利用者が ON / OFF を選べるので US-02 とは衝突しない（2026-11-04 オーナー判断。US-02 は OFF で確認する）。
+US-02 は Auto Connect を OFF にして手動で確認する（[27 VA-4](27_open_verification.md)）。現在は ON / OFF ともに再接続でログを保持し、`Clear` で新しいセッションに切り替える（SYS-F-803）。2026-11-04 時点の判断は [27 §4](27_open_verification.md) を参照。
 
 **合否基準**: 上記の問いに「いいえ」が出た場合、その体験を新しいニーズ（UN）として
 [20_user_needs.md](20_user_needs.md) に追加してから要求へ変換する。実装の場当たり修正で済ませない。

@@ -6,6 +6,43 @@ use std::time::Duration;
 
 use super::tx::{LineTiming, PortIo};
 
+/// Allow the OS port list to catch up after the failing handle has been closed.
+/// Only a successful enumeration that omits the port confirms removal.
+pub(super) fn confirm_port_removed(
+    port_name: &str,
+    mut enumerate: impl FnMut() -> serialport::Result<Vec<serialport::SerialPortInfo>>,
+    mut wait: impl FnMut(Duration),
+) -> bool {
+    const RETRIES: usize = 10;
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    for attempt in 0..=RETRIES {
+        match enumerate() {
+            Ok(ports) => {
+                let present = ports.iter().any(|port| {
+                    if cfg!(windows) {
+                        port.port_name.eq_ignore_ascii_case(port_name)
+                    } else {
+                        port.port_name == port_name
+                    }
+                });
+                if !present {
+                    return true;
+                }
+            }
+            Err(error) if attempt == RETRIES => warn!(
+                "[SerialPort] Cannot confirm removal of {}: {}",
+                port_name, error
+            ),
+            Err(_) => {}
+        }
+        if attempt < RETRIES {
+            wait(INTERVAL);
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerialConfig {
     pub baud_rate: u32,
@@ -194,5 +231,58 @@ impl PortIo for SerialPort {
 
     fn write_rts(&mut self, level: bool) -> Result<(), String> {
         SerialPort::write_rts(self, level)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirm_port_removed;
+    use serialport::{Error, ErrorKind, SerialPortInfo, SerialPortType};
+    use std::time::Duration;
+
+    fn present_port() -> Vec<SerialPortInfo> {
+        vec![SerialPortInfo {
+            port_name: "COM4".into(),
+            port_type: SerialPortType::Unknown,
+        }]
+    }
+
+    #[test]
+    fn removal_is_confirmed_when_stale_enumeration_catches_up() {
+        let mut results = [
+            Ok(present_port()),
+            Err(Error::new(ErrorKind::Unknown, "enumeration failed")),
+            Ok(Vec::new()),
+        ]
+        .into_iter();
+        let mut waits = 0;
+        assert!(confirm_port_removed(
+            "COM4",
+            || results.next().unwrap(),
+            |_| {
+                waits += 1;
+            }
+        ));
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn persistent_presence_or_enumeration_errors_do_not_confirm_removal() {
+        let mut waited = Duration::ZERO;
+        let mut attempts = 0;
+        assert!(!confirm_port_removed(
+            "COM4",
+            || {
+                attempts += 1;
+                if attempts % 2 == 0 {
+                    Ok(present_port())
+                } else {
+                    Err(Error::new(ErrorKind::Unknown, "enumeration failed"))
+                }
+            },
+            |interval| waited += interval,
+        ));
+        assert_eq!(waited, Duration::from_secs(1));
+        assert_eq!(attempts, 11);
     }
 }

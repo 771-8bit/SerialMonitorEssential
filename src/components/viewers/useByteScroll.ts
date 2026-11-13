@@ -130,6 +130,19 @@ export function useByteScroll({
 
   // Anchor Scroll Logic: Maintain viewing position when data grows
   useLayoutEffect(() => {
+    if (totalBytes === 0) {
+      // Clear starts a new capture at the top, including in manual scroll mode.
+      // Do not let a trailing scroll callback restore the old capture's anchor.
+      if (trailingRef.current) clearTimeout(trailingRef.current);
+      trailingRef.current = null;
+      anchorPositionRef.current = 0;
+      lastProgrammaticScrollTopRef.current = 0;
+      if (containerRef.current) containerRef.current.scrollTop = 0;
+      // Synchronize the rendered rows with the DOM scroll reset before paint.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setScrollTop(0);
+      onScrollChange(0);
+    }
     // If not auto-scrolling...
     if (!autoScroll && containerRef.current) {
       // Check if geometry changed significantly (Bytes grew OR Height changed due to new TotalLines)
@@ -162,7 +175,7 @@ export function useByteScroll({
     prevScrollHeightRef.current = scrollHeight;
     // NOTE: We do NOT update anchorPositionRef here. We trust our previous anchor.
     // Only USER interaction should update the anchor.
-  }, [totalBytes, scrollHeight, autoScroll, totalRows, getScrollTopFromAnchor]);
+  }, [totalBytes, scrollHeight, autoScroll, totalRows, getScrollTopFromAnchor, onScrollChange]);
 
   // Handle initial offset on mount (manual mode only)
   useLayoutEffect(() => {

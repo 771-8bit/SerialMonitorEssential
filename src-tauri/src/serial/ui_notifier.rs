@@ -19,6 +19,7 @@ const TIMESTAMP_RECORD_INTERVAL: u32 = 6; // 100ms (16ms × 6 ≈ 96ms)
 
 #[derive(Clone, serde::Serialize)]
 pub struct DataUpdatePayload {
+    pub capture_id: u64,
     pub total_bytes: u64,
 }
 
@@ -57,7 +58,10 @@ pub fn spawn_ui_notifier_thread(
 
             // データが増えた場合のみ通知
             if total_bytes > last_total_bytes {
-                let payload = DataUpdatePayload { total_bytes };
+                let payload = DataUpdatePayload {
+                    capture_id: data_store.capture_id(),
+                    total_bytes,
+                };
 
                 if let Err(e) = app_handle.emit("data-update", payload) {
                     warn!("[UiNotifier] Failed to emit event: {:?}", e);

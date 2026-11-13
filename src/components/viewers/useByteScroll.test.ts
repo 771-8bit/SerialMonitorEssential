@@ -105,6 +105,29 @@ describe('useByteScroll', () => {
     expect(result.current.scrollTop).toBe(500);
   });
 
+  it('resets a manual scroll anchor on Clear before receiving new data', () => {
+    const { result, rerender } = renderHook((props) => useByteScroll(props), {
+      initialProps: { ...defaultProps, totalBytes: 16000 },
+    });
+    const container = document.createElement('div');
+    Object.defineProperty(container, 'clientHeight', { value: 500 });
+    container.scrollTop = 10000;
+    (result.current.containerRef as React.MutableRefObject<HTMLDivElement | null>).current =
+      container;
+    act(() => {
+      result.current.handleScroll({
+        currentTarget: container,
+      } as unknown as React.UIEvent<HTMLDivElement>);
+    });
+    rerender({ ...defaultProps, totalBytes: 0 });
+    expect(container.scrollTop).toBe(0);
+    expect(result.current.scrollTop).toBe(0);
+    expect(defaultProps.onScrollChange).toHaveBeenLastCalledWith(0);
+    rerender({ ...defaultProps, totalBytes: 16000 });
+    expect(container.scrollTop).toBe(0);
+    expect(result.current.scrollTop).toBe(0);
+  });
+
   it('caps scrollHeight at MAX_SCROLL_HEIGHT', () => {
     const hugeBytes = 100_000_000 * 16; // 100M rows
     const { result } = renderHook(() => useByteScroll({ ...defaultProps, totalBytes: hugeBytes }));

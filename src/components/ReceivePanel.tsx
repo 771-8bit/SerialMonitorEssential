@@ -30,6 +30,7 @@ export interface OutputFormat {
 }
 
 interface ReceivePanelProps {
+  captureId: number;
   totalBytes: number;
   onExport: (format: OutputFormat) => void;
   onClear: () => void;
@@ -39,6 +40,7 @@ interface ReceivePanelProps {
 }
 
 export default function ReceivePanel({
+  captureId,
   totalBytes,
   onExport,
   onClear,
@@ -71,7 +73,12 @@ export default function ReceivePanel({
   );
 
   // Scroll position as byte offset (preserved across mode switches)
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [scrollPosition, setScrollPosition] = useState({ captureId, offset: 0 });
+  const scrollOffset = scrollPosition.captureId === captureId ? scrollPosition.offset : 0;
+  const setScrollOffset = useCallback(
+    (offset: number) => setScrollPosition({ captureId, offset }),
+    [captureId]
+  );
 
   // Search & Filter
   const [searchQuery, setSearchQuery] = useState('');
@@ -118,7 +125,7 @@ export default function ReceivePanel({
       </div>
 
       {/* Log Viewer Area - Switch between HexViewer and AsciiViewer */}
-      <div className="viewer-wrapper">
+      <div className="viewer-wrapper" key={captureId}>
         {viewMode === 'hex' ? (
           <HexViewer
             totalBytes={totalBytes}
