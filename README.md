@@ -30,9 +30,12 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
   (none / CR / LF / CRLF) and input history (↑ / ↓)
 - Any baud rate the driver accepts (including non-standard ones), DTR / RTS control, hardware
   or software flow control
+- **Reload** refreshes the port list in Settings. The selected port stays selected when its
+  device is unplugged
+- Received data stays available after a disconnect. While the app is open, reconnecting appends
+  to the same capture until you choose **Clear** in Receive
 - **Auto Connect**: connects to the selected port whenever it is available — at startup, when
-  the board is plugged in, and when it comes back after a reset or unplug. The capture
-  continues, so the output from before the reset is not lost. Disconnect turns it off
+  the board is plugged in, and when it comes back after a reset or unplug. Disconnect turns it off
 - Save the capture as a binary file or as text with timestamps, or copy it as hex or ASCII
 
 DTR and RTS are off by default, so connecting does not reset the board (an Arduino Uno resets
@@ -122,6 +125,11 @@ published.
 3. Type into **Send** and press **Send** (or turn on **Send with Enter**).
 4. Click **Plotter** to open the plotter. Channels are created automatically from the incoming
    lines.
+
+With **Auto Connect** off, unplugging a device leaves its port selected and marks it as
+**(not present)**. When the device comes back on the same port, click **Connect** to resume
+receiving. Use **Reload** to refresh the list immediately, for example when looking for a
+device that appears under a different port number.
 
 ## Using it with an AI agent (MCP)
 

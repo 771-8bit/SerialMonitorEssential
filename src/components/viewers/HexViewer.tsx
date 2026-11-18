@@ -47,6 +47,7 @@ export default function HexViewer({
   const lastFetchRowRef = useRef(-Infinity);
   const totalRowsRef = useRef(0);
   const lastTotalBytesRef = useRef(0);
+  const fetchGenerationRef = useRef(0);
 
   // Calculate effective total rows for scroll height
   // Use backend confirmed rows if available, otherwise estimate
@@ -140,12 +141,14 @@ export default function HexViewer({
           lastFetchRowRef.current = targetStartRow;
 
           try {
+            const generation = fetchGenerationRef.current;
             const fetchCount = visibleRows + BUFFER_ROWS * 2;
             const payload = await invoke<DisplayRowsPayload>('get_display_rows', {
               startRow: targetStartRow,
               rowCount: fetchCount,
               showTimestamp,
             });
+            if (generation !== fetchGenerationRef.current) continue;
 
             // Only update state if this is still relevant?
             // Ideally yes. Even if old, it's better than blank.
@@ -171,9 +174,15 @@ export default function HexViewer({
   // Effect: fetch data when scroll position changes
   useEffect(() => {
     if (totalBytes === 0) {
+      fetchGenerationRef.current += 1;
+      pendingStartRowRef.current = null;
+      pendingForceRef.current = false;
+      lastFetchRowRef.current = -Infinity;
+      lastTotalBytesRef.current = 0;
       setRows([]);
       setTotalRows(0);
       totalRowsRef.current = 0;
+      setCurrentStartRow(0);
       return;
     }
 

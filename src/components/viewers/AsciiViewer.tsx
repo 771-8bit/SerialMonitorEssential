@@ -50,18 +50,20 @@ export default function AsciiViewer({
   const [lines, setLines] = useState<AsciiLine[]>([]);
   const [totalLines, setTotalLines] = useState(0);
   const [currentStartLine, setCurrentStartLine] = useState(0);
-  // Whether the fetched block contains the last line (issue #3). The block is then
-  // laid out bottom-anchored, so the newest line is at the very bottom even when
+  // Whether the fetched block contains the last line (issue #3). A truncated tail
+  // is bottom-anchored, so the newest line is at the very bottom even when
   // Line Wrap makes rows taller than ROW_HEIGHT (the scroll model assumes fixed
   // rows) or the scroll height is scaled down for huge captures. Decided by the
   // data, not the scroll position, so entering/leaving the mode cannot oscillate.
   const [reachesEnd, setReachesEnd] = useState(false);
   const isTail = reachesEnd && lines.length > 0;
+  const hasCompleteBlock = isTail && currentStartLine === 0;
 
   // Fetching guard
   const fetchingRef = useRef(false);
   const lastFetchLineRef = useRef(-Infinity);
   const lastTotalBytesRef = useRef(0);
+  const fetchGenerationRef = useRef(0);
 
   // Track total lines from backend for proper scroll calculation
   const totalLinesRef = useRef(0);
@@ -69,9 +71,11 @@ export default function AsciiViewer({
   // Track initialization to prevent double-setting
   const [initialLineSet, setInitialLineSet] = useState(false);
 
-  // Determine effective total lines for scroll calculation
-  const effectiveTotalLines =
+  // A complete block has no virtual rows. The backend line index can include
+  // a trailing empty line that is not rendered.
+  const indexedLineCount =
     totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
+  const effectiveTotalLines = hasCompleteBlock ? lines.length : indexedLineCount;
 
   // Byte-based scroll
   const {
@@ -170,6 +174,7 @@ export default function AsciiViewer({
           lastFetchLineRef.current = target;
 
           try {
+            const generation = fetchGenerationRef.current;
             const fetchCount = visibleRows + BUFFER_ROWS * 2;
             const payload = await invoke<AsciiLinesPayload>('get_ascii_lines', {
               startLine: target,
@@ -177,6 +182,7 @@ export default function AsciiViewer({
               showCtrl: false,
               showTimestamp: showTimestamp,
             });
+            if (generation !== fetchGenerationRef.current) continue;
             setLines(payload.lines);
             setTotalLines(payload.total_lines);
             totalLinesRef.current = payload.total_lines;
@@ -196,9 +202,16 @@ export default function AsciiViewer({
   // Effect: fetch data when scroll position changes or totalBytes changes
   useEffect(() => {
     if (totalBytes === 0) {
+      // Clear invalidates both queued requests and replies already in flight.
+      fetchGenerationRef.current += 1;
+      pendingFetchRef.current = null;
+      lastFetchLineRef.current = -Infinity;
+      lastTotalBytesRef.current = 0;
       setLines([]);
       setTotalLines(0);
       totalLinesRef.current = 0;
+      setCurrentStartLine(0);
+      setReachesEnd(false);
       return;
     }
 
@@ -247,7 +260,7 @@ export default function AsciiViewer({
   useEffect(() => {
     const el = containerRef.current;
     if (!autoScroll || !isTail || !el) return;
-    const bottom = el.scrollHeight - el.clientHeight;
+    const bottom = Math.max(0, el.scrollHeight - el.clientHeight);
     if (Math.abs(el.scrollTop - bottom) > 1) el.scrollTop = bottom;
   }, [autoScroll, isTail, lines, totalBytes, asciiScrollHeight, containerRef]);
 
@@ -363,7 +376,7 @@ export default function AsciiViewer({
                   minHeight: asciiScrollHeight,
                   display: 'flex',
                   flexDirection: 'column',
-                  justifyContent: 'flex-end',
+                  justifyContent: hasCompleteBlock ? 'flex-start' : 'flex-end',
                 }
               : { height: asciiScrollHeight, position: 'relative' }
           }

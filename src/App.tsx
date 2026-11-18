@@ -13,6 +13,7 @@ import { usePersistentState, loadSetting, saveSetting, isBoolean, isString } fro
 import './App.css';
 
 interface DataUpdatePayload {
+  capture_id: number;
   total_bytes: number;
 }
 
@@ -56,7 +57,16 @@ function App() {
     loadSetting('autoConnect', false, isBoolean) ? loadSetting(LAST_PORT_KEY, '', isString) : ''
   );
   const [isConnected, setIsConnected] = useState(false);
-  const [totalBytes, setTotalBytes] = useState<number>(0);
+  const [{ capture_id: captureId, total_bytes: totalBytes }, setCapture] =
+    useState<DataUpdatePayload>({ capture_id: 0, total_bytes: 0 });
+  const updateCapture = useCallback((next: DataUpdatePayload) => {
+    setCapture((current) =>
+      next.capture_id > current.capture_id ||
+      (next.capture_id === current.capture_id && next.total_bytes > current.total_bytes)
+        ? next
+        : current
+    );
+  }, []);
   const [theme, setTheme] = useTheme();
   // Confirms Copy / Save, as the C# version's auto-closing message box did
   const [toast, showToast] = useToast();
@@ -80,18 +90,10 @@ function App() {
     saveSetting(LAST_PORT_KEY, port);
   }, []);
 
-  // Read in the poll callback without making it a dependency (the interval
-  // must not be torn down and restarted on every connect/disconnect).
-  const isConnectedRef = useRef(isConnected);
-  useEffect(() => {
-    isConnectedRef.current = isConnected;
-  }, [isConnected]);
-
   // --- Auto Connect (SYS-F-807) ---------------------------------------------
   // While waiting, look for the device path and open it with `reopen_port`, which
-  // continues the SAME capture (offsets continue, nothing is cleared); only the
-  // Connect button starts a new one. When the connected device disappears, wait for
-  // the same path again. A user-initiated Disconnect never produces
+  // continues the current capture at the same offsets. When the connected
+  // device disappears, wait for the same path again. A user-initiated Disconnect never produces
   // `serial-status connected:false`, so every such event is an unexpected disconnect.
   const autoConnectRef = useRef(autoConnect);
   useEffect(() => {
@@ -107,11 +109,28 @@ function App() {
   const [waitError, setWaitError] = useState<string | null>(null);
   // The list entry of the current connection (the device to wait for if it goes away)
   const connectedPortRef = useRef('');
+  const connectionIdRef = useRef<number | null>(null);
+  const pendingOpenRef = useRef<Promise<number> | null>(null);
+  const openAttemptRef = useRef(0);
   // Reconnect uses the settings as they are when the device comes back
   const configRef = useRef(config);
   useEffect(() => {
     configRef.current = config;
   }, [config]);
+
+  const openConnection = useCallback(
+    async (command: 'open_port' | 'reopen_port', entry: string) => {
+      openAttemptRef.current += 1;
+      const opening = invoke<number>(command, { portName: entry, config: configRef.current });
+      pendingOpenRef.current = opening;
+      try {
+        connectionIdRef.current = await opening;
+      } finally {
+        if (pendingOpenRef.current === opening) pendingOpenRef.current = null;
+      }
+    },
+    []
+  );
 
   const beginWaiting = useCallback((path: string) => {
     waitingRef.current = path;
@@ -130,38 +149,27 @@ function App() {
   }, []);
 
   // Shared by the manual refresh (SettingsPanel) and the hotplug poll below.
+  const portRefresh = useRef({ requested: 0, applied: 0 });
   const updatePorts = useCallback(async () => {
+    const request = ++portRefresh.current.requested;
     try {
       const p = await invoke<string[]>('list_ports');
+      // A slow poll may finish after a manual Reload has already refreshed the list.
+      if (request < portRefresh.current.applied) return;
+      portRefresh.current.applied = request;
       // Skip the state update when the list is unchanged: the poll runs every
       // PORT_POLL_INTERVAL_MS and a new array identity would re-render the
       // whole tree (and the settings dropdown) on every tick for nothing.
       setPorts((current) =>
         current.length === p.length && current.every((name, i) => name === p[i]) ? current : p
       );
-      // Use the functional form: this callback may run after the user changed
-      // the selection, so decide based on the CURRENT value, not a stale one.
       setSelectedPort((current) => {
-        // While connected the port <select> is disabled, so silently moving
-        // the selection off the connected device would be invisible and would
-        // make a later reconnect open the wrong port. A true unplug is handled
-        // within milliseconds by the read-error path (serial-status), which is
-        // what actually drops the connection - the poll only keeps the list
-        // fresh (GAP-07). The same holds while waiting to reconnect: the lost
-        // device is absent from the list by definition, and moving the selection
-        // would point the wait (and the user) at a different device.
-        if (isConnectedRef.current || waitingRef.current !== null) return current;
-        // Fallback when nothing valid is selected: the port the user last chose if
-        // it is present (issue #7), else the first one
-        const fallback = () =>
-          p.includes(preferredPortRef.current) ? preferredPortRef.current : (p[0] ?? '');
-        if (current && !p.includes(current)) {
-          return fallback();
-        }
-        if (!current && p.length > 0) {
-          return fallback();
-        }
-        return current;
+        // Keep the selected device path across unplug, even with Auto Connect off.
+        // If the same path returns under a different label, show the new label.
+        if (current && p.includes(current)) return current;
+        const path = portPath(current || preferredPortRef.current);
+        const entry = p.find((port) => portPath(port) === path);
+        return entry ?? (current || p[0] || '');
       });
     } catch (e) {
       console.error(e);
@@ -170,7 +178,6 @@ function App() {
 
   useEffect(() => {
     // updatePorts is async and sets state only after awaiting list_ports
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     updatePorts();
     const timer = setInterval(updatePorts, PORT_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
@@ -181,23 +188,55 @@ function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
-    listen<{ connected: boolean; error: string | null }>('serial-status', (event) => {
-      if (!event.payload.connected) {
+    listen<{
+      connected: boolean;
+      error: string | null;
+      connection_id: number;
+    }>('serial-status', async (event) => {
+      if (event.payload.connected) return;
+      // A device can fail before open_port's reply reaches JS. Let that reply
+      // install the connection ID before deciding whether this event is current.
+      try {
+        await pendingOpenRef.current;
+      } catch {
+        // The open error is reported by the initiating operation.
+      }
+      const id = event.payload.connection_id;
+      if (cancelled || id !== connectionIdRef.current) return;
+      const openAttempt = openAttemptRef.current;
+      try {
+        const closed = await invoke<boolean>('close_port', { connectionId: id });
+        if (cancelled || !closed || id !== connectionIdRef.current) return;
+        connectionIdRef.current = null;
         setIsConnected(false);
-        // GAP-08 / DEBT-1: the worker only reports the fatal read error - the
-        // backend SerialState still holds the port handle, so the UI would say
-        // "disconnected" while the OS handle stays open. close_port is
-        // idempotent (it takes the Option and stops reception), so calling it
-        // here is safe and puts both sides back in the same state.
-        invoke('close_port').catch(console.error);
+        if (event.payload.error) console.error('Serial disconnected:', event.payload.error);
         const lost = connectedPortRef.current;
         if (autoConnectRef.current && lost) {
           // No alert: window.alert blocks the JS thread, so the reconnect would
           // stall until the user dismissed it. The settings row shows the state.
           beginWaiting(portPath(lost));
         } else if (event.payload.error) {
-          alert('Serial disconnected: ' + event.payload.error);
+          // The OS port list can lag behind the I/O error. Check after closing
+          // so waiting for it cannot delay the disconnect or hold the port.
+          const removed =
+            lost &&
+            (await invoke<boolean>('confirm_port_removed', { portName: portPath(lost) }).catch(
+              (error) => {
+                console.error('Failed to confirm serial port removal:', error);
+                return false;
+              }
+            ));
+          if (
+            !removed &&
+            !cancelled &&
+            waitingRef.current === null &&
+            openAttempt === openAttemptRef.current
+          ) {
+            alert('Serial disconnected: ' + event.payload.error);
+          }
         }
+      } catch (error) {
+        console.error('Failed to close disconnected port:', error);
       }
     }).then((fn) => {
       // If unmounted before listen() resolved, release immediately
@@ -214,11 +253,8 @@ function App() {
 
   // Auto Connect: whenever it is on and nothing is open or awaited, wait for the
   // selected port (at startup, after turning it on, after picking another port).
-  // Started synchronously on purpose: waitingRef must be set before the first port
-  // poll resolves, or the poll would move the selection off an absent remembered port.
   useEffect(() => {
     if (autoConnect && !isConnected && waitingFor === null && selectedPort) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       beginWaiting(portPath(selectedPort));
     }
   }, [autoConnect, isConnected, waitingFor, selectedPort, beginWaiting]);
@@ -243,7 +279,7 @@ function App() {
           failures = 0;
           setWaitError(null);
         } else {
-          await invoke('reopen_port', { portName: entry, config: configRef.current });
+          await openConnection('reopen_port', entry);
           // Even if the wait was cancelled while this open was in flight, the port is
           // now open: show it as connected rather than leave an invisible open port.
           connectedPortRef.current = entry;
@@ -270,14 +306,14 @@ function App() {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [waitingFor, endWaiting]);
+  }, [waitingFor, endWaiting, openConnection]);
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
 
     listen<DataUpdatePayload>('data-update', (event) => {
-      setTotalBytes(event.payload.total_bytes);
+      updateCapture(event.payload);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -287,7 +323,7 @@ function App() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, []);
+  }, [updateCapture]);
 
   // Log write failures (disk full etc.) - GAP-09 / SYS-F-205.
   // The logger thread retries silently; without this the user never learns
@@ -338,6 +374,7 @@ function App() {
       setAutoConnect(false);
       try {
         await invoke('close_port');
+        connectionIdRef.current = null;
         connectedPortRef.current = '';
         setReconnectedAt(null);
         setIsConnected(false);
@@ -348,13 +385,11 @@ function App() {
     } else {
       if (!selectedPort) return;
       try {
-        // Manual Connect starts a new session (SYS-F-803); only this path resets the count
-        await invoke('open_port', { portName: selectedPort, config: config });
+        await openConnection('open_port', selectedPort);
         connectedPortRef.current = selectedPort;
         rememberPort(selectedPort);
         setReconnectedAt(null);
         setIsConnected(true);
-        setTotalBytes(0);
       } catch (e) {
         console.error(e);
         alert('Failed to open port: ' + e);
@@ -408,8 +443,9 @@ function App() {
 
   async function handleClear() {
     try {
-      await invoke('clear_data');
-      setTotalBytes(0);
+      const captureId = await invoke<number>('clear_data');
+      // The new notifier may already have delivered bytes for this capture.
+      updateCapture({ capture_id: captureId, total_bytes: 0 });
     } catch (e) {
       console.error(e);
       alert('Failed to clear data: ' + e);
@@ -488,6 +524,7 @@ function App() {
 
       <div className="bottom-section">
         <ReceivePanel
+          captureId={captureId}
           totalBytes={totalBytes}
           onExport={handleExport}
           onClear={handleClear}

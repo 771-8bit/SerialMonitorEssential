@@ -94,6 +94,7 @@ pub fn run() {
             serial::list_ports,
             serial::open_port,
             serial::close_port,
+            serial::confirm_port_removed,
             serial::reopen_port,
             serial::set_reconnecting,
             serial::write_data,

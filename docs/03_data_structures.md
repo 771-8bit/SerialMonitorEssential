@@ -77,11 +77,12 @@ struct PageMetadata {
 
 **UiNotifier Thread:**
 *   `DataStore::total_bytes()` を監視し、最大60fpsに間引いてイベントを発火。
-*   イベントには `total_bytes` のみを含む（データ本体は `get_display_rows` で取得）。
+*   イベントには `capture_id` と `total_bytes` を含む（データ本体は `get_display_rows` で取得）。
 
 ```rust
 // data-update イベントのペイロード
 struct DataUpdatePayload {
+    capture_id: u64,   // Clear 前後の受信通知を識別する ID
     total_bytes: u64,  // 受信済み総バイト数
 }
 ```
@@ -99,7 +100,7 @@ struct DataUpdatePayload {
      |                                        |
      |-- open_port -------------------------->|
      |                                        |
-     |<-- data-update { total_bytes } --------|  (60fps間引き)
+     |<-- data-update { capture_id, total_bytes }  (60fps間引き)
      |                                        |
      |-- get_display_rows(start_row, count) ->|  (スクロール時)
      |                                        |
