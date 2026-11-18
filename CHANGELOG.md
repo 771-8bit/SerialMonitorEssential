@@ -9,9 +9,20 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-11-18 (pre-release)
+
+Unplugging and reconnecting a USB serial device ([#10]).
+Windows build: NSIS installer only, as for beta.2.
+
 ### Added
 
 - Restored the **Reload** button next to the port dropdown in Settings to refresh the port list.
+
+### Changed
+
+- Disconnecting, a failed connection attempt, and manual reconnects preserve the capture.
+  Before, a manual **Connect** started a new capture. **Clear** starts a new capture and
+  prevents pending display updates from restoring old data.
 
 ### Fixed
 
@@ -19,9 +30,9 @@ History before 0.1.0 is not reconstructed here; see the change log in
   **Connect** resumes receiving without having to select the port again.
 - On Windows, the app allows time for the port list to reflect an unplug before showing an
   error dialog. When the OS confirms the port is gone, the disconnect is logged without a dialog.
-- Disconnecting, a failed connection attempt, and manual reconnects preserve the capture.
-  **Clear** starts a new capture and prevents pending display updates from restoring old data.
 - The ASCII view keeps short captures aligned at the top and avoids jumping while new lines arrive.
+
+[#10]: https://github.com/771-8bit/SerialMonitorEssential/pull/10
 
 ## [0.1.0-beta.2] - 2026-11-04 (pre-release)
 
