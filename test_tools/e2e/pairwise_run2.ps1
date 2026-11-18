@@ -204,7 +204,8 @@ foreach ($row in $rows) {
       Ensure-Toggle $main "Line Wrap" ($row.lineWrap -eq "on")
       Ensure-Toggle $main "Timestamp" ($row.timestamp -eq "on")
       if ($row.timestamp -eq "on") {
-        Select-Combo $main "^(Space|Comma|Tab)$" ("^" + $row.separator + "$")
+        # The combo is found by its current value; ">" is the default since 0.1.0-beta.2
+        Select-Combo $main "^(>|Space|Comma|Tab)$" ("^" + $row.separator + "$")
       }
     }
     Ensure-Toggle $main "Auto Scroll" ($row.autoScroll -eq "on")
@@ -253,7 +254,9 @@ foreach ($row in $rows) {
       if ($null -ne $plotter) { $failures += "plotter window failed to close" }
     }
 
-    try { $null = Get-Process -Name "tauri-appserial-monitor-essential","serial-monitor-essential" -ErrorAction Stop } catch { $failures += "app process died" }
+    # Either name is enough (dev and release builds differ). With -ErrorAction Stop, the
+    # missing one would throw even while the app is alive.
+    if (-not (Get-Process -Name "tauri-appserial-monitor-essential","serial-monitor-essential" -ErrorAction SilentlyContinue)) { $failures += "app process died" }
 
     $logNow = Get-Content $LogPath -ErrorAction SilentlyContinue
     if ($logNow) {
