@@ -2,7 +2,7 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ROW_HEIGHT, BUFFER_ROWS } from './viewerConstants';
 import { useByteScroll } from './useByteScroll';
-import { TAIL_START_LINE } from './scrollUtils';
+import { rowAtScrollTop, TAIL_START_LINE } from './scrollUtils';
 import './AsciiViewer.css';
 import { asciiDisplaySegments } from './asciiDisplay';
 
@@ -57,7 +57,7 @@ export default function AsciiViewer({
   // data, not the scroll position, so entering/leaving the mode cannot oscillate.
   const [reachesEnd, setReachesEnd] = useState(false);
   const isTail = reachesEnd && lines.length > 0;
-  const hasCompleteBlock = isTail && currentStartLine === 0;
+  const hasCompleteBlock = isTail && currentStartLine === 0 && lines[0].offset === 0;
 
   // Fetching guard
   const fetchingRef = useRef(false);
@@ -83,6 +83,8 @@ export default function AsciiViewer({
     scrollTop,
     scrollHeight,
     visibleRows,
+    viewportHeight,
+    isFollowingTail,
     handleScroll,
     getByteOffset,
     scrollTo,
@@ -215,22 +217,11 @@ export default function AsciiViewer({
       return;
     }
 
-    // Use byte offset for consistent Hex/ASCII scroll position
-    const byteOffset = getByteOffset();
-    // Use totalLines from backend if available, otherwise estimate
-    // const effectiveTotalLines =
-    //   totalLinesRef.current > 0 ? totalLinesRef.current : Math.max(1, Math.ceil(totalBytes / 80));
-
-    // Calculate start line from byte ratio (same approach as HexViewer)
-    const scrollRatio = totalBytes > 0 ? byteOffset / totalBytes : 0;
-    // Auto Scroll always shows the end: ask for the tail rather than a position
-    // derived from the (fixed-row, possibly scaled) scroll model.
-    const startLine = autoScroll
-      ? TAIL_START_LINE
-      : Math.max(0, Math.floor(scrollRatio * effectiveTotalLines) - BUFFER_ROWS);
+    const forceRefetch = totalBytes !== lastTotalBytesRef.current;
+    const targetLine = rowAtScrollTop(scrollTop, scrollHeight, viewportHeight, effectiveTotalLines);
+    const startLine = isFollowingTail ? TAIL_START_LINE : Math.max(0, targetLine - BUFFER_ROWS);
 
     // Force refetch when totalBytes changes (new data arrived)
-    const forceRefetch = totalBytes !== lastTotalBytesRef.current;
     lastTotalBytesRef.current = totalBytes;
 
     // Refetch when the viewport grew (more rows visible than last fetch covered)
@@ -243,10 +234,11 @@ export default function AsciiViewer({
 
     fetchLines(startLine, forceRefetch || viewportGrew || timestampToggled);
   }, [
-    autoScroll,
+    isFollowingTail,
     totalBytes,
     scrollTop,
-    getByteOffset,
+    scrollHeight,
+    viewportHeight,
     fetchLines,
     effectiveTotalLines,
     visibleRows,
@@ -259,10 +251,10 @@ export default function AsciiViewer({
   // auto-scroll effect in the same commit.
   useEffect(() => {
     const el = containerRef.current;
-    if (!autoScroll || !isTail || !el) return;
+    if (!isFollowingTail || !isTail || !el) return;
     const bottom = Math.max(0, el.scrollHeight - el.clientHeight);
     if (Math.abs(el.scrollTop - bottom) > 1) el.scrollTop = bottom;
-  }, [autoScroll, isTail, lines, totalBytes, asciiScrollHeight, containerRef]);
+  }, [isFollowingTail, isTail, lines, totalBytes, asciiScrollHeight, containerRef]);
 
   // Handle Ctrl+A to warn user about partial selection.
   // Skip when focus is in an editable element (Send textarea, search input,
@@ -345,18 +337,13 @@ export default function AsciiViewer({
     [timestampSeparator, showTimestamp]
   );
 
-  // Calculate display position.
-  // Clamp the visual offset so stale rows stay attached to the viewport during
-  // fast scrolling instead of rendering thousands of pixels away (blank view).
-  // The clamp is symmetric (+/- maxDiff) so it only kicks in once the stale
-  // block would actually leave the viewport - a plain BUFFER_ROWS cap would
-  // freeze normal downward scrolling whenever the diff legitimately exceeds
-  // the buffer before the refetch lands.
-  const scrollRatio = scrollHeight > 0 ? scrollTop / scrollHeight : 0;
-  const targetLine = Math.floor(scrollRatio * effectiveTotalLines);
-  const maxDiff = Math.max(BUFFER_ROWS, lines.length - visibleRows);
-  const visualLineDiff = Math.max(Math.min(targetLine - currentStartLine, maxDiff), -maxDiff);
+  // Keep a stale block visible while a jump is fetching. In particular, a
+  // negative diff must not put the old tail far below an upward-scrolled view.
+  const targetLine = rowAtScrollTop(scrollTop, scrollHeight, viewportHeight, effectiveTotalLines);
+  const maxDiff = Math.max(0, lines.length - visibleRows);
+  const visualLineDiff = Math.max(0, Math.min(targetLine - currentStartLine, maxDiff));
   const displayTop = scrollTop - visualLineDiff * ROW_HEIGHT;
+  const useTailLayout = isTail && (isFollowingTail || hasCompleteBlock);
   const naturalLineHeight = totalLines * ROW_HEIGHT;
   const isScaled = asciiScrollHeight < naturalLineHeight;
 
@@ -369,7 +356,7 @@ export default function AsciiViewer({
       <div className="ascii-scroll-container" ref={containerRef} onScroll={handleScroll}>
         <div
           style={
-            isTail
+            useTailLayout
               ? {
                   // Bottom-anchored: grows (instead of overflowing) when wrapped rows
                   // are taller than the model, so the last line is always reachable
@@ -383,7 +370,9 @@ export default function AsciiViewer({
         >
           <div
             style={
-              isTail ? { width: '100%' } : { position: 'absolute', top: displayTop, width: '100%' }
+              useTailLayout
+                ? { width: '100%' }
+                : { position: 'absolute', top: displayTop, width: '100%' }
             }
           >
             {lines.map((line) => (

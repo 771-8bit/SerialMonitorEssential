@@ -254,9 +254,14 @@ export default function HexViewer({
   // We clamp the diff to ensure that if we are lagging, we 'drag' the old data along with the scrollbar
   // so it remains visible until the new data arrives.
   // We allow normal positioning within the buffer range.
-  const visualRowDiff = Math.min(rowDiff, BUFFER_ROWS);
+  const visualRowDiff = Math.max(0, Math.min(rowDiff, Math.max(0, rows.length - visibleRows)));
 
-  const displayTop = scrollTop - visualRowDiff * ROW_HEIGHT;
+  // A partially visible viewport row must not let the tail extend the spacer.
+  // Otherwise scrolling to its overflow creates a new, ever-moving bottom.
+  const displayTop = Math.min(
+    scrollTop - visualRowDiff * ROW_HEIGHT,
+    Math.max(0, scrollHeight - rows.length * ROW_HEIGHT)
+  );
 
   return (
     <div className="hex-viewer">
