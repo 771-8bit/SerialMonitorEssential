@@ -9,6 +9,13 @@ History before 0.1.0 is not reconstructed here; see the change log in
 
 ## [Unreleased]
 
+### Fixed
+
+- Scrolling up through a large capture now shows the earliest rows and holds your place
+  while more data arrives. Returning to the bottom resumes Auto Scroll.
+- The ASCII view shows the newest incoming bytes even when very long lines exceed its
+  display buffer. History remains readable while it moves from memory to disk.
+
 ## [0.1.0-beta.3] - 2026-11-18 (pre-release)
 
 Unplugging and reconnecting a USB serial device ([#10]).

@@ -25,6 +25,8 @@ did all of that, so I built this one. It is a Tauri/Rust rewrite of an earlier C
   so long captures do not grow memory without bound
 - Hex / ASCII views with virtual scrolling, timestamps (in both views), line wrap, and CR / LF /
   NUL shown as symbols when you want to see them. CR, LF and CRLF all end a line
+- With **Auto Scroll** on, scroll up to read earlier output while the capture continues.
+  Return to the bottom to follow new output again
 - Regex search and filter over the whole capture
 - Send text or hex (`48 65 6C`, `0A-0B`, `1,2,3`), with a selectable line ending
   (none / CR / LF / CRLF) and input history (↑ / ↓)
