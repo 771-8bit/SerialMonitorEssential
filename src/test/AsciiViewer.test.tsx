@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import AsciiViewer from '../components/viewers/AsciiViewer';
 import { TAIL_START_LINE } from '../components/viewers/scrollUtils';
-import { ROW_HEIGHT } from '../components/viewers/viewerConstants';
+import { MAX_SCROLL_HEIGHT, ROW_HEIGHT } from '../components/viewers/viewerConstants';
 
 const invokeMock = vi.mocked(invoke);
 
@@ -45,6 +45,87 @@ describe('AsciiViewer - Auto Scroll reaches the last line (issue #3)', () => {
     });
   });
 
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([false, true])(
+    'browses row zero while Auto Scroll is checked and new data arrives (wrap=%s)',
+    async (lineWrap) => {
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
+      vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (
+        this: HTMLElement
+      ) {
+        const spacer = this.firstElementChild as HTMLElement | null;
+        return Number.parseFloat(spacer?.style.height || spacer?.style.minHeight || '0');
+      });
+      let total = 2_000_000;
+      let finishHead: ((payload: unknown) => void) | undefined;
+      let deferHead = false;
+      invokeMock.mockImplementation(async (cmd, args) => {
+        if (cmd !== 'get_ascii_lines') return undefined;
+        const a = args as { startLine: number; lineCount: number };
+        const start = Math.min(a.startLine, Math.max(0, total - a.lineCount));
+        const payload = {
+          lines: lines(start, Math.min(a.lineCount, total - start)),
+          total_lines: total,
+          start_line: start,
+          reaches_end: start + a.lineCount >= total,
+        };
+        if (start === 0 && deferHead) {
+          deferHead = false;
+          return new Promise((resolve) => {
+            finishHead = resolve;
+          });
+        }
+        return payload;
+      });
+      const { container, rerender, findByText } = render(
+        <AsciiViewer totalBytes={total * 10} autoScroll={true} lineWrap={lineWrap} />
+      );
+      await findByText(`line ${total - 1}`);
+      const viewport = container.querySelector('.ascii-scroll-container') as HTMLElement;
+      expect(viewport.scrollHeight).toBe(MAX_SCROLL_HEIGHT);
+      deferHead = true;
+      fireEvent.scroll(viewport, { target: { scrollTop: 0 } });
+      await waitFor(() => expect(finishHead).toBeDefined());
+      const spacer = viewport.firstElementChild as HTMLElement;
+      // Even while the old tail is in flight, it cannot create a huge blank
+      // area above the rows or extend the scroll range below the spacer.
+      expect((spacer.firstElementChild as HTMLElement).style.top).toBe('0px');
+      expect(spacer.style.justifyContent).toBe('');
+      await act(async () => {
+        finishHead!({
+          lines: lines(0, 120),
+          total_lines: total,
+          start_line: 0,
+          reaches_end: false,
+        });
+      });
+      await findByText('line 0');
+      total += 100;
+      rerender(<AsciiViewer totalBytes={total * 10} autoScroll={true} lineWrap={lineWrap} />);
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenLastCalledWith(
+          'get_ascii_lines',
+          expect.objectContaining({ startLine: 0 })
+        )
+      );
+      expect(viewport.scrollTop).toBe(0);
+      expect(await findByText('line 0')).toBeInTheDocument();
+      expect((spacer.firstElementChild as HTMLElement).style.top).toBe('0px');
+
+      // Reaching the actual bottom resumes following, including later input.
+      fireEvent.scroll(viewport, { target: { scrollTop: viewport.scrollHeight - 400 } });
+      await findByText(`line ${total - 1}`);
+      total += 100;
+      rerender(<AsciiViewer totalBytes={total * 10} autoScroll={true} lineWrap={lineWrap} />);
+      await findByText(`line ${total - 1}`);
+      expect(invokeMock).toHaveBeenLastCalledWith(
+        'get_ascii_lines',
+        expect.objectContaining({ startLine: TAIL_START_LINE })
+      );
+    }
+  );
+
   it('asks for the tail and lays the rows out bottom-anchored', async () => {
     const { container, findByText } = render(
       <AsciiViewer totalBytes={10_000} autoScroll={true} lineWrap={true} />
@@ -71,6 +152,21 @@ describe('AsciiViewer - Auto Scroll reaches the last line (issue #3)', () => {
     const spacer = container.querySelector('.ascii-scroll-container > div') as HTMLElement;
     expect(spacer.style.justifyContent).toBe('');
     expect(spacer.style.position).toBe('relative');
+  });
+
+  it('treats a byte-capped suffix of one long line as a partial tail', async () => {
+    invokeMock.mockResolvedValue({
+      lines: [{ offset: 1024 * 1024, text: 'latest suffix', timestamp: null }],
+      total_lines: 1,
+      start_line: 0,
+      reaches_end: true,
+    });
+    const { container, findByText } = render(
+      <AsciiViewer totalBytes={2 * 1024 * 1024} autoScroll={true} lineWrap={true} />
+    );
+    await findByText('latest suffix');
+    const spacer = container.querySelector('.ascii-scroll-container > div') as HTMLElement;
+    expect(spacer.style.justifyContent).toBe('flex-end');
   });
 
   it.each([false, true])(

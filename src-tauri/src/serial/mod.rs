@@ -464,105 +464,7 @@ pub fn get_ascii_lines(
     let store_guard = state.data_store.lock().map_err(|e| e.to_string())?;
 
     if let Some(ref data_store) = *store_guard {
-        let total_bytes = data_store.total_bytes();
-        if total_bytes == 0 {
-            return Ok(AsciiLinesPayload {
-                lines: vec![],
-                total_lines: 0,
-                start_line: 0,
-                reaches_end: true,
-            });
-        }
-
-        // Phase 2: line_index is now updated by Worker Thread in real-time
-        // No need to call update_line_index here
-
-        let total_lines = data_store.total_lines();
-
-        if total_lines == 0 {
-            return Ok(AsciiLinesPayload {
-                lines: vec![],
-                total_lines: 0,
-                start_line: 0,
-                reaches_end: true,
-            });
-        }
-
-        let start_line = clamp_start_line(start_line, line_count, total_lines);
-
-        // Get line offsets for requested range
-        let line_offsets = data_store.get_line_offsets(start_line, line_count);
-        let reaches_end = start_line + line_offsets.len() as u64 >= total_lines;
-
-        if line_offsets.is_empty() {
-            return Ok(AsciiLinesPayload {
-                lines: vec![],
-                total_lines,
-                start_line,
-                reaches_end,
-            });
-        }
-
-        // Phase 1 optimization: Batch fetch all lines data at once instead of per-line
-        let first_offset = line_offsets[0].0;
-        let last_end = line_offsets.last().unwrap().1;
-        // Use saturating_sub to prevent overflow when data changes during fetch
-        let batch_length = last_end.saturating_sub(first_offset).min(1024 * 1024) as u32; // Cap at 1MB
-
-        // Early return if batch_length is 0 (race condition: data changed)
-        if batch_length == 0 {
-            return Ok(AsciiLinesPayload {
-                lines: vec![],
-                total_lines,
-                start_line,
-                reaches_end,
-            });
-        }
-
-        // Single batch fetch
-        let batch_data = match data_store.get_data(first_offset, batch_length) {
-            Ok(data) => data,
-            Err(_) => {
-                // Fallback: if batch fails, return empty
-                return Ok(AsciiLinesPayload {
-                    lines: vec![],
-                    total_lines,
-                    start_line,
-                    reaches_end,
-                });
-            }
-        };
-
-        // Extract each line from batch data
-        let mut lines = Vec::with_capacity(line_offsets.len());
-        for (line_start, line_end) in line_offsets {
-            let local_start = (line_start - first_offset) as usize;
-            let local_end =
-                ((line_end - first_offset).min(batch_length as u64) as usize).min(batch_data.len());
-
-            if local_start < batch_data.len() && local_start <= local_end {
-                let line_data = &batch_data[local_start..local_end];
-                let text = bytes_to_ascii(line_data);
-
-                // Get timestamp from timestamp_index using binary search
-                let timestamp = show_timestamp.then(|| {
-                    format_line_timestamp(data_store.get_timestamp_for_offset(line_start))
-                });
-
-                lines.push(AsciiLine {
-                    offset: line_start,
-                    text,
-                    timestamp,
-                });
-            }
-        }
-
-        Ok(AsciiLinesPayload {
-            lines,
-            total_lines,
-            start_line,
-            reaches_end,
-        })
+        ascii_lines_for_store(data_store, start_line, line_count, show_timestamp)
     } else {
         Ok(AsciiLinesPayload {
             lines: vec![],
@@ -571,6 +473,118 @@ pub fn get_ascii_lines(
             reaches_end: true,
         })
     }
+}
+
+fn ascii_lines_for_store(
+    data_store: &DataStore,
+    start_line: u64,
+    line_count: u32,
+    show_timestamp: bool,
+) -> Result<AsciiLinesPayload, String> {
+    let total_bytes = data_store.total_bytes();
+    if total_bytes == 0 {
+        return Ok(AsciiLinesPayload {
+            lines: vec![],
+            total_lines: 0,
+            start_line: 0,
+            reaches_end: true,
+        });
+    }
+
+    // Phase 2: line_index is now updated by Worker Thread in real-time
+    // No need to call update_line_index here
+
+    let total_lines = data_store.total_lines();
+
+    if total_lines == 0 {
+        return Ok(AsciiLinesPayload {
+            lines: vec![],
+            total_lines: 0,
+            start_line: 0,
+            reaches_end: true,
+        });
+    }
+
+    // Preserve an explicit head request, even when the whole capture is one
+    // very long line. Only a past-end request asks for the newest bytes.
+    let tail_requested = start_line != 0 && start_line >= total_lines;
+    let mut start_line = clamp_start_line(start_line, line_count, total_lines);
+
+    // Get line offsets for requested range
+    let line_offsets = data_store.get_line_offsets(start_line, line_count);
+    let reaches_end = start_line + line_offsets.len() as u64 >= total_lines;
+
+    if line_offsets.is_empty() {
+        return Ok(AsciiLinesPayload {
+            lines: vec![],
+            total_lines,
+            start_line,
+            reaches_end,
+        });
+    }
+
+    // Phase 1 optimization: Batch fetch all lines data at once instead of per-line
+    let block_first_offset = line_offsets[0].0;
+    let last_end = line_offsets.last().unwrap().1;
+    const MAX_ASCII_BATCH: u64 = 1024 * 1024;
+    let first_offset = if tail_requested {
+        block_first_offset.max(last_end.saturating_sub(MAX_ASCII_BATCH))
+    } else {
+        block_first_offset
+    };
+    let batch_length = last_end.saturating_sub(first_offset).min(MAX_ASCII_BATCH) as u32;
+    let batch_end = first_offset + batch_length as u64;
+    // The cap must not claim that an explicit head block reaches the tail.
+    let reaches_end = reaches_end && batch_end >= last_end;
+
+    // Early return if batch_length is 0 (race condition: data changed)
+    if batch_length == 0 {
+        return Ok(AsciiLinesPayload {
+            lines: vec![],
+            total_lines,
+            start_line,
+            reaches_end,
+        });
+    }
+
+    // Single batch fetch
+    let batch_data = data_store.get_data(first_offset, batch_length)?;
+
+    // Extract each line from batch data
+    let mut lines = Vec::with_capacity(line_offsets.len());
+    for (relative_line, (line_start, line_end)) in line_offsets.into_iter().enumerate() {
+        if line_end <= first_offset || line_start >= batch_end {
+            continue;
+        }
+        let served_start = line_start.max(first_offset);
+        let local_start = (served_start - first_offset) as usize;
+        let local_end = (line_end.min(batch_end) - first_offset) as usize;
+
+        if local_start < batch_data.len() && local_start <= local_end {
+            let line_data = &batch_data[local_start..local_end];
+            let text = bytes_to_ascii(line_data);
+            if lines.is_empty() {
+                start_line += relative_line as u64;
+            }
+
+            // Get timestamp from timestamp_index using binary search
+            let timestamp = show_timestamp
+                .then(|| format_line_timestamp(data_store.get_timestamp_for_offset(line_start)));
+
+            lines.push(AsciiLine {
+                offset: served_start,
+                text,
+                timestamp,
+            });
+        }
+    }
+
+    Ok(AsciiLinesPayload {
+        lines,
+        total_lines,
+        start_line,
+        reaches_end,
+    })
 }
 
 #[tauri::command]
@@ -928,6 +942,80 @@ mod tests {
         // Fewer lines than requested: everything from line 0
         assert_eq!(clamp_start_line(u64::MAX, 50, 20), 0);
         assert_eq!(clamp_start_line(0, 50, 0), 0);
+    }
+
+    #[test]
+    fn ascii_tail_of_an_oversized_unterminated_line_contains_the_latest_reply() {
+        const CAP: usize = 1024 * 1024;
+        let store = DataStore::new().unwrap();
+        let mut bytes = vec![b'x'; CAP + 50];
+        bytes.extend_from_slice(b"latest reply\r");
+        store.push_test_data(&bytes);
+
+        let head = ascii_lines_for_store(&store, 0, 100, false).unwrap();
+        assert_eq!(head.start_line, 0);
+        assert_eq!(head.lines[0].offset, 0);
+        assert_eq!(head.lines[0].text.len(), CAP);
+        assert!(!head.reaches_end);
+
+        let tail = ascii_lines_for_store(&store, u64::MAX, 100, false).unwrap();
+        assert_eq!(tail.start_line, 0);
+        assert_eq!(tail.lines.len(), 1);
+        assert_eq!(tail.lines[0].offset, (bytes.len() - CAP) as u64);
+        assert!(tail.lines[0].text.ends_with("latest reply␍"));
+        assert!(tail.reaches_end);
+        assert_eq!(store.get_data(0, bytes.len() as u32).unwrap(), bytes);
+    }
+
+    #[test]
+    fn ascii_capped_long_rows_report_the_rows_and_end_actually_served() {
+        let store = DataStore::new().unwrap();
+        let row_len = 600_000;
+        for &byte in b"abc" {
+            let mut row = vec![byte; row_len - 1];
+            row.push(b'\n');
+            store.push_test_data(&row);
+            store.push_test_line_start(store.total_bytes());
+        }
+        let head = ascii_lines_for_store(&store, 0, 100, false).unwrap();
+        assert_eq!(head.start_line, 0);
+        assert_eq!(head.lines.len(), 2);
+        assert!(head.lines[0].text.starts_with('a'));
+        assert!(!head.reaches_end);
+
+        let tail = ascii_lines_for_store(&store, u64::MAX, 100, false).unwrap();
+        assert_eq!(tail.start_line, 1);
+        assert_eq!(tail.lines.len(), 2);
+        assert!(tail.lines[0].text.starts_with('b'));
+        assert_eq!(tail.lines[1].offset, 2 * row_len as u64);
+        assert!(tail.lines[1].text.starts_with('c'));
+        assert!(tail.lines[1].text.ends_with('␊'));
+        assert!(tail.reaches_end);
+        let served_bytes: u64 = tail
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let end = tail
+                    .lines
+                    .get(i + 1)
+                    .map_or(store.total_bytes(), |next| next.offset);
+                end - line.offset
+            })
+            .sum();
+        assert_eq!(served_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn ascii_unterminated_and_cr_only_replies_are_visible() {
+        let store = DataStore::new().unwrap();
+        store.push_test_data(b"OK");
+        let reply = ascii_lines_for_store(&store, u64::MAX, 20, false).unwrap();
+        assert_eq!(reply.lines[0].text, "OK");
+        store.push_test_data(b"\r");
+        let reply = ascii_lines_for_store(&store, u64::MAX, 20, false).unwrap();
+        assert_eq!(reply.lines[0].text, "OK␍");
+        assert!(reply.reaches_end);
     }
 
     #[test]

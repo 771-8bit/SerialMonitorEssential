@@ -263,17 +263,29 @@ impl DataStore {
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
 
+        // Snapshot memory FIRST. The logger publishes a page before removing its
+        // chunk, so a later archive lookup plus these retained Arcs always covers
+        // the migration. Looking at archives first can miss a chunk in both places.
+        let end = offset.saturating_add(length as u64);
+        let chunks = self
+            .finished_list
+            .read()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .skip_while(|chunk| chunk.global_offset() + chunk.len() as u64 <= offset)
+            .take_while(|chunk| chunk.global_offset() < end)
+            .cloned()
+            .collect::<Vec<_>>();
         let length = length as usize;
         let mut result = Vec::with_capacity(length);
         let mut current_offset = offset;
         let mut remaining = length;
 
-        // Debug: Log the state of archived_index and finished_list
-        let archived_count = self.archived_index.read().map(|i| i.len()).unwrap_or(0);
-        let finished_count = self.finished_list.read().map(|l| l.len()).unwrap_or(0);
         debug!(
-            "[get_data] offset={}, length={}, archived_pages={}, finished_chunks={}",
-            offset, length, archived_count, finished_count
+            "[get_data] offset={}, length={}, retained_chunks={}",
+            offset,
+            length,
+            chunks.len()
         );
 
         // 1. まずディスク上（archived_index）を検索 - 確定済みデータ
@@ -295,7 +307,7 @@ impl DataStore {
                 let page_start = page.global_offset;
 
                 // 最適化: 要求範囲を超えたら検索終了
-                if page_start >= offset + length as u64 {
+                if page_start >= end {
                     break;
                 }
 
@@ -340,38 +352,10 @@ impl DataStore {
             }
         }
 
-        // 2. 次にメモリ上（finished_list）を検索 - 最新データ
-        if let Ok(list) = self.finished_list.read() {
-            // finished_listは短い前提だが、念のため最適化
-            for chunk in list.iter() {
-                let chunk_start = chunk.global_offset();
-
-                // 最適化: 要求範囲を超えたら検索終了
-                if chunk_start >= offset + length as u64 {
-                    break;
-                }
-
-                let chunk_end = chunk_start + chunk.len() as u64;
-
-                // このチャンクに要求範囲が含まれるか
-                if current_offset < chunk_end && chunk_start < current_offset + remaining as u64 {
-                    // current_offset がこのチャンク内にあるか確認
-                    if current_offset >= chunk_start {
-                        let chunk_offset = (current_offset - chunk_start) as usize;
-                        let to_read = remaining.min(chunk.len() - chunk_offset);
-                        let data = chunk.data();
-                        result.extend_from_slice(&data[chunk_offset..chunk_offset + to_read]);
-
-                        current_offset += to_read as u64;
-                        remaining -= to_read;
-
-                        if remaining == 0 {
-                            return Ok(result);
-                        }
-                    }
-                }
-            }
-        }
+        // 2. Read the retained memory selection, even if the logger has removed
+        // those chunks from finished_list since the archive lookup.
+        remaining -=
+            Self::append_finished_snapshot(&chunks, current_offset, remaining, &mut result);
 
         // 要求されたデータがすべて読み取れなかった場合はエラー
         if remaining > 0 {
@@ -386,23 +370,59 @@ impl DataStore {
         Ok(result)
     }
 
+    fn append_finished_snapshot(
+        chunks: &[Arc<Chunk>],
+        offset: u64,
+        length: usize,
+        result: &mut Vec<u8>,
+    ) -> usize {
+        let mut current_offset = offset;
+        for chunk in chunks {
+            let chunk_start = chunk.global_offset();
+            let chunk_end = chunk_start + chunk.len() as u64;
+            if current_offset < chunk_start || current_offset >= chunk_end {
+                continue;
+            }
+            let local_start = (current_offset - chunk_start) as usize;
+            let remaining = length - (current_offset - offset) as usize;
+            let count = remaining.min(chunk.len() - local_start);
+            result.extend_from_slice(&chunk.data()[local_start..local_start + count]);
+            current_offset += count as u64;
+            if count == remaining {
+                break;
+            }
+        }
+        (current_offset - offset) as usize
+    }
+
     /// 受信済み総バイト数を取得
     pub fn total_bytes(&self) -> u64 {
-        let mut total = 0u64;
+        // Observe memory before archives for the same migration guarantee as
+        // get_data. A chunk removed after this read is either retained here or
+        // already published in the subsequent archive observation.
+        let finished_end = self
+            .finished_list
+            .read()
+            .ok()
+            .and_then(|list| {
+                list.back()
+                    .map(|chunk| chunk.global_offset() + chunk.len() as u64)
+            })
+            .unwrap_or(0);
+        self.total_bytes_with_finished_end(finished_end)
+    }
+
+    fn total_bytes_with_finished_end(&self, finished_end: u64) -> u64 {
+        let mut total = finished_end;
 
         // archived_indexから取得
         if let Ok(index) = self.archived_index.read() {
-            total = index
-                .last()
-                .map(|p| p.global_offset + p.data_length as u64)
-                .unwrap_or(0);
-        }
-
-        // finished_listの最後のチャンクから取得（より新しい）
-        if let Ok(list) = self.finished_list.read() {
-            if let Some(last_chunk) = list.back() {
-                total = last_chunk.global_offset() + last_chunk.len() as u64;
-            }
+            total = total.max(
+                index
+                    .last()
+                    .map(|p| p.global_offset + p.data_length as u64)
+                    .unwrap_or(0),
+            );
         }
 
         total
@@ -415,6 +435,11 @@ impl DataStore {
     #[cfg(test)]
     pub fn push_test_data(&self, data: &[u8]) {
         self.push_test_data_at(self.total_bytes(), data);
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_test_line_start(&self, offset: u64) {
+        self.line_index.write().unwrap().push(offset);
     }
 
     /// 受信データ全体を、各行の先頭にタイムスタンプと区切りを付けて書き出す（issue #4）
@@ -1013,6 +1038,69 @@ mod tests {
 
         // クリーンアップ
         let _ = fs::remove_dir_all(&store.temp_dir);
+    }
+
+    #[test]
+    fn migration_between_archive_and_memory_reads_keeps_the_snapshot_readable() {
+        let store = create_test_data_store();
+        store.push_test_data(b"before-");
+        store.push_test_data(b"after");
+        let chunks: Vec<_> = store
+            .finished_list
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let path = store.temp_dir.join("migration.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // Retain memory as get_data does, then migrate everything before reading
+        // the retained selection. This is the former disk/memory race boundary.
+        logger_thread::process_buffer(
+            &store.finished_list,
+            &store.archived_index,
+            Some(&mut file),
+            &path,
+            true,
+        )
+        .unwrap();
+        assert!(store.finished_list.read().unwrap().is_empty());
+        let mut data = Vec::new();
+        assert_eq!(
+            DataStore::append_finished_snapshot(&chunks, 3, 8, &mut data),
+            8
+        );
+        assert_eq!(data, b"ore-afte");
+        assert_eq!(store.get_data(0, 12).unwrap(), b"before-after");
+    }
+
+    #[test]
+    fn migration_after_memory_count_does_not_reduce_total_bytes() {
+        let store = create_test_data_store();
+        store.push_test_data(b"before-after");
+        let finished_end = store
+            .finished_list
+            .read()
+            .unwrap()
+            .back()
+            .map(|chunk| chunk.global_offset() + chunk.len() as u64)
+            .unwrap();
+        let path = store.temp_dir.join("migration-count.bin");
+        let mut file = std::fs::File::create(&path).unwrap();
+        logger_thread::process_buffer(
+            &store.finished_list,
+            &store.archived_index,
+            Some(&mut file),
+            &path,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(store.total_bytes_with_finished_end(finished_end), 12);
+        assert_eq!(store.total_bytes(), 12);
+        // Conversely a snapshot taken with no memory must see archived bytes.
+        assert_eq!(store.total_bytes_with_finished_end(0), 12);
     }
 
     /// archived_indexにデータがあり、finished_listにもデータがある場合、

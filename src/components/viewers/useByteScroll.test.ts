@@ -60,6 +60,45 @@ describe('useByteScroll', () => {
     expect(result.current.scrollTop).toBe(mockContainer.scrollTop);
   });
 
+  it('pauses following on user scroll, ignores programmatic echoes, and resumes at the bottom or on toggle', () => {
+    const props = { ...defaultProps, autoScroll: true, totalRows: 200 };
+    const { result, rerender } = renderHook((current) => useByteScroll(current), {
+      initialProps: props,
+    });
+    const container = document.createElement('div');
+    Object.defineProperty(container, 'clientHeight', { value: 400 });
+    let actualHeight = 4000;
+    Object.defineProperty(container, 'scrollHeight', { get: () => actualHeight });
+    (result.current.containerRef as React.MutableRefObject<HTMLDivElement | null>).current =
+      container;
+    const scroll = (top: number) =>
+      act(() => {
+        container.scrollTop = top;
+        result.current.handleScroll({
+          currentTarget: container,
+        } as unknown as React.UIEvent<HTMLDivElement>);
+      });
+    rerender({ ...props, totalBytes: 2000 });
+    scroll(3600);
+    expect(result.current.isFollowingTail).toBe(true);
+    scroll(1000);
+    expect(result.current.isFollowingTail).toBe(false);
+    // A second event inside the notification throttle still updates the anchor.
+    scroll(0);
+    expect(result.current.isFollowingTail).toBe(false);
+    actualHeight = 6000;
+    rerender({ ...props, totalBytes: 3000, totalRows: 300 });
+    expect(container.scrollTop).toBe(0);
+    scroll(5600);
+    expect(result.current.isFollowingTail).toBe(true);
+    scroll(0);
+    expect(result.current.isFollowingTail).toBe(false);
+    rerender({ ...props, autoScroll: false, totalBytes: 3000, totalRows: 300 });
+    rerender({ ...props, autoScroll: true, totalBytes: 3000, totalRows: 300 });
+    expect(result.current.isFollowingTail).toBe(true);
+    expect(container.scrollTop).toBe(5600);
+  });
+
   it('anchors position when data grows and not auto-scrolling', () => {
     const { result, rerender } = renderHook((props) => useByteScroll(props), {
       initialProps: { ...defaultProps, totalBytes: 16000 }, // 1000 rows, 20000px

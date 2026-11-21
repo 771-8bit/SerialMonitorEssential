@@ -31,6 +31,8 @@ interface UseByteScrollReturn {
   visibleRows: number;
   /** Height of the scroll viewport in px (0 until measured) */
   viewportHeight: number;
+  /** Auto Scroll is enabled and the user has not scrolled away from the tail. */
+  isFollowingTail: boolean;
 
   // Handlers
   handleScroll: (e: React.UIEvent<HTMLDivElement>) => void;
@@ -51,10 +53,18 @@ export function useByteScroll({
   const [scrollTop, setScrollTop] = useState(0);
   const [visibleRows, setVisibleRows] = useState(25);
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [tailPaused, setTailPaused] = useState(false);
+  const [previousAutoScroll, setPreviousAutoScroll] = useState(autoScroll);
+  // Explicit toggles and a new capture reset a user's temporary pause before
+  // effects choose a fetch/scroll target for this render.
+  if (previousAutoScroll !== autoScroll || (totalBytes === 0 && tailPaused)) {
+    setPreviousAutoScroll(autoScroll);
+    setTailPaused(false);
+  }
+  const isFollowingTail = autoScroll && !tailPaused;
 
   // Refs for preventing re-render loops and managing scroll anchoring
   const lastUpdateRef = useRef(0);
-  const isAutoScrollingRef = useRef(false);
   const initialOffsetAppliedRef = useRef(false);
   const lastTotalBytesRef = useRef(0); // Added missing ref
   // Anchor tracking
@@ -144,7 +154,7 @@ export function useByteScroll({
       onScrollChange(0);
     }
     // If not auto-scrolling...
-    if (!autoScroll && containerRef.current) {
+    if (!isFollowingTail && containerRef.current) {
       // Check if geometry changed significantly (Bytes grew OR Height changed due to new TotalLines)
       const bytesChanged = totalBytes > prevTotalBytesRef.current;
       const heightChanged = Math.abs(scrollHeight - prevScrollHeightRef.current) > 1;
@@ -175,7 +185,14 @@ export function useByteScroll({
     prevScrollHeightRef.current = scrollHeight;
     // NOTE: We do NOT update anchorPositionRef here. We trust our previous anchor.
     // Only USER interaction should update the anchor.
-  }, [totalBytes, scrollHeight, autoScroll, totalRows, getScrollTopFromAnchor, onScrollChange]);
+  }, [
+    totalBytes,
+    scrollHeight,
+    isFollowingTail,
+    totalRows,
+    getScrollTopFromAnchor,
+    onScrollChange,
+  ]);
 
   // Handle initial offset on mount (manual mode only)
   useLayoutEffect(() => {
@@ -217,19 +234,17 @@ export function useByteScroll({
     const hasRevealedContent = scrollHeight > lastScrollHeightRef.current;
     // Jump to the bottom immediately when Auto Scroll is switched ON
     // (not only when the next data arrives)
-    const justEnabled = autoScroll && !prevAutoScrollRef.current;
-    prevAutoScrollRef.current = autoScroll;
+    const justEnabled = isFollowingTail && !prevAutoScrollRef.current;
+    prevAutoScrollRef.current = isFollowingTail;
 
     if (
-      autoScroll &&
+      isFollowingTail &&
       totalBytes > 0 &&
       containerRef.current &&
       (hasNewData || hasRevealedContent || justEnabled)
     ) {
       lastTotalBytesRef.current = totalBytes;
       lastScrollHeightRef.current = scrollHeight;
-
-      isAutoScrollingRef.current = true;
 
       const viewportHeight = containerRef.current.clientHeight;
       const bottomByteOffset = calculateBottomByteOffset(totalBytes, viewportHeight, scrollHeight);
@@ -241,24 +256,20 @@ export function useByteScroll({
 
       // Update anchor to bottom
       anchorPositionRef.current = getLogicalPosition(targetScrollTop);
-
-      requestAnimationFrame(() => {
-        isAutoScrollingRef.current = false;
-      });
     }
     // Update tracker if not autoscrolling or if conditions met
     // (We always want to track the latest known size to detect Next Growth)
     lastTotalBytesRef.current = totalBytes;
     lastScrollHeightRef.current = scrollHeight;
-  }, [autoScroll, totalBytes, scrollHeight, getLogicalPosition]);
+  }, [isFollowingTail, totalBytes, scrollHeight, getLogicalPosition]);
 
   // Hook to capture anchor when AutoScroll stops (Manual Stop or Toggle Off)
   useEffect(() => {
-    if (!autoScroll && containerRef.current) {
+    if (!isFollowingTail && containerRef.current) {
       // User just stopped auto-scroll. Lock to current position.
       anchorPositionRef.current = getLogicalPosition(containerRef.current.scrollTop);
     }
-  }, [autoScroll, getLogicalPosition]);
+  }, [isFollowingTail, getLogicalPosition]);
 
   // Handle user scroll
   const handleScroll = useCallback(
@@ -274,14 +285,21 @@ export function useByteScroll({
         lastProgrammaticScrollTopRef.current = null;
       }
 
-      if (isAutoScrollingRef.current) return;
+      // Programmatic echoes above must not pause following. A deliberate scroll
+      // away from the actual bottom does, until the user returns or toggles it.
+      if (autoScroll) {
+        const el = e.currentTarget;
+        const actualHeight = el.scrollHeight || scrollHeight;
+        setTailPaused(newScrollTop < actualHeight - el.clientHeight - 1);
+      }
+
+      // Keep the anchor current even when parent notifications are throttled:
+      // incoming data must not restore an earlier point during a fast drag.
+      anchorPositionRef.current = getLogicalPosition(newScrollTop);
 
       const now = Date.now();
       if (now - lastUpdateRef.current < THROTTLE_MS) return;
       lastUpdateRef.current = now;
-
-      // Update Anchor using our Logical Unit (Row or Byte)
-      anchorPositionRef.current = getLogicalPosition(newScrollTop);
 
       // Report byte offset to parent (Always Bytes for sync)
       const byteOffset = scrollTopToByteOffset(newScrollTop, scrollHeight, totalBytes);
@@ -301,7 +319,7 @@ export function useByteScroll({
         }
       }, THROTTLE_MS + 10);
     },
-    [scrollHeight, totalBytes, onScrollChange, getLogicalPosition]
+    [autoScroll, scrollHeight, totalBytes, onScrollChange, getLogicalPosition]
   );
 
   // Get current byte offset
@@ -359,6 +377,7 @@ export function useByteScroll({
     scrollHeight,
     visibleRows,
     viewportHeight,
+    isFollowingTail,
     handleScroll,
     getByteOffset,
     scrollTo,
